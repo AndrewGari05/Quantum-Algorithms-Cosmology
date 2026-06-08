@@ -1,8 +1,7 @@
-# Quantum-Classical Cosmological Parameter Estimation for Flat ΛCDM
+# Quantum-Classical Cosmological Parameter Estimation
 
 > **Undergraduate Thesis — Engineering Physics**  
-> Universidad Iberoamericana Ciudad de México (IBERO)  
-> *"Late-time cosmic acceleration driven by curvature variation"*  
+> Universidad Iberoamericana Ciudad de México (IBERO)   
 > Advisor: Dr. García Aspeitia
 
 This repository implements and compares **classical and quantum Bayesian parameter estimation** methods applied to the flat ΛCDM cosmological model. The parameters of interest are the matter density parameter Ω_m and the Hubble constant H₀, constrained against two observational datasets: Cosmic Chronometers (CC) and Pantheon+ Type Ia Supernovae.
