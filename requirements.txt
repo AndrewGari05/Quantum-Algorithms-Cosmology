@@ -1,0 +1,15 @@
+# Core scientific stack
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+tqdm>=4.65
+
+# Quantum computing
+qiskit>=1.0
+qiskit-aer>=0.13
+
+# Optional — corner plots for posterior visualization
+corner>=2.2
+
+# IBM Quantum (optional — only needed for real hardware runs)
+# qiskit-ibm-runtime>=0.20

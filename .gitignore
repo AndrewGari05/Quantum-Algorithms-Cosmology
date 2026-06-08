@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.png
+*.pdf
+*.csv
+*.log
+*:Zone.Identifier
+.env
+.venv
+pantheon_full_parameters.txt
+pantheon_full_csys.txt
+.qiskitrc
+*.token
+slurm-*.out
