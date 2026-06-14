@@ -1,6 +1,4 @@
 # =============================================================================
-# ΛCDM Parameter Estimation — Sampler Modular Cuántico/Clásico
-# =============================================================================
 #
 # Permite al usuario elegir qué componentes correr de forma cuántica o clásica:
 #
