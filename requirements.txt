@@ -1,15 +1,8 @@
-# Core scientific stack
 numpy>=1.24
 scipy>=1.10
 matplotlib>=3.7
+corner>=2.2               # overlaid corner plots (2D contours + 1D marginals)
+qiskit>=1.2
+qiskit-aer>=0.15          # cosmo_modular_quantum.py only (simulator)
+qiskit-ibm-runtime>=0.30  # qpu_cosmo_samplers.py only (real hardware)
 tqdm>=4.65
-
-# Quantum computing
-qiskit>=1.0
-qiskit-aer>=0.13
-
-# Optional — corner plots for posterior visualization
-corner>=2.2
-
-# IBM Quantum (optional — only needed for real hardware runs)
-# qiskit-ibm-runtime>=0.20

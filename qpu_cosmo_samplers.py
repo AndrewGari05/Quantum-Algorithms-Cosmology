@@ -457,18 +457,21 @@ def build_ansatz(n_qubits: int, n_layers: int = 3) -> QuantumCircuit:
 # =============================================================================
 
 def metropolis_log_accept(lp_cur: float, lp_prop: float) -> float:
-    """Classical log P(accept), analytically equal to the Hadamard test.
+    """Log Metropolis acceptance log min(1, e^D), D = lp_prop - lp_cur.
 
-    The Hadamard circuit with alpha = 2·arctan(e^{D/2}) yields
-    P(ancilla=0) = e^D/(1+e^D) (Barker rule). [QPU] On hardware it does
-    NOT run by default: the chain is sequential and would cost one job
-    with its full queue wait PER STEP. This function reproduces the exact
-    same number, so the stationary distribution is identical.
+    [QPU] The Metropolis acceptance is sequential (step t depends on t-1),
+    so on hardware it would cost one job + a full queue wait PER STEP. We
+    therefore evaluate it on the CPU. It uses the SAME rule as the
+    simulator's quantum acceptance (`hadamard_accept_log` in
+    cosmo_modular_quantum), which encodes min(1, e^D) as a state
+    amplitude, so the two pipelines are directly comparable. (Earlier this
+    returned the Barker rule log sigmoid(D); switched to Metropolis for
+    cross-pipeline consistency.)
     """
     if not np.isfinite(lp_prop):
         return -np.inf
-    delta = np.clip(lp_prop - lp_cur, -700, 700)
-    return float(delta - np.logaddexp(0.0, delta))   # log sigmoid(D)
+    delta = lp_prop - lp_cur
+    return float(min(0.0, delta))   # log min(1, e^D)
 
 
 class GridEncoding:
