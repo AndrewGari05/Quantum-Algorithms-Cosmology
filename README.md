@@ -1,167 +1,356 @@
 # Quantum Algorithms for Cosmology — Classical vs Quantum Bayesian Inference
 
-Hybrid quantum/classical pipeline to estimate cosmological parameters
-(Ωm, H0, w, w0, wa, Δ) from Cosmic Chronometers (CC) and Pantheon+
-supernovae, with QMCMC (Sarracino et al. 2025) and QVMC methods over five
-models: **ΛCDM, wCDM, CPL, PEDE and GEDE**.
+A toolkit that fits cosmological models (ΛCDM, wCDM, CPL, PEDE, GEDE) to
+real data (cosmic chronometers, Pantheon+ supernovae) using **classical**
+and **quantum** sampling algorithms, and compares them head to head.
+
+This README has two parts:
+
+* **Part 1 — Plain-language guide.** No physics or quantum background
+  needed. Start here.
+* **Part 2 — Technical reference.** The academic detail: math, code
+  architecture, algorithms, hardware, and diagnostics.
 
 ---
+---
 
-## Architecture (3 + 1 files)
+# Part 1 — Plain-language guide
+
+## What is this, in one paragraph?
+
+Cosmologists have measurements of how fast the Universe has expanded over
+time. From those measurements they want to estimate a few numbers — for
+example how much matter the Universe contains (Ωm) and how fast it is
+expanding today (H0). There is no single "correct answer" you can read off
+directly; instead you explore many possible combinations and keep the ones
+that fit the data well. This project does that exploration in two different
+ways — the **classical** way (ordinary computer algorithms) and the
+**quantum** way (algorithms that use quantum circuits) — and checks whether
+they give the same answer.
+
+## A simple analogy
+
+Imagine you lost your keys in a dark park and you're feeling around for
+them.
+
+* **MCMC** is "take a step, check if the ground feels more key-like, and
+  wander toward the better spots." Do that long enough and you map out
+  where the keys probably are.
+* **VI (variational inference)** is "guess a simple shape for where the
+  keys are (say, a circle), then keep adjusting that shape until it best
+  matches what you feel."
+
+This project has a **quantum version of each**:
+
+* **QMCMC** — the same wandering search, but the *direction of each step*
+  is suggested by a quantum circuit.
+* **QVMC** — the same shape-fitting, but the *shape itself* is produced by
+  a quantum circuit.
+
+The whole point of the thesis is to ask: **do the quantum versions land in
+the same place as the classical ones?** If yes, that's a meaningful result
+— it shows these quantum methods faithfully reproduce trusted classical
+results.
+
+## What does "quantumness %" mean?
+
+Each method is built from swappable parts. You can run each part on a
+normal computer ("classical") or on a quantum circuit ("quantum"). The
+**quantumness %** is simply *how many of the parts are running on the
+quantum circuit*, from 0% (all classical) to 100% (all quantum).
+
+There are **two separate dials**, one per method, because the two methods
+are made of different parts:
+
+```
+QMCMC dial:  0%  →  44% (quantum step direction)  →  100% (quantum accept/reject)
+QVMC  dial:  0%  →  46% (quantum draw)  →  82% (quantum fitting)  →  100% (quantum normalize)
+```
+
+Turning a dial up adds one more quantum part. That's it.
+
+## The one thing that surprises everyone
+
+When you turn a dial up, **sometimes the answer changes and sometimes it
+stays exactly the same** — and that is *expected*, not a bug:
+
+* Some quantum parts are genuinely new algorithms, so they change the
+  answer (the quantum *step direction* in QMCMC; the quantum *fitting* in
+  QVMC).
+* Other quantum parts are quantum *re-implementations of the exact same
+  rule* the classical computer uses. Those give an identical answer **on
+  purpose** — that identity is the proof that "the quantum version
+  reproduces the classical one."
+
+So when two neighboring dial settings look identical, that's the project
+succeeding at its goal, not failing.
+
+## How to run it
+
+Install once:
+
+```bash
+pip install -r requirements.txt
+```
+
+Then run it and follow the menu:
+
+```bash
+python cosmo_modular_quantum.py
+```
+
+The menu asks three things:
+
+1. **Run mode** — pick **Quick Test Run** the first time (fast, exercises
+   everything), **Benchmark** for a full comparison, or **Single
+   configuration** to run one specific setup.
+2. **Which model and data** — defaults (ΛCDM, cosmic chronometers) are
+   fine to start.
+3. **Sizes** — how long to run (bigger = more accurate, slower). Defaults
+   are sensible.
+
+It then produces a set of **pictures** in the output folder.
+
+There is also a **global optimizer** that hunts for the single best-fit point
+(the MAP) using genetic algorithms — classical (CGA) and quantum (QGA) — with
+a live animation of the population converging:
+
+```bash
+python cosmo_genetic_optimizers.py
+```
+
+Every run now saves its pictures, log and results table into its own
+timestamped folder, `results/run_<date>_<model>/`, so different runs never
+overwrite or mix.
+
+## How to read the pictures
+
+* **Corner plots** (`corner_ladder_*`) — estimated values and their
+  uncertainty. Each blob/contour is one method at one dial setting. **If
+  the blobs sit on top of each other, the methods agree.** Dashed lines
+  mark the reference ("Planck") values.
+* **Convergence curve** (`ladder_rhat_*`) — whether the wandering search
+  has "settled down." Lower is better; below the dashed line means
+  "settled."
+* **Training curve** (`ladder_kl_*`) — the shape-fitting getting better
+  over time. Lower is a better fit.
+* **Summary table** (`ladder_summary_*`) — the final numbers for every
+  dial setting, side by side.
+
+## The headline result (default model)
+
+Both quantum methods land on the **same answer** as the classical ones:
+Ωm ≈ 0.26 (about a quarter of the Universe is matter) and H0 ≈ 70 (the
+expansion-rate number). The quantum methods reproduce the classical
+results — exactly what you want to demonstrate.
+
+## A quick sanity button
+
+If you ever doubt whether a "quantum" run really used the quantum circuit:
+
+```bash
+python cosmo_modular_quantum.py --sanity-check
+```
+
+It prints a table of which parts ran on the quantum circuit (⚛) vs a
+normal computer (🖥), plus a self-test that the accept/reject rule behaves
+correctly.
+
+---
+---
+
+# Part 2 — Technical reference
+
+## Architecture (4 files + shared core)
 
 ```
 cosmo_core.py               ← PHYSICS + DATA + STATISTICS (shared)
-        ▲                ▲
-        │                │
-cosmo_modular_quantum.py   qpu_cosmo_samplers.py
-(Aer simulator,            (real IBM Quantum hardware,
- quantumness benchmark)     SamplerV2, no Aer)
+        ▲            ▲              ▲
+        │            │              │
+cosmo_modular_   qpu_cosmo_     cosmo_genetic_
+quantum.py       samplers.py    optimizers.py
+(Aer simulator,  (real IBM      (CGA/QGA global
+ quantumness      Quantum HW,    optimization for
+ benchmark)       SamplerV2)     the MAP + live GUI)
 ```
 
-### 1. `cosmo_core.py` — shared physics module
+All executable scripts share the SAME physics through `cosmo_core.py` and
+write their outputs into a **timestamped run folder**
+`results/run_<YYYYMMDD_HHMMSS>_<model>/` (figures, log and a per-run
+`resultados_config.csv`), so results from different runs never mix. Pass an
+explicit `--outdir` to override. A cumulative `resultados_config.csv` is also
+kept in the working directory to compare methods across runs.
 
-Strict physics ↔ sampling separation. Contains:
+### `cosmo_core.py` — shared physics module
 
-* **`CosmoModel`** (dataclass): name, parameters, bounds, fiducials and
-  the Friedmann function `E2(z, θ)`. The `MODELS` registry exposes
-  `lcdm`, `wcdm`, `cpl`, `pede`, `gede`. **Injecting a new model (e.g.
-  VC) = adding one entry to the dictionary**; no sampler needs changes.
-* **`Posterior`**: single point of contact for the samplers. CC
+Strict physics ↔ sampling separation:
+
+* **`CosmoModel`** (dataclass) — name, parameters, bounds, fiducials and
+  the Friedmann function `E2(z, θ)`. Registry `MODELS` holds `lcdm`,
+  `wcdm`, `cpl`, `pede`, `gede`. Adding a model = one dict entry.
+* **`Posterior`** — the single contact point for the samplers. CC
   likelihood (51 points) and Pantheon+ (1048 SNe, analytic M_abs
-  marginalization, Goliath et al. 2001). The luminosity distance is
-  integrated with a vectorized `cumulative_trapezoid` over a fine z grid,
-  **valid for any E²(z; θ)** — this replaces the previous Ωm lookup grid,
-  which was only correct for flat ΛCDM.
-* **`log_prob_batch`**: vectorized batch evaluation of θ
-  (~4 000 CC+Pantheon+ evaluations in ≈1 s) used by the QVMC targets.
-* **Statistics**: autocorrelation time τ (FFT, O(N log N)), ESS by chains
-  and by weights (Kish), Gelman-Rubin (maximum over parameters),
-  `fit_statistics` (χ², reduced χ², AIC, BIC with Nelder-Mead
-  refinement).
-* **`setup_logger`**: dual logging (detailed file + minimal console).
+  marginalization, Goliath et al. 2001). The luminosity distance uses a
+  vectorized `cumulative_trapezoid` over a fine z-grid, valid for **any**
+  E²(z; θ).
+* **`log_prob_batch`** — vectorized batch evaluation of the log-posterior
+  (~4000 evals CC+Pantheon+ in ≈1 s); used by the QVMC targets and the
+  vectorized QMCMC kernel.
+* **Statistics** — autocorrelation τ (FFT, O(N log N)), ESS (chains and
+  Kish weights), Gelman-Rubin (max over parameters), `fit_statistics`
+  (χ², χ²_red, AIC, BIC with Nelder-Mead refinement).
 
-### 2. `cosmo_modular_quantum.py` — simulator with switchable quantumness
+### `cosmo_modular_quantum.py` — simulator with switchable quantumness
 
-Five quantum/classical switchable components (proposal 20 %, acceptance
-25 %, training 20 %, sampling 25 %, normalization 10 %) with presets
-0/20/45/70/90/100 %. The 0 % preset IS the fully classical pipeline
-(Classical MCMC + Classical VI on the same grid).
+Five quantum/classical switchable components, grouped by which sampler
+reads them:
 
-**Overlay figures.** Every figure overlays classical (blue `#1f77b4`)
-vs quantum (red `#d62728` for the MCMC family, orange `#ff7f0e` for the
-variational family) on the same axes, with explicit legends stating the
-method and quantumness level. **Every title also embeds the run
-metadata** required for the analysis: total MCMC `steps` on QMCMC
-figures, and SPSA `iterations` **and `nqpp`** (qubits per parameter) on
-every QVMC figure.
-
-| Figure | Content |
+| Sampler | Components (weights) |
 |---|---|
-| `corner_mcmc_*` / `corner_qvmc_*` | corner.py 2D contours (1σ/2σ) + 1D marginals, classical vs quantum, shared ranges, Planck fiducials |
-| `marginals_*` | 1D marginal histograms per parameter, both methods overlaid |
-| `kl_overlay_*` | KL vs iteration: Classical VI (blue) vs QVMC (orange) |
-| `rhat_overlay_*` | Gelman-Rubin R̂−1 vs steps: Classical MCMC (blue) vs QMCMC (red) |
-| `traces_*` | parameter traces, classical chains vs quantum chains |
-| `kl_curves_*` / `rhat_curves_*` | benchmark mode: ALL quantumness levels overlaid (thick blue baseline + orange→red colormap) |
-| `benchmark_*` | summary panel + extended table (χ², χ²_red, AIC, BIC, ESS, acceptance, KL) |
+| **QMCMC** | proposal (20), acceptance (25) |
+| **QVMC** | sampling (25), training (20), normalization (10) |
 
-**Corner-plot groupings (benchmark / Test Run).** In addition to the
-per-preset overlays above, a benchmark produces three corner-plot
-families so the posteriors can be read at three levels of aggregation:
+Classical MCMC is a **hand-written Metropolis-Hastings** (not `emcee`):
+owning every line of the transition kernel is required to swap individual
+components classical↔quantum and to guarantee the classical baseline and
+the quantum run share the exact same transition structure, step scale and
+RNG stream. The kernel is fully **vectorized in NumPy** (one
+`log_prob_batch` call scores all chains per step; 6 chains × 2000 steps in
+~0.1 s).
 
-| Grouping | Files | Content |
+#### The canonical quantumness scale: per-method ladders
+
+The benchmark sweeps **each sampler along its own monotonic axis**, adding
+one quantum component at a time. Each per-method % counts only that
+sampler's component weights (QMCMC total 45, QVMC total 55):
+
+```
+QMCMC ladder:  0%  →  44% (+proposal)  →  100% (+acceptance)
+QVMC  ladder:  0%  →  46% (+sampling)  →  82% (+training)  →  100% (+norm)
+```
+
+Run modes (CLI `--benchmark`, or the interactive menu):
+
+* **Single configuration** — one preset/custom config + its forced
+  classical baseline (overlaid corner/marginal/KL/R̂/trace figures).
+* **Benchmark** (`--benchmark`) — the two per-method ladders. **This is the
+  one canonical quantumness scale.**
+* **Quick Test Run** (menu) — the same ladders at small fixed sizes
+  (steps 200, iters 40, nqpp 2) for a fast stability check.
+
+Benchmark figures (labelled by per-method %): `corner_ladder_qmcmc/qvmc`
+(family overlay of all rungs), `ladder_rhat_qmcmc` (R̂ vs steps),
+`ladder_kl_qvmc` (KL vs iteration), `corner_ladder_1to1_*` (each rung vs
+its classical baseline), `ladder_summary` (table). Single-config figures:
+`corner_mcmc/qvmc`, `marginals_*`, `kl_overlay_*`, `rhat_overlay_*`,
+`traces_*`. Every QVMC figure prints `nqpp`; QMCMC/QVMC figures print
+steps/iterations. Colours: classical blue, QMCMC red, QVMC orange.
+
+Because **Metropolis** acceptance is kept (so quantum methods can be shown
+to *replicate* the classical ones), some adjacent rungs coincide — by
+design:
+
+| Ladder step | What changes | Outcome |
 |---|---|---|
-| Individual | `corner_individual_{mcmc,qvmc}_*_q{pct}` | one standalone corner per method per configuration (each posterior alone) |
-| Family "all-in-one" | `corner_family_mcmc_*`, `corner_family_qvmc_*` | Classical MCMC overlaid with **all** QMCMC levels; Classical VI overlaid with **all** QVMC levels (warm colormap over quantumness) |
-| 1-to-1 vs baselines | `corner_1to1_*_q{pct}` | one plot per percentage: that level's QMCMC and QVMC overlaid **only** with the two classical baselines (blue = Classical MCMC, teal = Classical VI, red = QMCMC, orange = QVMC), to read off which quantumness level best matches the ideal classical distribution |
-
-**Run modes (interactive menu).** With no arguments the script opens an
-interactive menu whose first question is the run mode:
-
-1. **Single configuration** — one preset (or custom Q/C component string)
-   plus its mandatory classical baseline.
-2. **Full benchmark** — every preset at user-chosen sizes.
-3. **Quick Test Run** — every preset (0/20/45/70/90/100 %) at small fixed
-   sizes (steps 200, iters 40, nqpp 2): a fast end-to-end stability check
-   across the whole hybrid spectrum, producing all overlays and corner
-   groupings in a couple of minutes.
-
-**Classical MCMC is a hand-written Metropolis-Hastings (not `emcee`).**
-This is deliberate. The project's purpose is to swap *individual*
-algorithmic components (proposal, acceptance, …) between classical and
-quantum, which requires owning every line of the transition kernel.
-`emcee`'s affine-invariant ensemble move is a fixed black box that cannot
-host a quantum proposal or a Hadamard-test acceptance, and its internal
-bookkeeping would prevent a like-for-like classical-vs-quantum
-comparison. Owning the loop also guarantees the classical baseline and
-the quantum run share the *exact* same transition structure, step scale
-and RNG stream. The kernel is fully **vectorized in NumPy**: each step
-proposes for all chains at once and scores them with a single
-`log_prob_batch` call (the dominant cost), so the classical baseline runs
-6 chains × 2000 steps in ~0.1 s. The quantum-acceptance path keeps a
-short per-chain loop only because the Hadamard test is a circuit
-evaluated per pair.
-
-**Mandatory classical baseline.** Whenever a configuration with any
-quantum component runs, the exact classical counterpart (the 0 % preset)
-runs automatically with **identical parameters** (steps, iterations,
-chains, burn-in, grid, shots) and the **same RNG seed**, so both consume
-the same random streams. In `--benchmark` mode the 0 % baseline runs
-first and is shared by every quantum preset.
+| QMCMC 0→44 % | proposal C→Q | **changes** (genuine quantum proposal) |
+| QMCMC 44→100 % | acceptance C→Q | **identical** — quantum Metropolis reproduces classical |
+| QVMC 0→46 % | sampling C→Q | ~identical (same trained state, only shot noise) |
+| QVMC 46→82 % | training C→Q | **changes strongly** (param-shift reaches a far lower KL) |
+| QVMC 82→100 % | normalization C→Q | ~identical (faithful renormalization) |
 
 ```bash
-# Interactive (default with no arguments)
+# Interactive (menu)
 python cosmo_modular_quantum.py
 
-# CLI: wCDM at 70% quantumness — the 0% classical baseline runs
-# automatically with the same parameters and seed
-python cosmo_modular_quantum.py --model wcdm --dataset CC+Pantheon+ \
-    --preset 70 --steps 4000 --qvmc-iter 300 --log-every 500
+# Benchmark = per-method ladders (the canonical scale)
+python cosmo_modular_quantum.py --model wcdm --benchmark --steps 4000 \
+    --qvmc-iter 300 --dataset CC+Pantheon+
 
-# Full quantumness benchmark for CPL (shared classical baseline)
-python cosmo_modular_quantum.py --model cpl --benchmark --steps 3000
+# Single configuration (custom component string via JSON)
+python cosmo_modular_quantum.py --config \
+  '{"proposal":true,"acceptance":false,"training":true,"sampling":true,"normalization":false}'
+
+# Routing + correctness self-check
+python cosmo_modular_quantum.py --sanity-check
 ```
 
-### 3. `qpu_cosmo_samplers.py` — real IBM Quantum hardware
+### `cosmo_genetic_optimizers.py` — global optimization (CGA / QGA)
 
-QPU-only, via `qiskit-ibm-runtime` (SamplerV2 + Batch/Session).
-**No AerSimulator.** Hardware-driven design differences:
+Phase 2 of the project: **global optimizers that locate the MAP** before or
+in parallel with the samplers. The fitness is NOT a new χ² — it is the SAME
+`Posterior.log_prob_batch` (CC + Pantheon+) used everywhere else, so
+maximizing fitness ≡ minimizing χ² under the prior ≡ finding the MAP. Adding
+a model (VC, …) needs zero changes here.
+
+* **CGA — Classical Genetic Algorithm**, written from scratch (no DEAP),
+  fully NumPy-vectorized: uniform-box init, tournament selection, blend
+  (BLX) crossover, Gaussian mutation, elitism.
+* **QGA — Quantum Genetic Algorithm** (Qiskit), with a modular *quantumness*
+  score over three independently switchable operators. Each parameter is
+  encoded in `n_bits` qubits (grid = 2^n_bits per axis):
+
+  | Operator | Weight | Quantum implementation |
+  |---|---|---|
+  | `q_init` | 25 | Hadamard layer → superposition → population sampled by measurement |
+  | `q_mutation` | 35 | parametrized RY rotation per gene-qubit (amplitude tied to `mutation_scale`) |
+  | `q_crossover` | 40 | CX entanglement between homologous parent qubits + controlled-RY interference |
+
+  QGA with all operators OFF (0%) reproduces the CGA **bit-for-bit** — the
+  mandatory classical baseline. Circuits are transpiled once at `__init__`
+  and evaluated in batched Aer jobs.
+
+**Live GUI** (interactive mode only): a two-panel Matplotlib window —
+phase-space scatter (population colored by fitness, converging to the MAP in
+Ωm–H0) and fitness curve (best χ² and mean χ² vs generation), with dynamic
+text. A snapshot is saved to the run folder.
+
+**Integration**: fitness-weighted corner of the final population, an
+all-in-one overlay of the genetic MAP + spread on the MCMC/VI corners (reuses
+`plot_corner_multi`), a fitness-convergence figure, and a MAP row appended to
+`resultados_config.csv` under Method = `CGA` / `QGA (q=NN%)`.
+
+**Headless rule**: launched with arguments → batch/HPC mode, the live
+animation is disabled automatically and the generational metrics go to the
+log every `--log-every` generations. No arguments → interactive menu + GUI.
+
+```bash
+# Interactive (menu + live GUI)
+python cosmo_genetic_optimizers.py
+
+# Batch: classical genetic on ΛCDM
+python cosmo_genetic_optimizers.py --methods cga --model lcdm --generations 80
+
+# Batch: CGA + QGA at 60% quantumness, CC+Pantheon+
+python cosmo_genetic_optimizers.py --methods cga qga --dataset CC+Pantheon+ \
+  --population-size 200 --generations 120 --qga-preset 60 --n-bits 6
+
+# Custom quantum components via JSON
+python cosmo_genetic_optimizers.py --methods qga --qga-config \
+  '{"q_init":true,"q_mutation":true,"q_crossover":false}'
+
+# Correctness self-test (CGA reaches optimum; QGA(0%) == CGA)
+python cosmo_genetic_optimizers.py --self-test
+```
+
+### `qpu_cosmo_samplers.py` — real IBM Quantum hardware
+
+
+QPU-only, via `qiskit-ibm-runtime` (SamplerV2 + Batch/Session). **No
+AerSimulator. Runs no classical method** — real QPU time is scarce, and
+classical baselines belong in the simulator pipeline. Hardware-driven
+design differences:
 
 | Aspect | Simulator | Real QPU |
 |---|---|---|
 | Quantum information | exact statevector | measured counts (shots) |
-| Proposal displacement | Re(amplitudes) | ⟨Z_q⟩ = 1 − 2·P(q=1) |
-| QVMC gradient | parameter-shift (2·n_φ ≈ 84 evals/iter) | **SPSA (2 evals/iter, 1 job)** |
+| Proposal displacement | Re(amplitudes), unit-std calibrated | ⟨Z_q⟩ = 1 − 2·P(q=1) |
+| QVMC gradient | parameter-shift | **SPSA (2 evals/iter, 1 job)** |
 | KL | exact over 2^n states | estimated on the observed support |
-| Metropolis acceptance | simulated Hadamard test | equivalent classical Barker rule¹ |
+| Acceptance | Metropolis via abs(amp0)^2 | Metropolis on CPU (sequential) |
 | Error suppression | — | Dynamical Decoupling XY4 + Pauli twirling |
 
-¹ Acceptance is sequential (step t depends on t−1): on a QPU it would
-cost one job + a full queue wait **per step**. The Barker rule
-P = e^Δ/(1+e^Δ) is exactly P(ancilla=0) of the Hadamard test, so the
-stationary distribution is identical.
-
-**Quantum-only by design.** This script is strictly for dispatching the
-quantum algorithms (QMCMC, QVMC) to Qiskit Runtime primitives. It runs
-**no classical method at all** — no Classical MCMC, no Classical VI.
-Real QPU time is scarce and queues are long, so spending hardware
-sessions (or even local CPU time inside a hardware-oriented run) on
-classical baselines would be wasteful and conceptually out of place
-here. Classical baselines and the full classical-vs-quantum overlay
-study live in `cosmo_modular_quantum.py`, which shares the same physics
-module. Recommended workflow:
-
-1. Explore the whole quantumness spectrum + classical baselines on the
-   simulator (`cosmo_modular_quantum.py --benchmark` / Test Run).
-2. Validate a chosen configuration on real hardware here (QMCMC / QVMC).
-
-Figures produced here are **single-method quantum diagnostics**
-(`corner_*`, `kl_quantum_*`, `rhat_quantum_*`), each annotated with the
-run metadata: steps and chains for QMCMC; SPSA iterations and `nqpp` for
-QVMC.
-
 ```bash
-# Planning without spending QPU time (no IBM account needed):
+# Plan without spending QPU time (no IBM account needed):
 python qpu_cosmo_samplers.py --model wcdm --method both --dry-run
 
 # Real run with a bounded job budget:
@@ -169,11 +358,8 @@ python qpu_cosmo_samplers.py --model lcdm --method qvmc --iters 50 \
     --shots 4096 --least-busy --max-jobs 60 --log-file qpu_run.log
 ```
 
-`--max-jobs` aborts BEFORE connecting if the run would exceed the
-budget, and `--dry-run` validates the whole workflow (shapes, decoding,
-figures, logging, output JSON) with synthetic counts.
-
----
+`--max-jobs` aborts BEFORE connecting if the run would exceed the budget;
+`--dry-run` validates the whole workflow with synthetic counts.
 
 ## QPU time estimation
 
@@ -183,12 +369,12 @@ Per-job components:
 | Component | Typical (open plan) | Notes |
 |---|---|---|
 | API overhead | 1–3 s | REST + PUB serialization |
-| Queue | 30 s – 30 min (≈60 s used as default) | Backend- and time-dependent; Session removes it between jobs |
+| Queue | 30 s – 30 min (≈60 s default) | Backend/time-dependent; Session removes it between jobs |
 | QPU execution | ~100 µs/shot/circuit | e.g. 2 circuits × 4096 shots ≈ 0.8 s |
 
-The `TimingEstimator` class times every real job and replaces these
-defaults with measured values; at the end of each run it prints the
-projection. With the defaults (queue ≈ 60 s/job, Batch, open plan):
+`TimingEstimator` times every real job and replaces these defaults with
+measured values, printing a projection at the end. With the defaults
+(queue ≈ 60 s/job, Batch, open plan):
 
 **QVMC-QPU (SPSA = 1 job/iteration):**
 
@@ -206,73 +392,59 @@ projection. With the defaults (queue ≈ 60 s/job, Batch, open plan):
 | 500 | 32 | ~1 min | ~32 min | ~4 s | **~33 min** |
 | 1000 | 63 | ~2 min | ~1 h | ~8 s | **~1 h** |
 
-Practical conclusions:
-
-1. **QMCMC scales much better on the QPU** thanks to proposal batching
-   (each block amortizes the queue across 64 proposals).
-2. For QVMC, **Session** (paid plans) removes the queue between SPSA
-   iterations and cuts 1000 iterations from ~17 h to ~1 h.
-3. Keep `--iters ≤ 50` on the open plan; SPSA convergence with a good
-   initial point (e.g. φ pre-trained on the simulator) is usually enough.
-
----
+Practical notes: QMCMC scales much better (proposal batching amortizes the
+queue across 64 proposals); for QVMC, **Session** (paid plans) removes the
+inter-iteration queue; keep `--iters ≤ 50` on the open plan.
 
 ## Diagnostics and correctness fixes
 
-Two anomalies were audited and resolved; both are guarded by the
-`--sanity-check` harness (`python cosmo_modular_quantum.py --sanity-check`),
-which prints an acceptance regression test, the proposal statistics, and a
-per-preset engine map (Qiskit/Aer vs NumPy/SciPy) plus a live routing
-trace.
+`--sanity-check` prints an acceptance regression test, the proposal
+statistics, and a per-preset engine map (Qiskit/Aer vs NumPy/SciPy) with a
+live routing trace. Audited issues:
 
-**"Results look identical across quantumness levels" — mostly expected,
-not a routing bug.** The routing (`config.get(...)`) is correct: the
-sanity map confirms each component resolves to the intended engine. The
-apparent identity has three real causes: (1) each method only reads its
-own components — QMCMC uses `proposal`+`acceptance`, QVMC uses
-`training`+`sampling`+`normalization` — so presets differing only in the
-*other* method's components are identical for a given method; (2) the
-`sampling` toggle draws from the *same trained* state |ψ(φ\*)|², so it only
-adds shot noise (the QVMC posterior barely moves); (3) the benchmark
-re-seeds every preset identically for a fair comparison, making
-same-code-path presets bit-identical. After the acceptance fix below, the
-quantum acceptance reproduces classical Metropolis exactly, so for QMCMC
-**only the proposal** changes the statistics and for QVMC **only the
-training** does. That is the correct, interpretable behavior — the
-quantumness axis bundles two independent methods.
+* **Apparent "identical results across quantumness".** Not a routing bug:
+  each sampler only reads its own components, the `sampling` toggle draws
+  from the *same trained state* (shot noise only), identical re-seeding
+  makes same-code-path rungs bit-identical, and the Metropolis acceptance
+  is a faithful reproduction. The per-method ladders make the axis
+  monotonic; the remaining coincidences are the *replication* result.
 
-**Inverted quantum acceptance (the real bug behind non-convergence).** The
-old `hadamard_accept_log` built a CRY/Hadamard-test circuit and read
-P(ancilla=0); that quantity *decreased* with Δ = lp_prop − lp_cur, i.e. it
-accepted worse moves and rejected better ones. Chains using the quantum
-acceptance (presets ≥ 70 %) drifted toward the box edges (Ωm ≈ 0.37,
-H0 ≈ 77 instead of ≈ 0.26, 70). It now encodes the standard Metropolis
-acceptance min(1, e^Δ) as the |0⟩ amplitude of a single-qubit RY rotation
-(still read from the Aer statevector), verified monotonic and matching
-Metropolis. Post-fix, every quantumness level agrees with the classical
-baseline.
+* **Inverted quantum acceptance (the real convergence bug).** The old
+  Hadamard-test readout *decreased* with Δ = lp_prop − lp_cur (accepted
+  worse moves), so quantum-acceptance chains drifted to the box edges
+  (Ωm ≈ 0.37, H0 ≈ 77). It now encodes Metropolis min(1, e^Δ) as the |0⟩
+  amplitude of an RY rotation (verified monotonic, matching Metropolis).
+  Post-fix every quantumness level agrees with the classical baseline.
 
-**Proposal calibration.** The quantum displacement re[:d]·sign(im[:d]) is
-zero-mean (so symmetric-proposal Metropolis stays valid) but had std ≈ 0.35
-— ~3× smaller than the classical N(0,1) the step scale was tuned for,
-pushing acceptance to ≈ 0.80 (too high → slow mixing). Each block is now
-normalized to unit std, bringing acceptance back to ≈ 0.5.
+* **Proposal calibration.** The quantum displacement is zero-mean but had
+  std ≈ 0.35 (~3× smaller than the classical N(0,1)), pushing acceptance
+  to ≈ 0.80 (slow mixing). Each block is normalized to unit std →
+  acceptance ≈ 0.5.
 
-**QVMC convergence — quantum side already converges; the optimizer matters.**
-The stalled-KL symptom was the *classical* COBYLA baseline (42 angles,
-gradient-free), not the quantum trainer. Quantum parameter-shift drives KL
-from ~8 to ~0.34. With a fixed learning rate the KL crept back up near the
-minimum; we benchmarked fixed-lr SGD vs Adam vs lr-decay SGD on this exact
-landscape and adopted **parameter-shift SGD with a 1/(1+γ·i) learning-rate
-decay** (min KL ≈ 0.34 with a flat tail). Adam, although the natural
-suggestion, settled into a higher-KL basin here, so it was *not* adopted —
-the choice is evidence-based, and `lr_train` is exposed for tuning. No
-severe barren plateau was observed at nqpp ≤ 3 (6 qubits); it may reappear
-at larger grids, where SPSA would become preferable.
+* **QVMC optimizer.** The stalled-KL symptom was the *classical* COBYLA
+  baseline, not the quantum trainer (parameter-shift drives KL ~8 → ~0.34).
+  Benchmarked fixed-lr SGD vs Adam vs lr-decay SGD on this landscape:
+  adopted **parameter-shift SGD with 1/(1+γ·i) learning-rate decay** (low
+  KL with a flat tail). Adam settled into a higher-KL basin here, so it was
+  not adopted; `lr_train` is exposed for tuning.
+
+* **QVMC adaptive grid (resolving a smooth posterior).** QVMC represents
+  the posterior as a probability mass function on a discrete 2^nqpp grid.
+  Spanning the full (wide) `sample_box`, the cosmological posterior is far
+  narrower than the grid spacing, so it collapses onto ~1–3 cells and can
+  never look smooth — independent of the number of iterations. The grid is
+  now **adaptive**: a fast classical pre-fit (`estimate_grid_window`)
+  locates the posterior mode and width, and the grid is centered on a
+  zoomed window [mode − k·σ, mode + k·σ] with the half-width k scaled to
+  the grid size (k ≈ (2^nqpp − 1)/6, clipped to [2, 5]) so a small grid
+  zooms in tightly and a larger one widens out. The window is computed once
+  and shared by every QVMC rung and the classical-VI baseline (fair
+  comparison). Effect at nqpp = 3/4/5: occupied cells go from ~3 (full box)
+  to ~13/40/49, and the discretized target becomes a clean bell curve. Any
+  residual lumpiness in the QVMC *samples* is then the variational
+  ansatz/training (more iterations, more layers), not the grid.
 
 ## Installation and data
-
-
 
 ```bash
 pip install -r requirements.txt
@@ -280,11 +452,16 @@ pip install -r requirements.txt
 
 * **CC**: 51 points embedded in `cosmo_core.py` (or
   `cosmic_chronometers.txt` if present).
-* **Pantheon+**: place `pantheon_full_parameters.txt` (format
-  `name zcmb zhel dz mb dmb`) next to the scripts.
+* **Pantheon+**: place `pantheon_full_parameters.txt` (`name zcmb zhel dz
+  mb dmb`) next to the scripts.
 * **IBM Quantum**: save your account once with
   `QiskitRuntimeService.save_account(channel="ibm_quantum_platform",
   token="...")` or pass `--token`.
+* **Live GUI** (`cosmo_genetic_optimizers.py` interactive mode): needs an
+  interactive Matplotlib backend (Tk or Qt). On a desktop this works out of
+  the box; over SSH it requires X-forwarding. If no GUI backend is found the
+  script automatically falls back to saving static figures (no crash), and in
+  batch/HPC mode (any CLI argument) the live window is disabled by design.
 
 ## Adding a new model (e.g. Variable Curvature)
 
@@ -297,22 +474,20 @@ def _E2_vc(z, th):
 MODELS['vc'] = CosmoModel(
     name='vc', label='Variable Curvature',
     param_names=['Om', 'H0', 'Ok1'],
-    param_latex=[r'$\Omega_m$', r'$H_0$ [km/s/Mpc]', r'$\Omega_{k,1}$'],
+    param_latex=[r'\Omega_m', r'H_0', r'\Omega_{k,1}'],
     bounds=[(0.05, 0.7), (50, 90), (-0.3, 0.3)],
     sample_box=[(0.1, 0.6), (60, 80), (-0.2, 0.2)],
     fiducial=[0.31, 67.7, 0.0], E2=_E2_vc)
 ```
 
-Every sampler (simulator and QPU) recognizes it automatically via
-`--model vc`. On the simulator it gets the mandatory classical baseline
-and the full overlay/corner figure set; on the QPU it is dispatched as a
-quantum-only run.
+Both samplers recognize it via `--model vc`. The simulator runs the full
+ladder + classical baseline; the QPU dispatches it quantum-only.
 
 ## References
 
-* Sarracino, A., et al. (2025) — QMCMC proposal circuit.
-* Goliath, M., et al. (2001) — analytic M_abs marginalization.
+* Sarracino et al. (2025) — QMCMC proposal circuit.
+* Goliath et al. (2001) — analytic M_abs marginalization.
 * Planck Collaboration (2018) — Gaussian priors (Ωm, H0).
-* Spall, J. C. (1998) — SPSA.
-* Gelman, A. & Rubin, D. B. (1992) — R̂ diagnostic.
-* Foreman-Mackey, D. (2016) — corner.py.
+* Spall (1998) — SPSA.
+* Gelman & Rubin (1992) — R̂ diagnostic.
+* Foreman-Mackey (2016) — corner.py.

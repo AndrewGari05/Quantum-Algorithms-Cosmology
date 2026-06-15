@@ -627,3 +627,49 @@ def setup_logger(log_file: Optional[str] = None,
 def fmt_theta(model: CosmoModel, theta: np.ndarray) -> str:
     """Format θ with parameter names for readable logs."""
     return "  ".join(f"{n}={v:.4f}" for n, v in zip(model.param_names, theta))
+
+
+# =============================================================================
+# 6. RUN-DIRECTORY UTILITIES (timestamped output folders)
+# =============================================================================
+#
+#  Every executable script (cosmo_modular_quantum.py, cosmo_genetic_optimizers.py)
+#  funnels its figures, logs and per-run CSV into a UNIQUE timestamped folder so
+#  results from different runs never overwrite or mix. This single helper is the
+#  one source of truth for that convention, shared by all scripts.
+
+def make_run_dir(base: str = "results", tag: Optional[str] = None,
+                 timestamp: bool = True) -> str:
+    """Create and return a unique output directory for one run.
+
+    Layout:  <base>/run_<YYYYMMDD_HHMMSS>[_<tag>]/
+
+    Args:
+        base: Parent directory that collects all runs (created if missing).
+        tag: Optional short suffix (e.g. the model name or method) to make the
+            folder self-describing at a glance.
+        timestamp: If True (default), embed a second-resolution timestamp so
+            concurrent/sequential runs get distinct folders. If False, the
+            directory is just <base>/<tag> (or <base> when tag is None), which
+            is useful when the caller wants a fixed, explicit location.
+
+    Returns:
+        Absolute-or-relative path to the freshly created run directory.
+    """
+    if timestamp:
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        name = f"run_{stamp}_{tag}" if tag else f"run_{stamp}"
+    else:
+        name = tag if tag else ""
+    run_dir = os.path.join(base, name) if name else base
+
+    # On the (unlikely) event of a same-second collision, append a counter so
+    # we never silently reuse an existing run folder.
+    final = run_dir
+    k = 1
+    while timestamp and os.path.exists(final):
+        final = f"{run_dir}_{k}"
+        k += 1
+
+    os.makedirs(final, exist_ok=True)
+    return final
