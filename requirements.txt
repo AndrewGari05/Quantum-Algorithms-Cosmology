@@ -1,8 +1,37 @@
-numpy>=1.24
-scipy>=1.10
-matplotlib>=3.7
-corner>=2.2               # overlaid corner plots (2D contours + 1D marginals)
-qiskit>=1.2
-qiskit-aer>=0.15          # cosmo_modular_quantum.py only (simulator)
-qiskit-ibm-runtime>=0.30  # qpu_cosmo_samplers.py only (real hardware)
-tqdm>=4.65
+# =============================================================================
+#  Quantum-Algorithms-Cosmology — runtime dependencies
+#  Stack verified on Python 3.12. Pin or relax as your cluster image requires.
+# =============================================================================
+
+# --- core numerics ---
+# numpy<2 is required by the known-good Qiskit 1.0.x line below.
+numpy>=1.26,<2
+scipy>=1.13
+
+# --- quantum (CPU) ---
+# Qiskit and Qiskit-Aer MUST be from the same generation, or Aer fails with
+# "cannot import name 'convert_to_target' from 'qiskit.providers'".
+# Known-good CPU combination (verified on Python 3.12):
+qiskit==1.0.2
+qiskit-aer==0.14.2
+# The Qiskit 2.x line also works if Aer matches it (qiskit==2.4.x +
+# qiskit-aer==0.17.x); pick ONE generation and keep them paired.
+qiskit-ibm-runtime>=0.20    # only for real-hardware runs (qpu_cosmo_samplers.py)
+
+# --- plotting & analysis ---
+matplotlib>=3.8
+corner>=2.2
+pandas>=2.0
+
+# --- progress bars & resource profiling ---
+tqdm>=4.66
+psutil>=5.9                # host RAM / CPU profiling (cosmo_profiling.py)
+
+# --- optional: GPU acceleration ----------------------------------------------
+# On a CUDA-capable node, REPLACE qiskit-aer with the GPU build:
+#     pip uninstall qiskit-aer
+#     pip install qiskit-aer-gpu
+# and (optional, for richer GPU telemetry in the profiler):
+#     pip install nvidia-ml-py
+# The code auto-detects the GPU via AerSimulator().available_devices(); no
+# source change is needed — just pass --gpu (CLI) or pick GPU in the menu.

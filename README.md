@@ -161,25 +161,27 @@ correctly.
 
 # Part 2 — Technical reference
 
-## Architecture (4 files + shared core)
+## Architecture (shared core + 4 executables + profiler)
 
 ```
-cosmo_core.py               ← PHYSICS + DATA + STATISTICS (shared)
-        ▲            ▲              ▲
-        │            │              │
-cosmo_modular_   qpu_cosmo_     cosmo_genetic_
-quantum.py       samplers.py    optimizers.py
-(Aer simulator,  (real IBM      (CGA/QGA global
- quantumness      Quantum HW,    optimization for
- benchmark)       SamplerV2)     the MAP + live GUI)
+            cosmo_core.py   ← PHYSICS + DATA + STATISTICS + Aer device factory
+        ┌────────┼────────┐         (shared by everything)
+        │        │        │
+cosmo_modular_  qpu_cosmo_  cosmo_genetic_      cosmo_profiling.py
+quantum.py      samplers.py optimizers.py       (RAM / VRAM / GPU-hours,
+(Aer simulator, (real IBM   (CGA/QGA global      used by the two simulators
+ quantumness     Quantum HW, optimization for    via --profile)
+ benchmark)      SamplerV2)  the MAP + live GUI)
 ```
 
-All executable scripts share the SAME physics through `cosmo_core.py` and
-write their outputs into a **timestamped run folder**
-`results/run_<YYYYMMDD_HHMMSS>_<model>/` (figures, log and a per-run
-`resultados_config.csv`), so results from different runs never mix. Pass an
-explicit `--outdir` to override. A cumulative `resultados_config.csv` is also
-kept in the working directory to compare methods across runs.
+All executable scripts share the SAME physics through `cosmo_core.py`, select
+CPU/GPU through its `make_simulator` factory, and write their outputs into a
+**timestamped run folder** `results/run_<YYYYMMDD_HHMMSS>_<model>/` (figures,
+log, per-run `resultados_config.csv`, and — with `--profile` — a
+`resource_usage_*.png` and `profile_*.json`), so results from different runs
+never mix. Pass an explicit `--outdir` to override. A cumulative
+`resultados_config.csv` is also kept in the working directory to compare
+methods across runs.
 
 ### `cosmo_core.py` — shared physics module
 
@@ -458,10 +460,58 @@ pip install -r requirements.txt
   `QiskitRuntimeService.save_account(channel="ibm_quantum_platform",
   token="...")` or pass `--token`.
 * **Live GUI** (`cosmo_genetic_optimizers.py` interactive mode): needs an
-  interactive Matplotlib backend (Tk or Qt). On a desktop this works out of
-  the box; over SSH it requires X-forwarding. If no GUI backend is found the
-  script automatically falls back to saving static figures (no crash), and in
-  batch/HPC mode (any CLI argument) the live window is disabled by design.
+  interactive Matplotlib backend (Tk or Qt). On WSL/Ubuntu install
+  `sudo apt install python3-tk`; over SSH it requires X-forwarding. If no GUI
+  backend is found the script falls back to saving static figures (no crash),
+  and in batch/HPC mode (any CLI argument) the live window is disabled by
+  design.
+
+### Qiskit version compatibility (important)
+
+Qiskit and Qiskit-Aer must come from the **same generation**. Mixing them
+raises errors such as `ImportError: cannot import name 'convert_to_target'
+from 'qiskit.providers'` (Aer built against a different Qiskit). A known-good
+CPU combination is:
+
+```bash
+pip install "qiskit==1.0.2" "qiskit-aer==0.14.2" "numpy<2"
+```
+
+The current Qiskit 2.x line also works as long as Aer matches it
+(`qiskit==2.4.x` with `qiskit-aer==0.17.x`). Do **not** install
+`qiskit-aer-gpu` on a machine without a CUDA GPU: it pins `qiskit>=1.1.0` and
+will fight the rest of the stack. The GPU build is only for the cluster /
+local RTX (see below).
+
+### GPU acceleration and resource profiling
+
+Both samplers and the genetic module accept `--gpu` (use an Aer GPU device if
+present; otherwise fall back to CPU) and `--profile` (record peak host RAM,
+GPU VRAM, CPU/GPU utilization, wall time and GPU-hours, and save a
+`resource_usage_*.png` figure plus a `profile_*.json` next to the run).
+
+```bash
+# CPU run with profiling
+python cosmo_modular_quantum.py --model lcdm --preset 45 --profile
+
+# On a CUDA node: swap in the GPU build of Aer first, then add --gpu
+pip uninstall qiskit-aer && pip install qiskit-aer-gpu
+python cosmo_modular_quantum.py --benchmark --model cpl --gpu --profile
+```
+
+The device is auto-detected via `AerSimulator().available_devices()`; no
+source change is needed. The `cosmo_profiling.py` module is standalone and
+also usable on its own. GPU enablement and the experiment-magnitude estimates
+are documented in detail in the technical habilitation dossier.
+
+### Output layout
+
+Every run writes to a timestamped folder
+`results/run_<YYYYMMDD_HHMMSS>_<model>/` containing the figures, the log, a
+per-run `resultados_config.csv`, and (with `--profile`) the resource figure
+and JSON. A cumulative `resultados_config.csv` in the working directory
+collects all runs across models for cross-comparison. Pass an explicit
+`--outdir` to override the folder.
 
 ## Adding a new model (e.g. Variable Curvature)
 

@@ -624,19 +624,90 @@ def setup_logger(log_file: Optional[str] = None,
     return logger
 
 
+# =============================================================================
+# 8. AER SIMULATOR FACTORY (CPU/GPU device selection, single source of truth)
+# =============================================================================
+#
+#  All quantum simulators in the project are created through `make_simulator`
+#  so the CPU/GPU choice lives in ONE place. On the HPC cluster (RTX PRO 6000),
+#  pass prefer_gpu=True and, if qiskit-aer-gpu + CUDA expose a GPU device, the
+#  simulator runs on it; otherwise it transparently falls back to CPU. This is
+#  what the `--gpu` flag toggles in both executable scripts.
+
+_GPU_PROBED = False
+_GPU_AVAILABLE = False
+
+
+def gpu_available() -> bool:
+    """True if qiskit-aer exposes a 'GPU' device (probed once and cached).
+
+    Requires the `qiskit-aer-gpu` build on a CUDA-capable machine. On a CPU-only
+    node (e.g. Nicte-Ha) this returns False and the project runs on CPU.
+    """
+    global _GPU_PROBED, _GPU_AVAILABLE
+    if _GPU_PROBED:
+        return _GPU_AVAILABLE
+    _GPU_PROBED = True
+    try:
+        from qiskit_aer import AerSimulator
+        devices = AerSimulator().available_devices()
+        _GPU_AVAILABLE = 'GPU' in devices
+    except Exception:
+        _GPU_AVAILABLE = False
+    return _GPU_AVAILABLE
+
+
+def resolve_device(prefer_gpu: bool) -> str:
+    """Return the device string ('GPU' or 'CPU') actually usable.
+
+    prefer_gpu=True downgrades to 'CPU' (with the caller free to warn) when no
+    GPU is present, so a run never crashes for asking for a GPU that isn't
+    there.
+    """
+    if prefer_gpu and gpu_available():
+        return 'GPU'
+    return 'CPU'
+
+
+def make_simulator(method: str = 'statevector', prefer_gpu: bool = False,
+                   **kwargs):
+    """Create an AerSimulator on the resolved device (single source of truth).
+
+    Args:
+        method: Aer simulation method (default 'statevector').
+        prefer_gpu: if True and a GPU is available, run on it; else CPU.
+        **kwargs: forwarded to AerSimulator (e.g. precision, blocking options).
+
+    Returns:
+        A configured AerSimulator. For GPU, batched-shots and per-shot circuit
+        distribution are enabled, which is where the GPU's parallelism pays off
+        for the many-small-circuits workload of QMCMC/QVMC/QGA.
+    """
+    from qiskit_aer import AerSimulator
+    device = resolve_device(prefer_gpu)
+    opts = dict(method=method, device=device)
+    if device == 'GPU':
+        # These options let Aer spread many shots / many circuits across the
+        # GPU, which matches our workload (lots of tiny circuits per step).
+        opts.update(batched_shots_gpu=True,
+                    blocking_enable=True, blocking_qubits=kwargs.pop(
+                        'blocking_qubits', 22))
+    opts.update(kwargs)
+    return AerSimulator(**opts)
+
+
 def fmt_theta(model: CosmoModel, theta: np.ndarray) -> str:
     """Format θ with parameter names for readable logs."""
     return "  ".join(f"{n}={v:.4f}" for n, v in zip(model.param_names, theta))
-
 
 # =============================================================================
 # 6. RUN-DIRECTORY UTILITIES (timestamped output folders)
 # =============================================================================
 #
-#  Every executable script (cosmo_modular_quantum.py, cosmo_genetic_optimizers.py)
-#  funnels its figures, logs and per-run CSV into a UNIQUE timestamped folder so
-#  results from different runs never overwrite or mix. This single helper is the
-#  one source of truth for that convention, shared by all scripts.
+#  Every executable script funnels its figures, logs and per-run CSV into a
+#  UNIQUE timestamped folder so results from different runs never overwrite or
+#  mix. This single helper is the one source of truth for that convention,
+#  shared by all scripts.
 
 def make_run_dir(base: str = "results", tag: Optional[str] = None,
                  timestamp: bool = True) -> str:
@@ -646,15 +717,14 @@ def make_run_dir(base: str = "results", tag: Optional[str] = None,
 
     Args:
         base: Parent directory that collects all runs (created if missing).
-        tag: Optional short suffix (e.g. the model name or method) to make the
-            folder self-describing at a glance.
+        tag: Optional short suffix (e.g. the model name) to make the folder
+            self-describing at a glance.
         timestamp: If True (default), embed a second-resolution timestamp so
-            concurrent/sequential runs get distinct folders. If False, the
-            directory is just <base>/<tag> (or <base> when tag is None), which
-            is useful when the caller wants a fixed, explicit location.
+            sequential runs get distinct folders. If False, the directory is
+            just <base>/<tag> (or <base> when tag is None).
 
     Returns:
-        Absolute-or-relative path to the freshly created run directory.
+        Path to the freshly created run directory.
     """
     if timestamp:
         stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -663,8 +733,7 @@ def make_run_dir(base: str = "results", tag: Optional[str] = None,
         name = tag if tag else ""
     run_dir = os.path.join(base, name) if name else base
 
-    # On the (unlikely) event of a same-second collision, append a counter so
-    # we never silently reuse an existing run folder.
+    # Avoid a same-second collision by appending a counter.
     final = run_dir
     k = 1
     while timestamp and os.path.exists(final):

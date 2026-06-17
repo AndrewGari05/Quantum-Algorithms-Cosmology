@@ -88,7 +88,12 @@ warnings.filterwarnings("ignore")
 # ── Physics & shared infrastructure: imported, never re-implemented ───────────
 import cosmo_core as core
 from cosmo_core import (MODELS, Posterior, fit_statistics, fmt_theta,
-                        ess_weights, make_run_dir, setup_logger)
+                        ess_weights, gpu_available, make_run_dir,
+                        make_simulator, resolve_device, setup_logger)
+
+# Module-level GPU preference, set by main() from --gpu or the menu. The QGA's
+# AerSimulator is built through make_simulator honoring this flag.
+USE_GPU = False
 
 # ── Color convention, defined LOCALLY so the genetic module and its live GUI
 #    never depend on importing the (heavier) sampler module. The values match
@@ -121,26 +126,100 @@ def set_headless_backend():
 
 
 def ensure_interactive_backend() -> bool:
-    """Try to guarantee an interactive Matplotlib backend for the live GUI.
+    """Try to guarantee a WORKING interactive Matplotlib backend for the GUI.
 
-    Returns True if an interactive backend is active, False if only a headless
-    one is available (in which case the caller should skip the live window and
-    warn the user). We try the current backend first; if it is non-interactive
-    ('Agg'), we attempt the common GUI backends in order.
+    The subtlety this handles: `matplotlib.use('TkAgg', force=True)` does NOT
+    raise even when tkinter is missing — the failure only surfaces later when a
+    window is actually created. So here we don't trust `use()`; for each
+    candidate backend we actually try to BUILD and close a throwaway figure,
+    and only accept the backend if that round-trip succeeds.
+
+    Returns True if a usable interactive backend is active, False otherwise
+    (headless / no GUI toolkit installed), in which case the caller skips the
+    live window and falls back to static figures.
     """
     backend = matplotlib.get_backend().lower()
-    if backend != 'agg':
-        return True
-    for cand in ('QtAgg', 'TkAgg', 'MacOSX', 'Qt5Agg', 'GTK3Agg'):
+
+    def _works() -> bool:
+        # A real smoke test: open a 1x1 figure and close it. If the toolkit is
+        # missing or there is no display, this raises and we move on.
         try:
-            matplotlib.use(cand, force=True)
-            # Re-bind pyplot to the new backend.
-            import importlib
-            importlib.reload(plt)
+            fig = plt.figure()
+            plt.close(fig)
             return True
         except Exception:
+            return False
+
+    # If we are already on something other than Agg and it actually works, keep
+    # it. (A non-interactive backend like 'pdf' would pass _works() but isn't
+    # interactive, so we also require the backend name to be a known GUI one.)
+    interactive_names = ('qtagg', 'tkagg', 'macosx', 'qt5agg', 'qt6agg',
+                         'gtk3agg', 'gtk4agg', 'wxagg', 'nbagg')
+    if backend in interactive_names and _works():
+        return True
+
+    for cand in ('QtAgg', 'TkAgg', 'MacOSX', 'Qt5Agg', 'GTK3Agg', 'WXAgg'):
+        try:
+            matplotlib.use(cand, force=True)
+            import importlib
+            importlib.reload(plt)
+            if _works():
+                return True
+        except Exception:
             continue
+
+    # Nothing usable: restore Agg so static figures still save cleanly.
+    try:
+        matplotlib.use('Agg', force=True)
+        import importlib
+        importlib.reload(plt)
+    except Exception:
+        pass
     return False
+
+
+def diagnose_gui_backend() -> str:
+    """Return a short, actionable hint about why no GUI backend was found.
+
+    Tailored to the most common case (WSL/Ubuntu): a missing `python3-tk`
+    system package and/or an unset DISPLAY. Used only to print guidance when
+    the live GUI cannot start, so the user can fix their environment.
+    """
+    lines = []
+    has_display = bool(os.environ.get('DISPLAY') or
+                       os.environ.get('WAYLAND_DISPLAY'))
+    try:
+        import tkinter  # noqa: F401
+        has_tk = True
+    except Exception:
+        has_tk = False
+    has_qt = False
+    for q in ('PyQt5', 'PyQt6', 'PySide6'):
+        try:
+            __import__(q)
+            has_qt = True
+            break
+        except Exception:
+            pass
+
+    if not has_tk and not has_qt:
+        lines.append("    • No GUI toolkit found. Install one (pick ONE):")
+        lines.append("        sudo apt install python3-tk      # Tk backend "
+                     "(simplest on WSL/Ubuntu)")
+        lines.append("        pip install PyQt5                # Qt backend "
+                     "(alternative)")
+    if not has_display:
+        lines.append("    • DISPLAY is not set. On WSL2 with Windows 11, WSLg "
+                     "provides this automatically — make sure WSL is updated "
+                     "(`wsl --update` in Windows PowerShell) and restart the "
+                     "terminal.")
+        lines.append("      On Windows 10 / WSL1, run an X server (VcXsrv) and "
+                     "`export DISPLAY=:0` (or your server's address).")
+    if not lines:
+        lines.append("    • A GUI toolkit and DISPLAY are present, but the "
+                     "backend still failed to open a window. Try forcing one: "
+                     "`export MPLBACKEND=TkAgg`.")
+    return "\n".join(lines)
 
 
 # =============================================================================
@@ -616,7 +695,7 @@ class QGA(GeneticEvolver):
         self.n_bits = int(n_bits)
         self.shots = int(shots)
         self._levels = 2 ** self.n_bits                  # grid points per axis
-        self.sim = AerSimulator(method='statevector')
+        self.sim = make_simulator('statevector', prefer_gpu=USE_GPU)
 
         # ── pre-build & transpile the per-operator circuit templates ONCE ────
         self._build_circuits()
@@ -1078,28 +1157,12 @@ def plot_fitness_curve(results: Sequence[GAResult], outdir: str,
 # ── CSV export matching the shared `resultados_config.csv` schema ────────────
 #: Exact field order written by lcdm_quantum_samplers_personal.py so the
 #: genetic rows append cleanly to the same accumulating table.
-_CSV_FIELDS = ["Method", "Om_mean", "Om_std", "H0_mean", "H0_std",
-               "Time_s", "nqpp", "n_qubits", "n_states",
-               "chi2", "n_data", "chi2_red", "AIC", "BIC",
-               "acceptance", "final_KL", "ESS_Om", "ESS_H0",
-               "dataset", "prior"]
+def _ga_side(result: GAResult, post: Posterior) -> dict:
+    """Pack a GAResult into the 'side' dict shape the shared CSV writers expect.
 
-
-def append_results_csv(result: GAResult, post: Posterior,
-                       dataset_label: str, prior_type: str,
-                       csv_path: str = "resultados_config.csv",
-                       n_bits: Optional[int] = None) -> str:
-    """Append the genetic MAP and its χ² to the shared results CSV.
-
-    The row uses the SAME columns as the sampler table, with "Method" set to
-    'CGA' or 'QGA (q=NN%)'. Sampler-only fields (acceptance, KL) are left
-    blank. The (Om, H0) "mean ± std" are the fitness-weighted statistics of
-    the final population, so the genetic estimate is reported on equal footing
-    with the samplers' posterior means.
-
-    For a QGA we also fill nqpp / n_qubits / n_states with the qubit-encoding
-    info (n_bits per parameter, total qubits, grid points) so the table is
-    self-describing.
+    The genetic estimate is reported on equal footing with the samplers: the
+    (mu, std) are the fitness-weighted statistics of the final population, and
+    chi2/chi2_red/AIC/BIC come from the refined MAP via `fit_statistics`.
     """
     finite = np.isfinite(result.final_fit)
     pop = result.final_pop[finite]
@@ -1108,37 +1171,57 @@ def append_results_csv(result: GAResult, post: Posterior,
         w = np.ones(len(pop)) / max(len(pop), 1)
     mu = np.average(pop, weights=w, axis=0)
     std = np.sqrt(np.average((pop - mu) ** 2, weights=w, axis=0))
-
     st = result.stats
-    ess = ess_weights(w)
-
-    if result.method == 'QGA' and n_bits is not None:
-        d = post.model.n_params
-        nqpp_s = str(n_bits)
-        nq_s = str(d * n_bits)
-        nst_s = str(2 ** n_bits)
-    else:
-        nqpp_s = nq_s = nst_s = "—"
-
-    row = {
-        "Method": result.label,
-        "Om_mean": f"{mu[0]:.4f}", "Om_std": f"{std[0]:.4f}",
-        "H0_mean": f"{mu[1]:.4f}", "H0_std": f"{std[1]:.4f}",
-        "Time_s": f"{result.elapsed:.1f}s",
-        "nqpp": nqpp_s, "n_qubits": nq_s, "n_states": nst_s,
-        "chi2": f"{st['chi2']:.4f}", "n_data": str(st['n_data']),
-        "chi2_red": f"{st['chi2_red']:.4f}", "AIC": f"{st['AIC']:.4f}",
-        "BIC": f"{st['BIC']:.4f}",
-        "acceptance": "", "final_KL": "",
-        "ESS_Om": f"{ess:.1f}", "ESS_H0": f"{ess:.1f}",
-        "dataset": dataset_label, "prior": prior_type,
+    return {
+        'mu': mu, 'std': std, 'elapsed': result.elapsed,
+        'chi2': st['chi2'], 'n_data': st['n_data'],
+        'chi2_red': st['chi2_red'], 'AIC': st['AIC'], 'BIC': st['BIC'],
+        'ess': ess_weights(w),
+        # genetic optimizers have neither MH acceptance nor a VI KL, so those
+        # columns are left blank by the shared writer (is_mcmc=True, no keys).
     }
-    write_header = not os.path.exists(csv_path)
-    with open(csv_path, "a", newline="") as f:
-        wtr = csv.DictWriter(f, fieldnames=_CSV_FIELDS, extrasaction="ignore")
-        if write_header:
-            wtr.writeheader()
-        wtr.writerow(row)
+
+
+def append_results_csv(result: GAResult, post: Posterior,
+                       dataset_label: str, prior_type: str,
+                       run_csv: str = "resultados_config.csv",
+                       cumulative_csv: str = "resultados_config.csv",
+                       n_bits: Optional[int] = None) -> str:
+    """Append the genetic MAP to the per-run AND cumulative results CSVs.
+
+    [FIX] Now reports EVERY model parameter (wCDM: w; CPL: w0, wa; GEDE: Delta),
+    not just Om/H0, by reusing the SAME schema and writers as the sampler module
+    (`cosmo_modular_quantum`). This guarantees CGA/QGA rows line up exactly with
+    the QMCMC/QVMC rows in the shared cumulative table.
+
+    Two schemas, like the sampler module:
+      * run_csv        — NAMED per-parameter columns (one model per run).
+      * cumulative_csv — GENERIC p1..pN columns (mixed models share one file).
+
+    "Method" is 'CGA' or 'QGA (q=NN%)'. The qubits-per-parameter (n_bits) is
+    written in the nqpp column for a QGA, '—' for the classical CGA.
+    """
+    side = _ga_side(result, post)
+    model = post.model
+    nqpp_tag = (str(n_bits) if (result.method == 'QGA' and n_bits is not None)
+                else "—")
+    side_rows = [(side, result.label, True, nqpp_tag)]
+
+    # NAMED per-run schema
+    named_fields = _cmq().csv_fields_for_model(model)
+    named_rows = [_cmq().csv_row_for_side(s, model, lbl, mc, nq,
+                                       dataset_label, prior_type)
+                  for (s, lbl, mc, nq) in side_rows]
+    _cmq()._write_csv_rows(named_rows, named_fields, run_csv)
+
+    # GENERIC cumulative schema
+    if cumulative_csv:
+        gen_fields = _cmq().csv_fields_generic()
+        gen_rows = [_cmq().csv_row_generic(s, model, lbl, mc, nq,
+                                        dataset_label, prior_type)
+                    for (s, lbl, mc, nq) in side_rows]
+        _cmq()._write_csv_rows(gen_rows, gen_fields, cumulative_csv)
+    return run_csv
     return csv_path
 
 
@@ -1204,13 +1287,14 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
 
         if write_csv:
             # Two destinations:
-            #   1) a per-run copy inside this run's folder (isolated result),
-            #   2) the cumulative global table in the CWD (compare across runs).
+            #   1) a per-run copy inside this run's folder (NAMED columns),
+            #   2) the cumulative global table in the CWD (GENERIC columns,
+            #      so mixed models share one tidy file).
             run_csv = os.path.join(outdir, "resultados_config.csv")
             append_results_csv(res, post, dataset_label, prior_type,
-                                csv_path=run_csv, n_bits=n_bits)
-            append_results_csv(res, post, dataset_label, prior_type,
-                                csv_path="resultados_config.csv", n_bits=n_bits)
+                               run_csv=run_csv,
+                               cumulative_csv="resultados_config.csv",
+                               n_bits=n_bits)
             say(f"[{res.method}] MAP appended to {run_csv} "
                 f"(+ cumulative resultados_config.csv)")
 
@@ -1291,9 +1375,18 @@ def interactive_menu() -> dict:
     gens = ask_int("Generations", 80)
     n_bits = ask_int("QGA qubits per parameter (n_bits)", 6) if 'qga' in methods else 6
 
+    # Hardware / profiling (the QGA can use a GPU; the CGA is pure NumPy).
+    use_gpu = False
+    if 'qga' in methods and gpu_available():
+        use_gpu = _ask("QGA simulation device:",
+                       {0: 'CPU', 1: 'GPU (Aer on CUDA — detected)'}, 1) == 1
+    profile = _ask("Profile memory / GPU-hours and save a usage figure?",
+                   {0: 'No', 1: 'Yes'}, 0) == 1
+
     return dict(model=model_name, dataset=dataset, prior=prior,
                 methods=methods, qga_config=qcfg, pop_size=pop,
-                n_generations=gens, n_bits=n_bits)
+                n_generations=gens, n_bits=n_bits,
+                use_gpu=use_gpu, profile=profile)
 
 
 # =============================================================================
@@ -1374,6 +1467,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Do not append to resultados_config.csv')
     p.add_argument('--no-live', action='store_true',
                    help='Force-disable the live GUI even in interactive mode')
+    p.add_argument('--gpu', action='store_true',
+                   help='Use the GPU for the QGA Aer simulation if available '
+                        '(qiskit-aer-gpu + CUDA). Falls back to CPU otherwise. '
+                        'No effect on the pure-NumPy CGA.')
+    p.add_argument('--profile', action='store_true',
+                   help='Profile peak CPU/GPU memory, wall time and GPU-hours, '
+                        'and save a resource_usage_*.png figure.')
     p.add_argument('--self-test', action='store_true',
                    help='Run a quick correctness self-test and exit '
                         '(CGA reaches the known optimum; QGA(0%%) == CGA)')
@@ -1466,13 +1566,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     np.random.seed(args.seed)
 
-    # [NEW] Timestamped run directory (results/run_<date>_<model>/) so the
-    # outputs of this run never mix with the sampler module's. An explicit
-    # --outdir overrides it.
-    if args.outdir == 'results':
-        args.outdir = make_run_dir('results', tag=args.model)
-    else:
-        os.makedirs(args.outdir, exist_ok=True)
+    # [GPU] Publish the device choice module-wide so the QGA's simulator uses
+    # it. --gpu requests the GPU; with no GPU present we fall back to CPU.
+    global USE_GPU
+    USE_GPU = bool(getattr(args, 'gpu', False))
+    do_profile = bool(getattr(args, 'profile', False))
 
     if cli_mode:
         # ── headless / batch / HPC ───────────────────────────────────────────
@@ -1480,17 +1578,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         # headless node never tries to open a window and the live GUI code is
         # never reached.
         set_headless_backend()
-        ts = time.strftime('%Y%m%d_%H%M%S')
-        log_file = args.log_file or os.path.join(
-            args.outdir, f"genetic_{args.model}_{ts}.log")
-        logger = setup_logger(log_file, name="genetic")
-        # echo INFO to console too (long HPC runs benefit from live feedback)
-        import logging as _logging
-        for h in logger.handlers:
-            if isinstance(h, _logging.StreamHandler) and not isinstance(
-                    h, _logging.FileHandler):
-                h.setLevel(_logging.INFO)
-
         methods = args.methods or ['cga']
         model_name, dataset, prior = args.model, args.dataset, args.prior
         qga_config = _resolve_qga_config(args)
@@ -1503,8 +1590,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                       tournament_k=args.tournament_k, seed=args.seed)
         n_bits = args.n_bits
         live = False                            # <- CRITICAL: never live in CLI
-        logger.info("CLI/batch mode: live GUI disabled; results -> %s/  | "
-                    "progress -> %s", args.outdir, log_file)
     else:
         # ── interactive menu + live GUI ──────────────────────────────────────
         logger = None
@@ -1515,6 +1600,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         ga = GAConfig(pop_size=sel['pop_size'],
                       n_generations=sel['n_generations'], seed=args.seed)
         n_bits = sel['n_bits']
+        USE_GPU = sel.get('use_gpu', USE_GPU)
+        do_profile = sel.get('profile', do_profile)
         live = not args.no_live
         # [FIX] Guarantee an interactive backend BEFORE any LiveGA is built.
         # If only a headless backend is available (e.g. SSH without X-forwarding)
@@ -1524,8 +1611,36 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("  ⚠  No interactive Matplotlib backend available "
                   "(headless display). Live GUI disabled; static figures and "
                   "the snapshot will still be saved.")
+            print("  To enable the live window, fix one of these:")
+            print(diagnose_gui_backend())
             live = False
-        print(f"  Interactive mode: results -> {args.outdir}/")
+        print(f"  Interactive mode: results -> {args.outdir}/"
+              if args.outdir != 'results' else "")
+
+    # [FIX] Create the timestamped run directory AFTER the model is known
+    # (the interactive menu chooses it), so an interactive wCDM run no longer
+    # writes into a folder named '..._lcdm' and the folder always exists before
+    # any figure/CSV is written.
+    if args.outdir == 'results':
+        args.outdir = make_run_dir('results', tag=model_name)
+    else:
+        os.makedirs(args.outdir, exist_ok=True)
+
+    if cli_mode:
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        log_file = args.log_file or os.path.join(
+            args.outdir, f"genetic_{model_name}_{ts}.log")
+        logger = setup_logger(log_file, name="genetic")
+        import logging as _logging
+        for h in logger.handlers:
+            if isinstance(h, _logging.StreamHandler) and not isinstance(
+                    h, _logging.FileHandler):
+                h.setLevel(_logging.INFO)
+        logger.info("CLI/batch mode: live GUI disabled; results -> %s/  | "
+                    "progress -> %s", args.outdir, log_file)
+    else:
+        logger = None
+        print(f"  Results -> {args.outdir}/")
 
     model = MODELS[model_name]
     post = Posterior(model, dataset, prior)
@@ -1536,12 +1651,45 @@ def main(argv: Optional[List[str]] = None) -> int:
         say(f"QGA quantumness: {compute_qga_quantumness(qga_config):.0f}%  "
             f"({qga_config.get('label', '')})")
 
+    # [GPU] Report the device actually used by the QGA (CGA is pure NumPy).
+    device = resolve_device(USE_GPU)
+    if 'qga' in methods:
+        if USE_GPU and device == 'CPU':
+            say("  ⚠  --gpu requested but no Aer GPU device is available "
+                "(need qiskit-aer-gpu + CUDA). QGA running on CPU.")
+        say(f"  QGA simulation device: {device}")
+
+    # [PROFILE] Optionally wrap the whole optimization in the resource profiler.
+    profiler = None
+    if do_profile:
+        import cosmo_profiling as _prof
+        profiler = _prof.ResourceProfiler(
+            tag=f"genetic_{model_name}_{'gpu' if device == 'GPU' else 'cpu'}",
+            device=device, interval=0.25)
+        profiler.start()
+
     run_genetic(
         post=post, methods=methods, ga=ga, qga_config=qga_config,
         n_bits=n_bits, dataset_label=dataset, prior_type=prior,
         outdir=args.outdir, live=live, logger=logger,
         log_every=args.log_every, shots=args.shots,
         make_plots=not args.no_plot, write_csv=not args.no_csv)
+
+    if profiler is not None:
+        import cosmo_profiling as _prof
+        result = profiler.stop()
+        say(_prof.summarize(result))
+        ptitle = f"{model.label} | {'+'.join(methods).upper()} | {dataset}"
+        ppath = _prof.ResourceProfiler.plot(result, args.outdir,
+                                            title_extra=ptitle)
+        if ppath:
+            say(f"  Resource-usage figure: {ppath}")
+        try:
+            with open(os.path.join(args.outdir,
+                                   f"profile_{result.tag}.json"), 'w') as fh:
+                json.dump(result.as_row(), fh, indent=2)
+        except Exception:
+            pass
 
     if live:
         print("\nClose the live window(s) to exit.")

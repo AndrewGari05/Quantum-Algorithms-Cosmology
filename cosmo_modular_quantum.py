@@ -59,6 +59,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -68,11 +69,10 @@ from typing import List, Optional
 
 import numpy as np
 import matplotlib
-# [FIX] Do NOT force the 'Agg' backend at import time. Doing so used to poison
-# any module that imports this one (e.g. cosmo_genetic_optimizers, whose live
-# GUI then silently failed because the backend was already non-interactive).
-# The headless 'Agg' backend is now selected ONLY in CLI/batch mode, inside
-# main(), via set_headless_backend(). Interactive importers keep their GUI.
+# [FIX] Do NOT force the 'Agg' backend at import time — doing so disabled the
+# live GUI of any module that imports this one (e.g. cosmo_genetic_optimizers).
+# 'Agg' is now selected ONLY in CLI/batch mode, inside main(), via
+# set_headless_backend(). Interactive importers keep their GUI backend.
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
@@ -85,13 +85,9 @@ warnings.filterwarnings("ignore")
 
 
 def set_headless_backend():
-    """Switch Matplotlib to the non-interactive 'Agg' backend (CLI/HPC mode).
-
-    Called only when the script runs with arguments, so a headless node never
-    tries to open a window and importing this module never disables another
-    module's live GUI.
-    """
+    """Switch Matplotlib to the non-interactive 'Agg' backend (CLI/HPC mode)."""
     matplotlib.use('Agg', force=True)
+
 
 from qiskit import QuantumCircuit, transpile
 from qiskit.circuit import ParameterVector
@@ -100,7 +96,18 @@ from qiskit_aer import AerSimulator
 import cosmo_core as core
 from cosmo_core import (MODELS, Posterior, RNG, ess_chains, ess_weights,
                         fit_statistics, fmt_theta, gelman_rubin_max,
-                        make_run_dir, setup_logger)
+                        gpu_available, make_run_dir, make_simulator,
+                        resolve_device, setup_logger)
+
+# Module-level GPU preference. main() sets this from --gpu (CLI) or the
+# interactive menu; every AerSimulator in this module is built through
+# `_sim(...)` which reads it, so the CPU/GPU choice is consistent everywhere.
+USE_GPU = False
+
+
+def _sim(method: str = 'statevector', **kwargs):
+    """Project-wide AerSimulator factory honoring the module GPU preference."""
+    return make_simulator(method=method, prefer_gpu=USE_GPU, **kwargs)
 
 # ── Contrasting color convention used by EVERY overlay figure ────────────────
 #    (requirement 3: blue = classical, red/orange = quantum)
@@ -110,6 +117,23 @@ C_CLASSICAL2 = '#17becf'  # teal   — Classical VI when shown ALONGSIDE
                           #          (1-to-1 plots that mix both families)
 C_QUANTUM   = '#d62728'   # red    — QMCMC (quantum MCMC family)
 C_QUANTUM2  = '#ff7f0e'   # orange — QVMC (quantum variational family)
+
+
+def _save_fig(fig, png_path, close=True):
+    """Save a figure as PNG+PDF, creating the output directory if needed.
+
+    [FIX] Centralizes figure saving so the destination folder is guaranteed to
+    exist before writing — this prevents the FileNotFoundError that occurred
+    when a figure was saved before the run directory had been created.
+    """
+    d = os.path.dirname(png_path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    fig.savefig(png_path, dpi=150, bbox_inches='tight')
+    fig.savefig(png_path.replace('.png', '.pdf'), bbox_inches='tight')
+    if close:
+        plt.close(fig)
+    return png_path
 
 
 # ── Sanity-check instrumentation ─────────────────────────────────────────────
@@ -300,7 +324,7 @@ class QuantumProposalEngine:
         self.n_qubits = max(2, n_phys)
         self.qc = build_proposal_circuit(self.n_qubits, n_layers)
         self.n_phi = self.qc.num_parameters
-        self.sim = AerSimulator(method='statevector')
+        self.sim = _sim('statevector')
         # [OPT] transpile the template ONCE
         self._qc_t = transpile(self.qc, self.sim)
         self.batch = batch
@@ -389,7 +413,7 @@ def hadamard_accept_log(lp_cur: float, lp_prop: float) -> float:
         qc = QuantumCircuit(1)
         qc.ry(par[0], 0)
         qc.save_statevector()
-        _HAD['sim'] = AerSimulator(method='statevector')
+        _HAD['sim'] = _sim('statevector')
         _HAD['qc_t'] = transpile(qc, _HAD['sim'])
         _HAD['par'] = par
     theta = 2.0 * np.arccos(np.sqrt(A))
@@ -599,7 +623,7 @@ def quantum_amplitude_normalization(P_unnorm: np.ndarray) -> np.ndarray:
     uses the exact sum.
     """
     n = max(1, min(4, int(np.log2(max(len(P_unnorm), 2)))))
-    sim = AerSimulator(method='statevector')
+    sim = _sim('statevector')
     qc = QuantumCircuit(n + 1)
     qc.h(range(n + 1))
     norm = float(np.sum(P_unnorm))
@@ -716,7 +740,7 @@ class QVMCModular:
             self.grid_window = list(self.model.sample_box)
         self.grids = [np.linspace(lo, hi, self.n_grid)
                       for lo, hi in self.grid_window]
-        self.sim = AerSimulator(method='statevector')
+        self.sim = _sim('statevector')
         # idx -> θ table (vectorized) used by decode, target and traces
         self.theta_table = self._build_theta_table()
 
@@ -1120,9 +1144,7 @@ def plot_kl_overlay(res_q: dict, res_c: dict, outdir: str, tag: str):
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
     f = os.path.join(outdir, f'kl_overlay_{tag}.png')
-    fig.savefig(f, dpi=150, bbox_inches='tight')
-    fig.savefig(f.replace('.png', '.pdf'), bbox_inches='tight')
-    plt.close(fig)
+    _save_fig(fig, f)
     return f
 
 
@@ -1147,9 +1169,7 @@ def plot_rhat_overlay(res_q: dict, res_c: dict, outdir: str, tag: str):
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
     f = os.path.join(outdir, f'rhat_overlay_{tag}.png')
-    fig.savefig(f, dpi=150, bbox_inches='tight')
-    fig.savefig(f.replace('.png', '.pdf'), bbox_inches='tight')
-    plt.close(fig)
+    _save_fig(fig, f)
     return f
 
 
@@ -1198,9 +1218,7 @@ def plot_corner_overlay(flat_c: np.ndarray, flat_q: np.ndarray, model,
     fig.suptitle(title, fontsize=13, fontweight='bold', y=1.02)
 
     f = os.path.join(outdir, f'corner_{tag}.png')
-    fig.savefig(f, dpi=150, bbox_inches='tight')
-    fig.savefig(f.replace('.png', '.pdf'), bbox_inches='tight')
-    plt.close(fig)
+    _save_fig(fig, f)
     return f
 
 
@@ -1253,9 +1271,7 @@ def plot_corner_multi(datasets, colors, labels, model, outdir: str, tag: str,
                bbox_to_anchor=(0.99, 0.93))
     fig.suptitle(title, fontsize=13, fontweight='bold', y=1.02)
     f = os.path.join(outdir, f'corner_{tag}.png')
-    fig.savefig(f, dpi=150, bbox_inches='tight')
-    fig.savefig(f.replace('.png', '.pdf'), bbox_inches='tight')
-    plt.close(fig)
+    _save_fig(fig, f)
     return f
 
 
@@ -1331,9 +1347,7 @@ def plot_marginals_overlay(res_q: dict, res_c: dict, post: Posterior,
 
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     f = os.path.join(outdir, f'marginals_{tag}.png')
-    fig.savefig(f, dpi=150, bbox_inches='tight')
-    fig.savefig(f.replace('.png', '.pdf'), bbox_inches='tight')
-    plt.close(fig)
+    _save_fig(fig, f)
     return f
 
 
@@ -1390,6 +1404,7 @@ def plot_traces_overlay(res_q: dict, res_c: dict, model, outdir: str,
         ax.grid(True, alpha=0.25)
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     f = os.path.join(outdir, f'traces_{tag}.png')
+    os.makedirs(os.path.dirname(f) or '.', exist_ok=True)
     fig.savefig(f, dpi=150, bbox_inches='tight')
     plt.close(fig)
     return f
@@ -1448,7 +1463,9 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
                            max_iter_qvmc: int, nqpp: int, outdir: str,
                            seed: int = 42, logger=None, log_every: int = 500,
                            n_chains_mcmc: int = 6, n_chains_qvmc: int = 3,
-                           n_shots: int = 2000) -> dict:
+                           n_shots: int = 2000,
+                           csv_paths: Optional[list] = None,
+                           dataset_label: str = "", prior_type: str = "") -> dict:
     """Run TWO independent, monotonic per-method quantumness ladders.
 
     This is the canonical benchmark: it sweeps each sampler along ITS OWN
@@ -1523,6 +1540,29 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
     say(f"Ladder figures in {outdir}/: ladder_qmcmc_*, "
         f"ladder_qvmc_*, ladder_rhat_qmcmc_*, ladder_kl_qvmc_*, "
         f"ladder_1to1_*, ladder_summary_*, ladder_trends_*")
+
+    # [FIX] Write the benchmark to CSV too. Previously only single-config runs
+    # wrote resultados_config.csv; the --benchmark path returned before the
+    # writer, so the ladder produced PNG tables but no CSV. Here we emit ONE row
+    # per rung of each ladder (every parameter included) to BOTH the per-run
+    # (named columns) and the cumulative (generic columns) files.
+    if csv_paths:
+        run_csv, cumulative_csv = csv_paths[0], (
+            csv_paths[1] if len(csv_paths) > 1 else "")
+        side_rows = []
+        for r in qmcmc_runs:
+            label = ("Classical MCMC" if r['pct'] == 0
+                     else f"QMCMC {r['pct']:.0f}%")
+            side_rows.append((r, label, True, "—" if r['pct'] == 0 else nqpp))
+        for r in qvmc_runs:
+            label = ("Classical VI" if r['pct'] == 0
+                     else f"QVMC {r['pct']:.0f}%")
+            side_rows.append((r, label, False, "—" if r['pct'] == 0 else nqpp))
+        write_run_and_cumulative(side_rows, model, run_csv, cumulative_csv,
+                                 dataset_label, prior_type)
+        say(f"Benchmark results written to {run_csv} "
+            f"(+ cumulative resultados_config.csv)")
+
     return {'qmcmc': qmcmc_runs, 'qvmc': qvmc_runs}
 
 
@@ -1580,8 +1620,7 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
                  f'(total steps = {steps})')
     ax.legend(title='QMCMC %', fontsize=9); ax.grid(True, alpha=0.3)
     f = os.path.join(outdir, f'ladder_rhat_qmcmc_{name}.png')
-    fig.savefig(f, dpi=150, bbox_inches='tight')
-    fig.savefig(f.replace('.png', '.pdf'), bbox_inches='tight'); plt.close(fig)
+    _save_fig(fig, f)
 
     # ── KL overlay along the QVMC ladder ─────────────────────────────────────
     fig, ax = plt.subplots(figsize=(8, 5.2))
@@ -1598,8 +1637,7 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
                  f'(iterations = {iters}, nqpp = {nqpp})')
     ax.legend(title='QVMC %', fontsize=9); ax.grid(True, alpha=0.3)
     f = os.path.join(outdir, f'ladder_kl_qvmc_{name}.png')
-    fig.savefig(f, dpi=150, bbox_inches='tight')
-    fig.savefig(f.replace('.png', '.pdf'), bbox_inches='tight'); plt.close(fig)
+    _save_fig(fig, f)
 
     # ── 1-to-1: each quantum rung vs its classical baseline ──────────────────
     base_m = qmcmc_runs[0]
@@ -1629,7 +1667,19 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
     vq = sorted(qvmc_runs, key=lambda r: r['pct'])
     mp = [r['pct'] for r in mq]
     vp = [r['pct'] for r in vq]
-    fig, axes = plt.subplots(2, 4, figsize=(18, 8))
+
+    # [FIX] Adaptive grid: one panel per model parameter PLUS six fixed
+    # diagnostic panels (runtime, chi2_red, AIC, BIC, ESS, acceptance/KL). For
+    # ΛCDM (2 params) this is 8 panels = the original 2x4 layout; wCDM (3) gives
+    # 9, CPL (4) gives 10, laid out in 4 columns.
+    npar = model.n_params
+    n_panels = npar + 6
+    ncols = 4
+    nrows = int(np.ceil(n_panels / ncols))
+    fig, axes = plt.subplots(nrows, ncols,
+                             figsize=(4.5 * ncols, 4.0 * nrows))
+    axes = np.atleast_2d(axes)
+    flat_axes = axes.flatten()
 
     def _trend(ax, getter, ylabel, title, err=None, fid=None):
         ax.plot(mp, [getter(r) for r in mq], 'o-', color=C_QUANTUM, lw=2,
@@ -1649,21 +1699,27 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
         ax.set_ylabel(ylabel); ax.set_title(title); ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
 
-    p0, p1 = model.param_names[0], model.param_names[1]
-    _trend(axes[0, 0], lambda r: r['mu'][0], p0, f'{p0} vs quantumness',
-           err=lambda r: r['std'][0], fid=model.fiducial[0])
-    _trend(axes[0, 1], lambda r: r['mu'][1], p1, f'{p1} vs quantumness',
-           err=lambda r: r['std'][1], fid=model.fiducial[1])
-    _trend(axes[0, 2], lambda r: r['elapsed'], 'runtime [s]',
-           'Runtime vs quantumness')
-    _trend(axes[0, 3], lambda r: r['chi2_red'], r'$\chi^2_\nu$',
-           'Reduced chi2 vs quantumness', fid=1.0)
-    _trend(axes[1, 0], lambda r: r['AIC'], 'AIC', 'AIC vs quantumness')
-    _trend(axes[1, 1], lambda r: r['BIC'], 'BIC', 'BIC vs quantumness')
-    _trend(axes[1, 2], lambda r: r['ess'], 'ESS',
-           'Effective sample size vs quantumness')
+    # One panel per model parameter (closure binds i correctly via default arg).
+    for i in range(npar):
+        pname = model.param_names[i]
+        _trend(flat_axes[i],
+               (lambda r, i=i: r['mu'][i]), pname,
+               f'{pname} vs quantumness',
+               err=(lambda r, i=i: r['std'][i]),
+               fid=model.fiducial[i])
+
+    # Fixed diagnostic panels after the parameter panels.
+    j = npar
+    _trend(flat_axes[j], lambda r: r['elapsed'], 'runtime [s]',
+           'Runtime vs quantumness'); j += 1
+    _trend(flat_axes[j], lambda r: r['chi2_red'], r'$\chi^2_\nu$',
+           'Reduced chi2 vs quantumness', fid=1.0); j += 1
+    _trend(flat_axes[j], lambda r: r['AIC'], 'AIC', 'AIC vs quantumness'); j += 1
+    _trend(flat_axes[j], lambda r: r['BIC'], 'BIC', 'BIC vs quantumness'); j += 1
+    _trend(flat_axes[j], lambda r: r['ess'], 'ESS',
+           'Effective sample size vs quantumness'); j += 1
     # acceptance is QMCMC-only; KL is QVMC-only → twin axes
-    ax = axes[1, 3]
+    ax = flat_axes[j]
     ax.plot(mp, [r['acceptance'] for r in mq], 'o-', color=C_QUANTUM,
             lw=2, ms=6, label='QMCMC acceptance')
     ax.set_xlabel('Quantumness %  (per method)')
@@ -1675,6 +1731,11 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
     ax2.set_ylabel('QVMC final KL', color=C_QUANTUM2)
     ax2.tick_params(axis='y', labelcolor=C_QUANTUM2)
     ax.set_title('Acceptance (QMCMC) & KL (QVMC)'); ax.grid(alpha=0.3)
+    j += 1
+
+    # Hide any unused panels in the grid.
+    for k in range(j, len(flat_axes)):
+        flat_axes[k].axis('off')
 
     fig.suptitle(f'{model.label} — trends along the per-method quantumness '
                  f'ladders\nsteps={steps} | iters={iters} | nqpp={nqpp}  '
@@ -1682,28 +1743,38 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
                  fontsize=14, fontweight='bold', y=1.0)
     fig.tight_layout()
     f = os.path.join(outdir, f'ladder_trends_{name}.png')
-    fig.savefig(f, dpi=150, bbox_inches='tight')
-    fig.savefig(f.replace('.png', '.pdf'), bbox_inches='tight'); plt.close(fig)
+    _save_fig(fig, f)
 
     # ── summary table (per-method %) ─────────────────────────────────────────
-    fig = plt.figure(figsize=(13, 4.5)); ax = fig.add_subplot(111); ax.axis('off')
+    # [FIX] Generalized to ALL model parameters (not just the first two), so
+    # extended models (wCDM: w; CPL: w0, wa; GEDE: Delta) report every free
+    # parameter. One "value±std" column per parameter, built from param_names.
+    npar = model.n_params
+    pnames = model.param_names
+    # Wider figure when there are more parameters so the table stays readable.
+    fig = plt.figure(figsize=(13 + 2.0 * max(0, npar - 2), 4.5))
+    ax = fig.add_subplot(111); ax.axis('off')
+
+    def _param_cells(r):
+        # "value±std" for every parameter, with sensible precision per column.
+        cells = []
+        for i in range(npar):
+            prec = 4 if i == 0 else (2 if pnames[i] == 'H0' else 4)
+            cells.append(f"{r['mu'][i]:.{prec}f}±{r['std'][i]:.{prec}f}")
+        return cells
+
     rows = []
     for r in qmcmc_runs:
-        rows.append([f"QMCMC {r['pct']:.0f}%",
-                     f"{r['mu'][0]:.4f}±{r['std'][0]:.4f}",
-                     f"{r['mu'][1]:.2f}±{r['std'][1]:.2f}",
+        rows.append([f"QMCMC {r['pct']:.0f}%", *_param_cells(r),
                      f"{r['chi2_red']:.3f}", f"{r['AIC']:.1f}",
                      f"{r['elapsed']:.1f}s",
                      f"{r['acceptance']:.3f}", f"{r['ess']:.0f}", "—"])
     for r in qvmc_runs:
-        rows.append([f"QVMC {r['pct']:.0f}%",
-                     f"{r['mu'][0]:.4f}±{r['std'][0]:.4f}",
-                     f"{r['mu'][1]:.2f}±{r['std'][1]:.2f}",
+        rows.append([f"QVMC {r['pct']:.0f}%", *_param_cells(r),
                      f"{r['chi2_red']:.3f}", f"{r['AIC']:.1f}",
                      f"{r['elapsed']:.1f}s",
                      "—", f"{r['ess']:.0f}", f"{r['kl_final']:.4f}"])
-    cols = ['method/level', f'{model.param_names[0]}',
-            f'{model.param_names[1]}', 'chi2_red', 'AIC', 'time',
+    cols = ['method/level', *pnames, 'chi2_red', 'AIC', 'time',
             'acc', 'ESS', 'KL']
     tbl = ax.table(cellText=rows, colLabels=cols, loc='center',
                    cellLoc='center')
@@ -1712,12 +1783,181 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
                  f'steps={steps} | iters={iters} | nqpp={nqpp}',
                  fontsize=13, fontweight='bold')
     f = os.path.join(outdir, f'ladder_summary_{name}.png')
-    fig.savefig(f, dpi=150, bbox_inches='tight'); plt.close(fig)
+    _save_fig(fig, f)
 
 
 # =============================================================================
 # 7.  INTERACTIVE MENU (default behavior with no arguments)
 # =============================================================================
+
+def csv_fields_for_model(model) -> list:
+    """The CSV column schema for a given model: one mean/std pair per parameter.
+
+    Centralized so every writer (single-config and benchmark ladder) produces
+    the SAME header, with a `<param>_mean` / `<param>_std` pair for every free
+    parameter — H0, Om AND the extra ones (wCDM: w; CPL: w0, wa; GEDE: Delta).
+
+    Used for the PER-RUN CSV (one model per run → named, fully readable
+    columns). The cumulative cross-run file uses `csv_fields_generic()` instead,
+    because there different models with different parameters share one file.
+    """
+    fields = ['Method']
+    for p in model.param_names:
+        fields += [f'{p}_mean', f'{p}_std']
+    fields += ['Time_s', 'nqpp', 'chi2', 'n_data', 'chi2_red', 'AIC', 'BIC',
+               'acceptance', 'final_KL', 'ESS', 'dataset', 'prior']
+    return fields
+
+
+#: Max free parameters any model in MODELS has (CPL has 4: Om,H0,w0,wa).
+_MAX_PARAMS = max(m.n_params for m in MODELS.values())
+
+
+def csv_fields_generic() -> list:
+    """Fixed, model-agnostic schema for the CUMULATIVE cross-run CSV.
+
+    [FIX] A cumulative file can hold rows from DIFFERENT models (wCDM has w,
+    CPL has w0+wa, …). Named per-parameter columns then misalign when a 4-param
+    row is appended under a 3-param header. To keep one tidy cumulative table,
+    this schema is fixed: it records the model, its parameter names, and up to
+    `_MAX_PARAMS` generic value/std slots, so any model fits the same columns.
+    """
+    fields = ['Method', 'model', 'params']
+    for i in range(1, _MAX_PARAMS + 1):
+        fields += [f'p{i}_mean', f'p{i}_std']
+    fields += ['Time_s', 'nqpp', 'chi2', 'n_data', 'chi2_red', 'AIC', 'BIC',
+               'acceptance', 'final_KL', 'ESS', 'dataset', 'prior']
+    return fields
+
+
+def csv_row_generic(side: dict, model, method_label: str, is_mcmc: bool,
+                    nqpp, dataset_label: str, prior_type: str) -> dict:
+    """Build a row under the fixed generic schema (cumulative CSV).
+
+    The parameter values go into p1..pN slots and `params` names them, so the
+    row is self-describing regardless of model.
+    """
+    mu, sd = side['mu'], side['std']
+    row = {'Method': method_label, 'model': model.name,
+           'params': "|".join(model.param_names)}
+    for i in range(_MAX_PARAMS):
+        if i < len(mu):
+            row[f'p{i+1}_mean'] = f"{mu[i]:.6f}"
+            row[f'p{i+1}_std'] = f"{sd[i]:.6f}"
+        else:
+            row[f'p{i+1}_mean'] = ""
+            row[f'p{i+1}_std'] = ""
+    row['Time_s'] = f"{side.get('elapsed', float('nan')):.1f}"
+    row['nqpp'] = str(nqpp)
+    row['chi2'] = f"{side['chi2']:.4f}"
+    row['n_data'] = str(side['n_data'])
+    row['chi2_red'] = f"{side['chi2_red']:.4f}"
+    row['AIC'] = f"{side['AIC']:.4f}"
+    row['BIC'] = f"{side['BIC']:.4f}"
+    row['acceptance'] = (f"{side['acceptance']:.4f}"
+                         if is_mcmc and 'acceptance' in side else "")
+    row['final_KL'] = (f"{side['kl_final']:.6f}"
+                       if (not is_mcmc) and 'kl_final' in side else "")
+    row['ESS'] = f"{side.get('ess', float('nan')):.1f}"
+    row['dataset'] = dataset_label
+    row['prior'] = prior_type
+    return row
+
+
+def csv_row_for_side(side: dict, model, method_label: str, is_mcmc: bool,
+                     nqpp, dataset_label: str, prior_type: str) -> dict:
+    """Build one CSV row from a result dict, with EVERY model parameter.
+
+    `side` must carry 'mu' and 'std' arrays of length model.n_params plus the
+    scalar diagnostics (chi2, chi2_red, AIC, BIC, ess, and acceptance OR
+    kl_final depending on the family).
+    """
+    pnames = model.param_names
+    mu, sd = side['mu'], side['std']
+    row = {'Method': method_label}
+    for i, p in enumerate(pnames):
+        row[f'{p}_mean'] = f"{mu[i]:.6f}"
+        row[f'{p}_std'] = f"{sd[i]:.6f}"
+    row['Time_s'] = f"{side.get('elapsed', float('nan')):.1f}"
+    row['nqpp'] = str(nqpp)
+    row['chi2'] = f"{side['chi2']:.4f}"
+    row['n_data'] = str(side['n_data'])
+    row['chi2_red'] = f"{side['chi2_red']:.4f}"
+    row['AIC'] = f"{side['AIC']:.4f}"
+    row['BIC'] = f"{side['BIC']:.4f}"
+    row['acceptance'] = (f"{side['acceptance']:.4f}"
+                         if is_mcmc and 'acceptance' in side else "")
+    row['final_KL'] = (f"{side['kl_final']:.6f}"
+                       if (not is_mcmc) and 'kl_final' in side else "")
+    row['ESS'] = f"{side.get('ess', float('nan')):.1f}"
+    row['dataset'] = dataset_label
+    row['prior'] = prior_type
+    return row
+
+
+def _write_csv_rows(rows: list, fields: list, csv_path: str) -> None:
+    """Append already-built row dicts to a CSV, writing the header if new."""
+    write_header = not os.path.exists(csv_path)
+    with open(csv_path, 'a', newline='') as fh:
+        wtr = csv.DictWriter(fh, fieldnames=fields, extrasaction='ignore')
+        if write_header:
+            wtr.writeheader()
+        for r in rows:
+            wtr.writerow(r)
+
+
+def write_run_and_cumulative(side_rows: list, model, run_csv: str,
+                             cumulative_csv: str, dataset_label: str,
+                             prior_type: str) -> None:
+    """Write the SAME results to two files with two schemas.
+
+    * run_csv: per-run file inside the run folder — NAMED per-parameter columns
+      (one model per run, maximally readable).
+    * cumulative_csv: cross-run file in the CWD — GENERIC schema, so rows from
+      different models (wCDM, CPL, GEDE) line up under one fixed header.
+
+    Args:
+        side_rows: list of (side_dict, method_label, is_mcmc, nqpp) tuples.
+        model: the CosmoModel.
+        run_csv, cumulative_csv: destinations.
+        dataset_label, prior_type: provenance columns.
+    """
+    named_fields = csv_fields_for_model(model)
+    named_rows = [csv_row_for_side(s, model, lbl, mc, nq,
+                                   dataset_label, prior_type)
+                  for (s, lbl, mc, nq) in side_rows]
+    _write_csv_rows(named_rows, named_fields, run_csv)
+
+    if cumulative_csv:
+        gen_fields = csv_fields_generic()
+        gen_rows = [csv_row_generic(s, model, lbl, mc, nq,
+                                    dataset_label, prior_type)
+                    for (s, lbl, mc, nq) in side_rows]
+        _write_csv_rows(gen_rows, gen_fields, cumulative_csv)
+
+
+def append_results_csv(result_side: dict, model, dataset_label: str,
+                       prior_type: str, family_mcmc: str, family_vi: str,
+                       nqpp, csv_path: str) -> None:
+    """Append the MCMC and VI rows of one single-config run to a PER-RUN CSV.
+
+    [FIX] The modular script previously wrote NO CSV at all — only PNG tables —
+    which is why `resultados_config.csv` stayed empty when running this module.
+    Reports EVERY model parameter (wCDM: w; CPL: w0, wa; GEDE: Delta), one
+    `<param>_mean` / `<param>_std` pair each. Two rows per call (MCMC + VI).
+
+    This writes the NAMED per-run schema only; the cumulative file is handled
+    by `write_run_and_cumulative` from main().
+    """
+    fields = csv_fields_for_model(model)
+    rows = [
+        csv_row_for_side(result_side['mcmc'], model, family_mcmc, True,
+                         nqpp, dataset_label, prior_type),
+        csv_row_for_side(result_side['qvmc'], model, family_vi, False,
+                         nqpp, dataset_label, prior_type),
+    ]
+    _write_csv_rows(rows, fields, csv_path)
+
 
 def _ask(prompt: str, options: dict, default):
     """Numbered-option question; Enter = default."""
@@ -1868,6 +2108,21 @@ def interactive_menu() -> dict:
                            'gaussian': 'Planck 2018 Gaussian on (Om, H0)'},
                  'flat')
 
+    # ── Hardware / profiling (common to all run modes) ───────────────────────
+    print("\n  ── Compute hardware ──")
+    gpu_here = gpu_available()
+    if gpu_here:
+        use_gpu = _ask("Simulation device",
+                       {'cpu': 'CPU', 'gpu': 'GPU (Aer on CUDA — detected)'},
+                       'gpu') == 'gpu'
+    else:
+        print("    (no Aer GPU device detected → CPU; install qiskit-aer-gpu "
+              "on a CUDA node to enable)")
+        use_gpu = False
+    profile = _ask("Profile memory / GPU-hours and save a usage figure?",
+                   {'no': 'No', 'yes': 'Yes'}, 'no') == 'yes'
+    _hw = {'use_gpu': use_gpu, 'profile': profile}
+
     # ── TEST RUN: the per-method ladders at small fixed sizes ────────────────
     if mode == 'test':
         print("\n  → Quick TEST RUN: per-method quantumness ladders at small "
@@ -1877,7 +2132,7 @@ def interactive_menu() -> dict:
         print("  Fast end-to-end stability check across both quantum axes.")
         return {'model': model, 'dataset': dataset, 'prior': prior,
                 'config': dict(PRESETS[0]), 'steps': 200, 'qvmc_iter': 40,
-                'nqpp': 2, 'benchmark': True, 'test_run': True}
+                'nqpp': 2, 'benchmark': True, 'test_run': True, **_hw}
 
     # ── BENCHMARK: per-method quantumness ladders, user-chosen sizes ─────────
     if mode == 'benchmark':
@@ -1893,7 +2148,7 @@ def interactive_menu() -> dict:
         nqpp = ask_int_b("Qubits per parameter (2^n grid)", 3)
         return {'model': model, 'dataset': dataset, 'prior': prior,
                 'config': dict(PRESETS[0]), 'steps': steps,
-                'qvmc_iter': iters, 'nqpp': nqpp, 'benchmark': True}
+                'qvmc_iter': iters, 'nqpp': nqpp, 'benchmark': True, **_hw}
 
     # ── SINGLE configuration ─────────────────────────────────────────────────
     print("\n  ── Quantum components ──")
@@ -1930,7 +2185,7 @@ def interactive_menu() -> dict:
 
     return {'model': model, 'dataset': dataset, 'prior': prior, 'config': cfg,
             'steps': steps, 'qvmc_iter': iters, 'nqpp': nqpp,
-            'benchmark': False}
+            'benchmark': False, **_hw}
 
 
 # =============================================================================
@@ -1984,11 +2239,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--log-every', type=int, default=500,
                    help='Progress logging cadence (default: 500)')
     p.add_argument('--outdir', type=str, default='results',
-                   help='Output directory. Default creates a timestamped '
-                        'subfolder results/run_<date>_<model>/ per run so '
-                        'results never mix; pass an explicit path to override.')
+                   help='Output directory (default: results/)')
     p.add_argument('--seed', type=int, default=42, help='RNG seed')
     p.add_argument('--no-plot', action='store_true', help='Skip figures')
+    p.add_argument('--no-csv', action='store_true',
+                   help='Skip writing resultados_config.csv')
+    p.add_argument('--gpu', action='store_true',
+                   help='Use the GPU for Aer simulation if available '
+                        '(qiskit-aer-gpu + CUDA). Falls back to CPU otherwise.')
+    p.add_argument('--profile', action='store_true',
+                   help='Profile peak CPU/GPU memory, wall time and GPU-hours, '
+                        'and save a resource_usage_*.png figure.')
     p.add_argument('--sanity-check', action='store_true',
                    help='Run the routing/correctness sanity check and exit '
                         '(acceptance regression test + per-preset engine map)')
@@ -2028,29 +2289,23 @@ def main():
 
     cli_mode = len(sys.argv) > 1 and not args.interactive
 
-    # [FIX] In CLI/batch mode switch Matplotlib to the headless 'Agg' backend
-    # explicitly (it is no longer forced at import time). Interactive runs keep
-    # whatever GUI backend the environment provides.
+    # [FIX] In CLI/batch mode switch to the headless 'Agg' backend explicitly
+    # (it is no longer forced at import time). Interactive runs keep their GUI.
     if cli_mode:
         set_headless_backend()
 
-    _reseed(args.seed)
+    # [GPU] Resolve the simulation device once and publish it module-wide so
+    # every AerSimulator (built via _sim) uses it. --gpu requests the GPU; if
+    # none is available we fall back to CPU and say so.
+    global USE_GPU
+    want_gpu = bool(getattr(args, 'gpu', False))
+    USE_GPU = want_gpu
+    do_profile = bool(getattr(args, 'profile', False))
 
-    # [NEW] Timestamped run directory so results from different runs never mix.
-    # If the user passes an explicit --outdir (anything other than the default
-    # 'results'), we honor it verbatim; otherwise we create
-    # results/run_<timestamp>_<model>/ for this run.
-    if args.outdir == 'results':
-        args.outdir = make_run_dir('results', tag=args.model)
-    else:
-        os.makedirs(args.outdir, exist_ok=True)
+    _reseed(args.seed)
 
     # ── mode selection ───────────────────────────────────────────────────
     if cli_mode:
-        # Detailed output → log file (inside the run directory)
-        log_file = args.log_file or os.path.join(
-            args.outdir, f"qcosmo_{args.model}_{time.strftime('%Y%m%d_%H%M%S')}.log")
-        logger = setup_logger(log_file)
         model_name, dataset, prior = args.model, args.dataset, args.prior
         steps, qvmc_iter, nqpp = args.steps, args.qvmc_iter, args.nqpp
         benchmark = args.benchmark
@@ -2061,13 +2316,35 @@ def main():
             cfg = dict(PRESETS[args.preset])
         else:
             cfg = dict(PRESETS[20])
-        print(f"  CLI mode: results in {args.outdir}/  | log: {log_file}")
     else:
-        logger = None
         sel = interactive_menu()
         model_name, dataset, prior = sel['model'], sel['dataset'], sel['prior']
         steps, qvmc_iter, nqpp = sel['steps'], sel['qvmc_iter'], sel['nqpp']
         cfg, benchmark = sel['config'], sel['benchmark']
+        # GPU / profiling can also be chosen from the menu.
+        USE_GPU = sel.get('use_gpu', want_gpu)
+        do_profile = sel.get('profile', do_profile)
+
+    # [FIX] Create the timestamped run directory AFTER the model is known.
+    # Previously it was built from args.model (the CLI default 'lcdm') before
+    # the interactive menu ran, so an interactive wCDM run wrote into a folder
+    # named '..._lcdm' — and in some paths the folder was not yet created when
+    # the first figure was saved, raising FileNotFoundError. Now the folder is
+    # created once, here, using the REAL model name, and always exists before
+    # any output is written.
+    if args.outdir == 'results':
+        args.outdir = make_run_dir('results', tag=model_name)
+    else:
+        os.makedirs(args.outdir, exist_ok=True)
+
+    # Logger is attached now that the output directory exists.
+    if cli_mode:
+        log_file = args.log_file or os.path.join(
+            args.outdir, f"qcosmo_{model_name}_{time.strftime('%Y%m%d_%H%M%S')}.log")
+        logger = setup_logger(log_file)
+        print(f"  CLI mode: results in {args.outdir}/")
+    else:
+        logger = None
 
     model = MODELS[model_name]
     post = Posterior(model, dataset, prior)
@@ -2075,13 +2352,39 @@ def main():
     say(f"Model: {model.label} | params: {model.param_names} | "
         f"dataset: {dataset} ({post.n_data} pts) | prior: {prior}")
 
+    # [GPU] Report the device actually in use (after fallback resolution).
+    device = resolve_device(USE_GPU)
+    if USE_GPU and device == 'CPU':
+        say("  ⚠  --gpu requested but no Aer GPU device is available "
+            "(need qiskit-aer-gpu + CUDA). Running on CPU.")
+    say(f"  Simulation device: {device}"
+        + (f"  | GPU available: {gpu_available()}" if USE_GPU else ""))
+
+    # [PROFILE] Optionally wrap the whole run in the resource profiler.
+    profiler = None
+    if do_profile:
+        import cosmo_profiling as _prof
+        profiler = _prof.ResourceProfiler(
+            tag=f"{model_name}_{'gpu' if device == 'GPU' else 'cpu'}",
+            device=device, interval=0.25)
+        profiler.start()
+
     # The benchmark IS the per-method quantumness ladder (the single,
     # canonical quantumness scale). Test Run routes here too, at small sizes.
     if benchmark:
+        csv_paths = None
+        if not args.no_csv:
+            csv_paths = [os.path.join(args.outdir, "resultados_config.csv"),
+                         "resultados_config.csv"]
         run_quantumness_ladder(post, n_steps_mcmc=steps,
                                max_iter_qvmc=qvmc_iter, nqpp=nqpp,
                                outdir=args.outdir, seed=args.seed,
-                               logger=logger, log_every=args.log_every)
+                               logger=logger, log_every=args.log_every,
+                               csv_paths=csv_paths, dataset_label=dataset,
+                               prior_type=prior)
+        _finish_profile(profiler, args.outdir, say,
+                        f"{model.label} benchmark | steps={steps} "
+                        f"iters={qvmc_iter} nqpp={nqpp}")
         return
 
     # ── single configuration + MANDATORY classical baseline ──────────────
@@ -2091,6 +2394,27 @@ def main():
                           n_shots=args.shots, n_burn=args.burn,
                           log_every=args.log_every, verbose=True)
     res_q, res_c = comp['quantum'], comp['classical']
+
+    # ── write results to CSV (per-run copy + cumulative table) ────────────
+    # [FIX] This is what was missing: the modular module now writes
+    # resultados_config.csv (all parameters, all methods), both inside the run
+    # folder and as a cumulative file in the working directory.
+    if not args.no_csv:
+        run_csv = os.path.join(args.outdir, "resultados_config.csv")
+        nqpp_tag = nqpp if res_q is not None else "—"
+        side_rows = []
+        if res_q is not None:
+            side_rows.append((res_q['mcmc'],
+                              f"QMCMC {quantumness_qmcmc(cfg):.0f}%", True,
+                              nqpp_tag))
+            side_rows.append((res_q['qvmc'],
+                              f"QVMC {quantumness_qvmc(cfg):.0f}%", False,
+                              nqpp_tag))
+        side_rows.append((res_c['mcmc'], "Classical MCMC", True, "—"))
+        side_rows.append((res_c['qvmc'], "Classical VI", False, "—"))
+        write_run_and_cumulative(side_rows, model, run_csv,
+                                 "resultados_config.csv", dataset, prior)
+        say(f"Results written to {run_csv} (+ cumulative resultados_config.csv)")
 
     # ── final summary (always to console; also to log) ────────────────────
     header = ["=" * 65, "  FINAL SUMMARY — QUANTUM vs MANDATORY CLASSICAL BASELINE"
@@ -2146,6 +2470,28 @@ def main():
                 labels=('Classical MCMC', 'Classical VI'),
                 q_color=C_QUANTUM2, weights_q=res_c['qvmc_weights'])
             say(f"Figure: {f1}")
+
+    _finish_profile(profiler, args.outdir, say,
+                    f"{model.label} | {dataset} | {cfg.get('label', '')}")
+
+
+def _finish_profile(profiler, outdir, say, title_extra=''):
+    """Stop a ResourceProfiler (if any), log the summary and save the figure."""
+    if profiler is None:
+        return
+    import cosmo_profiling as _prof
+    result = profiler.stop()
+    say(_prof.summarize(result))
+    path = _prof.ResourceProfiler.plot(result, outdir, title_extra=title_extra)
+    if path:
+        say(f"  Resource-usage figure: {path}")
+    # Also drop a small JSON next to it for the provenance record.
+    try:
+        import json as _json
+        with open(os.path.join(outdir, f"profile_{result.tag}.json"), 'w') as fh:
+            _json.dump(result.as_row(), fh, indent=2)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
