@@ -1246,7 +1246,9 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
                 prior_type: str, outdir: str, live: bool,
                 logger=None, log_every: int = 10, shots: int = 1,
                 make_plots: bool = True, write_csv: bool = True,
-                sampler_overlay: Optional[dict] = None) -> Dict[str, GAResult]:
+                sampler_overlay: Optional[dict] = None,
+                cumulative_csv: str = "resultados_config.csv"
+                ) -> Dict[str, GAResult]:
     """Run the requested genetic optimizers and wire results into the pipeline.
 
     Args:
@@ -1293,10 +1295,10 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
             run_csv = os.path.join(outdir, "resultados_config.csv")
             append_results_csv(res, post, dataset_label, prior_type,
                                run_csv=run_csv,
-                               cumulative_csv="resultados_config.csv",
+                               cumulative_csv=cumulative_csv,
                                n_bits=n_bits)
             say(f"[{res.method}] MAP appended to {run_csv} "
-                f"(+ cumulative resultados_config.csv)")
+                f"(+ cumulative {cumulative_csv})")
 
         if make_plots:
             f1 = plot_population_corner(res, model, outdir)
@@ -1346,9 +1348,25 @@ def interactive_menu() -> dict:
     mi = _ask("Cosmological model:", model_opts, 0)
     model_name = list(MODELS)[mi if mi in model_opts else 0]
 
-    ds_opts = {0: 'CC', 1: 'Pantheon+', 2: 'CC+Pantheon+'}
+    # Dataset menu: offer Pantheon 2018 / Pantheon+ 2022 only if their files
+    # are present (same logic as the sampler module).
+    pan = core.load_pantheon()
+    panp = core.load_pantheon_plus()
+    ds_opts = {0: 'CC+BAO H(z)'}
+    ds_keys = {0: 'CC+BAO'}
+    nxt = 1
+    if pan is not None:
+        ds_opts[nxt] = f"Pantheon 2018 ({len(pan['z'])} SNe, diagonal)"
+        ds_keys[nxt] = 'Pantheon'; nxt += 1
+        ds_opts[nxt] = 'CC+BAO + Pantheon 2018'
+        ds_keys[nxt] = 'CC+BAO+Pantheon'; nxt += 1
+    if panp is not None:
+        ds_opts[nxt] = f"Pantheon+ 2022 ({len(panp['z'])} SNe, full cov.)"
+        ds_keys[nxt] = 'Pantheon+'; nxt += 1
+        ds_opts[nxt] = 'CC+BAO + Pantheon+ 2022'
+        ds_keys[nxt] = 'CC+BAO+Pantheon+'; nxt += 1
     di = _ask("Dataset:", ds_opts, 0)
-    dataset = ds_opts.get(di, 'CC')
+    dataset = ds_keys.get(di, 'CC+BAO')
 
     pr_opts = {0: 'flat (box)', 1: 'gaussian (Planck on Ωm,H0)'}
     pi = _ask("Prior:", pr_opts, 0)
@@ -1417,8 +1435,27 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Genetic method(s) to run: cga, qga, or both")
     p.add_argument('--model', choices=list(MODELS), default='lcdm',
                    help='Cosmological model (default: lcdm)')
-    p.add_argument('--dataset', choices=['CC', 'Pantheon+', 'CC+Pantheon+'],
-                   default='CC', help='Observational dataset (default: CC)')
+    p.add_argument('--sweep-all', action='store_true',
+                   help='HPC batch mode: run CGA + QGA across the full QGA '
+                        'quantumness ladder for EVERY model, into one master '
+                        'folder with a subfolder per model. Launch once on a '
+                        'supercomputer to collect all genetic results.')
+    p.add_argument('--sweep-models', nargs='+', choices=list(MODELS),
+                   default=None, metavar='MODEL',
+                   help='Restrict --sweep-all to these models '
+                        f'(default: all of {list(MODELS)})')
+    p.add_argument('--sweep-qga-levels', nargs='+', type=int,
+                   choices=list(QGA_PRESETS), default=None, metavar='PCT',
+                   help='QGA quantumness presets to sweep '
+                        f'(default: all of {list(QGA_PRESETS)})')
+    p.add_argument('--dataset',
+                   choices=['CC+BAO', 'Pantheon', 'Pantheon+',
+                            'CC+BAO+Pantheon', 'CC+BAO+Pantheon+',
+                            'CC', 'CC+Pantheon+'],   # last two: legacy aliases
+                   default='CC+BAO',
+                   help='Observational dataset (default: CC+BAO). '
+                        'Pantheon = 2018 diagonal; Pantheon+ = 2022 full '
+                        'covariance. CC / CC+Pantheon+ are legacy aliases.')
     p.add_argument('--prior', choices=['flat', 'gaussian'], default='flat',
                    help='Prior type (default: flat)')
 
@@ -1451,6 +1488,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help='QGA qubits per parameter (grid = 2^n_bits; default 6)')
     p.add_argument('--shots', type=int, default=1,
                    help='Aer shots per circuit for the QGA (default: 1)')
+    p.add_argument('--max-qubits', type=int, default=18, metavar='N',
+                   help='Memory safety cap on total QGA qubits (n_bits*d). '
+                        'Default 18 (laptop-safe). Raise on a supercomputer '
+                        'with more RAM (each +1 qubit ~4x memory).')
 
     # run control
     p.add_argument('--outdir', type=str, default='results',
@@ -1546,6 +1587,94 @@ def _resolve_qga_config(args) -> dict:
     return dict(QGA_PRESETS[100])              # default: fully quantum operators
 
 
+def run_genetic_sweep_all(models, qga_levels, methods, dataset, prior, ga,
+                          n_bits, shots, master_dir, logger, log_every,
+                          no_csv=False, no_plot=False):
+    """Run CGA + QGA (across the quantumness ladder) for EVERY model in one go.
+
+    HPC "launch once, get everything" mode for the genetic optimizers. For each
+    model it runs the CGA once (it has no quantumness) and the QGA at every
+    requested quantumness preset, into the model's OWN subfolder of the master
+    run directory, appending every MAP row to a single cumulative CSV.
+
+    Each model runs inside try/except so one failure does not abort the batch.
+
+    Args:
+        models: model keys to sweep.
+        qga_levels: list of QGA preset percentages (keys of QGA_PRESETS).
+        methods: which of {'cga','qga'} to include.
+        dataset, prior, ga, n_bits, shots: shared setup / hyper-parameters.
+        master_dir: master folder; per-model subfolders created inside.
+        logger, log_every: logging target and cadence.
+        no_csv, no_plot: pass-throughs.
+
+    Returns:
+        dict mapping model key -> 'ok' or error string.
+    """
+    say = logger.info if logger else print
+    cumulative_master = os.path.join(master_dir,
+                                     "resultados_TODOS_los_modelos.csv")
+    status = {}
+    t_start = time.time()
+
+    say("=" * 70)
+    say(f"GENETIC SWEEP-ALL — {len(models)} model(s): {', '.join(models)}")
+    say(f"  methods={methods} | QGA levels={qga_levels} | dataset={dataset} "
+        f"| prior={prior}")
+    say(f"  pop={ga.pop_size} gens={ga.n_generations} n_bits={n_bits}")
+    say(f"  master folder: {master_dir}/")
+    say("=" * 70)
+
+    for i, model_name in enumerate(models, 1):
+        say("")
+        say(f"[{i}/{len(models)}] ===== MODEL: {model_name} "
+            f"({MODELS[model_name].label}) =====")
+        model_dir = os.path.join(master_dir, f"model_{model_name}")
+        os.makedirs(model_dir, exist_ok=True)
+        try:
+            post = Posterior(MODELS[model_name], dataset, prior)
+
+            # CGA once (no quantumness).
+            if 'cga' in methods:
+                run_genetic(
+                    post=post, methods=['cga'], ga=ga,
+                    qga_config=dict(QGA_PRESETS[0]), n_bits=n_bits,
+                    dataset_label=dataset, prior_type=prior, outdir=model_dir,
+                    live=False, logger=logger, log_every=log_every,
+                    shots=shots, make_plots=not no_plot, write_csv=not no_csv,
+                    cumulative_csv=cumulative_master)
+
+            # QGA at each requested quantumness preset.
+            if 'qga' in methods:
+                for pct in qga_levels:
+                    run_genetic(
+                        post=post, methods=['qga'], ga=ga,
+                        qga_config=dict(QGA_PRESETS[pct]), n_bits=n_bits,
+                        dataset_label=dataset, prior_type=prior,
+                        outdir=model_dir, live=False, logger=logger,
+                        log_every=log_every, shots=shots,
+                        make_plots=not no_plot, write_csv=not no_csv,
+                        cumulative_csv=cumulative_master)
+            status[model_name] = 'ok'
+            say(f"[{i}/{len(models)}] {model_name}: DONE -> {model_dir}/")
+        except Exception as exc:
+            status[model_name] = f"FAILED: {exc}"
+            say(f"[{i}/{len(models)}] {model_name}: FAILED — {exc}")
+            import traceback
+            (logger.error if logger else print)(traceback.format_exc())
+
+    elapsed = time.time() - t_start
+    say("")
+    say("=" * 70)
+    say(f"GENETIC SWEEP-ALL finished in {elapsed/60:.1f} min")
+    for m in models:
+        say(f"  {m:8s} : {status[m]}")
+    if not no_csv:
+        say(f"  Combined table: {cumulative_master}")
+    say("=" * 70)
+    return status
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Entry point.
 
@@ -1564,6 +1693,39 @@ def main(argv: Optional[List[str]] = None) -> int:
     raw_args = sys.argv[1:] if argv is None else argv
     cli_mode = len(raw_args) > 0
 
+    # [ROBUSTNESS] Reject out-of-range numeric args with a clear message before
+    # they crash deep inside NumPy/Qiskit (population=0, n-bits=0, etc.).
+    if cli_mode:
+        errs = []
+        for attr, flag in [('population_size', 'population-size'),
+                           ('generations', 'generations'),
+                           ('n_bits', 'n-bits'), ('shots', 'shots')]:
+            v = getattr(args, attr, None)
+            if v is not None and v < 1:
+                errs.append(f"--{flag} must be >= 1 (got {v})")
+        if getattr(args, 'seed', 0) < 0:
+            errs.append(f"--seed must be >= 0 (got {args.seed})")
+        nb = getattr(args, 'n_bits', None)
+        max_q = getattr(args, 'max_qubits', 18)
+        uses_qga = (getattr(args, 'sweep_all', False)
+                    or (args.methods and 'qga' in args.methods))
+        if nb is not None and nb >= 1 and uses_qga:
+            sweep = (args.sweep_models if getattr(args, 'sweep_all', False)
+                     and args.sweep_models else
+                     (list(MODELS) if getattr(args, 'sweep_all', False)
+                      else [args.model]))
+            max_d = max(MODELS[m].n_params for m in sweep)
+            if nb * max_d > max_q:
+                errs.append(
+                    f"--n-bits {nb} with a {max_d}-parameter model needs a "
+                    f"2^{nb * max_d}-state grid, above the --max-qubits "
+                    f"{max_q} cap. Lower n_bits to <= {max_q // max_d} or "
+                    f"raise --max-qubits if your machine has the RAM.")
+        if errs:
+            sys.stderr.write("Argument error(s):\n  " + "\n  ".join(errs)
+                             + "\n")
+            return 2
+
     np.random.seed(args.seed)
 
     # [GPU] Publish the device choice module-wide so the QGA's simulator uses
@@ -1571,6 +1733,60 @@ def main(argv: Optional[List[str]] = None) -> int:
     global USE_GPU
     USE_GPU = bool(getattr(args, 'gpu', False))
     do_profile = bool(getattr(args, 'profile', False))
+
+    # ── SWEEP-ALL: CGA + QGA across all models in one master folder ──
+    if getattr(args, 'sweep_all', False):
+        set_headless_backend()
+        device = resolve_device(USE_GPU)
+        sweep_models = args.sweep_models or list(MODELS)
+        qga_levels = args.sweep_qga_levels or list(QGA_PRESETS)
+        methods = args.methods or ['cga', 'qga']
+        if args.outdir == 'results':
+            master_dir = make_run_dir('results', tag='genetic_sweep_all')
+        else:
+            master_dir = args.outdir
+            os.makedirs(master_dir, exist_ok=True)
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        log_file = args.log_file or os.path.join(
+            master_dir, f"genetic_sweep_all_{ts}.log")
+        logger = setup_logger(log_file, name="genetic")
+        import logging as _logging
+        for h in logger.handlers:
+            if isinstance(h, _logging.StreamHandler) and not isinstance(
+                    h, _logging.FileHandler):
+                h.setLevel(_logging.INFO)
+        print(f"  GENETIC SWEEP-ALL: master folder {master_dir}/  | "
+              f"log {log_file}")
+        logger.info("QGA simulation device: %s", device)
+        if USE_GPU and device == 'CPU':
+            logger.info("  ⚠  --gpu requested but no Aer GPU device available; "
+                        "QGA running on CPU.")
+        ga = GAConfig(pop_size=args.population_size,
+                      n_generations=args.generations,
+                      crossover_rate=args.crossover_rate,
+                      mutation_rate=args.mutation_rate,
+                      mutation_scale=args.mutation_scale,
+                      elite_frac=args.elite_frac,
+                      tournament_k=args.tournament_k, seed=args.seed)
+        profiler = None
+        if do_profile:
+            import cosmo_profiling as _prof
+            profiler = _prof.ResourceProfiler(
+                tag=f"genetic_sweep_{'gpu' if device == 'GPU' else 'cpu'}",
+                device=device, interval=0.5)
+            profiler.start()
+        run_genetic_sweep_all(
+            sweep_models, qga_levels, methods, args.dataset, args.prior, ga,
+            args.n_bits, args.shots, master_dir, logger, args.log_every,
+            no_csv=args.no_csv, no_plot=args.no_plot)
+        if profiler is not None:
+            import cosmo_profiling as _prof
+            result = profiler.stop()
+            logger.info(_prof.summarize(result))
+            _prof.ResourceProfiler.plot(
+                result, master_dir,
+                title_extra=f"genetic sweep | {len(sweep_models)} models")
+        return 0
 
     if cli_mode:
         # ── headless / batch / HPC ───────────────────────────────────────────

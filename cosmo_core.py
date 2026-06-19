@@ -235,7 +235,14 @@ _CC_EMBEDDED = np.array([
 
 
 def load_cc(path: str = "cosmic_chronometers.txt") -> np.ndarray:
-    """Load CC data from file (z, H, sigma); fallback to the embedded array.
+    """Load the H(z) measurements (Cosmic Chronometers + BAO) from file.
+
+    [LABEL FIX] These H(z) points combine Cosmic Chronometers AND BAO-derived
+    H(z) measurements in a single (z, H, sigma) table; that is why there are
+    more points than a CC-only compilation. The dataset is therefore labelled
+    "CC+BAO" throughout the project. The file format is unchanged
+    (three columns: z, H_obs, sigma), treated with independent (diagonal)
+    Gaussian errors.
 
     Args:
         path: Path to the three-column text file.
@@ -249,26 +256,48 @@ def load_cc(path: str = "cosmic_chronometers.txt") -> np.ndarray:
             try:
                 arr = np.loadtxt(p, comments='#')
                 if arr.ndim == 2 and arr.shape[1] >= 3:
-                    print(f"  ✓ CC loaded from file: {p}  ({len(arr)} pts)")
-                    return arr[:, :3]
+                    arr = arr[:, :3]
+                    # [ROBUSTNESS] Drop NaN/inf rows and non-positive sigma
+                    # instead of silently loading them — a corrupt line would
+                    # otherwise poison every χ² downstream with no warning.
+                    finite = np.all(np.isfinite(arr), axis=1)
+                    if not np.all(finite):
+                        print(f"  ⚠  {int(np.sum(~finite))} non-finite row(s) "
+                              f"in {p} dropped (NaN/inf)")
+                        arr = arr[finite]
+                    if np.any(arr[:, 2] <= 0):
+                        print(f"  ⚠  {int(np.sum(arr[:, 2] <= 0))} row(s) in "
+                              f"{p} with non-positive sigma dropped")
+                        arr = arr[arr[:, 2] > 0]
+                    if len(arr) == 0:
+                        print(f"  ⚠  {p} had no valid rows — using embedded")
+                        return _CC_EMBEDDED
+                    print(f"  ✓ CC+BAO H(z) loaded from file: {p}  "
+                          f"({len(arr)} pts)")
+                    return arr
             except Exception as e:
                 print(f"  ⚠  Error reading {p}: {e} — using embedded data")
     return _CC_EMBEDDED
 
 
 def load_pantheon(search_dirs: Optional[Sequence[str]] = None) -> Optional[dict]:
-    """Load the Pantheon+ catalog (Scolnic et al. 2022 / Brout et al. 2022).
+    """Load the Pantheon (2018) SNe Ia catalog with DIAGONAL errors.
 
-    Searches for `pantheon_full_parameters.txt` (and variants) in the
-    script folder and the cwd. Expected format: name zcmb zhel dz mb dmb.
+    [LABEL FIX] This is the original Pantheon compilation (Scolnic et al. 2018,
+    1048 SNe Ia), NOT Pantheon+. It is treated with independent per-SN errors
+    (the `dmb` column), and M_abs is marginalized analytically (Goliath 2001).
+    For the full Pantheon+ release with its covariance matrix use
+    `load_pantheon_plus` and the 'Pantheon+' dataset instead.
+
+    Searches for `pantheon_full_parameters.txt` (and variants) in the script
+    folder and the cwd. Expected format: name zcmb zhel dz mb dmb.
 
     Returns:
         dict with arrays 'z', 'mb', 'dmb' sorted by z, or None if the
         file is not found.
     """
     names = ["pantheon_full_parameters.txt", "Pantheon_full_parameters.txt",
-             "pantheon_plus.txt", "pantheon_plus.csv",
-             "PantheonPlus.txt", "PantheonPlus.csv"]
+             "pantheon.txt", "Pantheon.txt"]
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
     except NameError:
@@ -295,17 +324,181 @@ def load_pantheon(search_dirs: Optional[Sequence[str]] = None) -> Optional[dict]
                 mask = (z > 0) & (dmb > 0) & np.isfinite(mb)
                 z, mb, dmb = z[mask], mb[mask], dmb[mask]
                 idx = np.argsort(z)
-                print(f"  ✓ Pantheon+ loaded: {path}  ({len(z)} SNe Ia, "
-                      f"z ∈ [{z[idx[0]]:.3f}, {z[idx[-1]]:.3f}])")
-                return {'z': z[idx], 'mb': mb[idx], 'dmb': dmb[idx], 'path': path}
+                print(f"  ✓ Pantheon (2018) loaded: {path}  ({len(z)} SNe Ia, "
+                      f"z ∈ [{z[idx[0]]:.3f}, {z[idx[-1]]:.3f}], diagonal errors)")
+                return {'z': z[idx], 'mb': mb[idx], 'dmb': dmb[idx],
+                        'cov': None, 'path': path}
             except Exception as e:
                 print(f"  ⚠  Error reading {path}: {e}")
     return None
 
 
+def _pantheon_plus_files_present(search_dirs: Optional[Sequence[str]] = None
+                                 ) -> Optional[str]:
+    """Return a short note if BOTH Pantheon+ files exist on disk, else None.
+
+    Lets the Posterior give a precise error: 'files present but unloadable'
+    (bad covariance) vs 'files missing' have different fixes.
+    """
+    names_data = ["Pantheon+SH0ES.dat", "PantheonPlusSH0ES.dat",
+                  "Pantheon+_data.txt"]
+    names_cov = ["Pantheon+SH0ES_STAT+SYS.cov",
+                 "Pantheon+SH0ES_STAT+SYS.txt", "PantheonPlus.cov"]
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        script_dir = os.getcwd()
+    dirs = [script_dir, os.getcwd()] + list(search_dirs or [])
+
+    def _find(cands):
+        for d in dirs:
+            for nm in cands:
+                p = os.path.join(d, nm)
+                if os.path.exists(p):
+                    return p
+        return None
+
+    dp, cp = _find(names_data), _find(names_cov)
+    if dp and cp:
+        return f"{os.path.basename(dp)} + {os.path.basename(cp)}"
+    return None
+
+
+def load_pantheon_plus(data_name: str = "Pantheon+SH0ES.dat",
+                       cov_name: str = "Pantheon+SH0ES_STAT+SYS.cov",
+                       search_dirs: Optional[Sequence[str]] = None
+                       ) -> Optional[dict]:
+    """Load the full Pantheon+ (2022) catalog WITH its covariance matrix.
+
+    The crucial statistical difference versus the 2018 Pantheon: Pantheon+
+    ships a full N×N covariance matrix C (statistical + correlated
+    systematics), so the χ² is the proper quadratic form
+        χ² = Δᵀ C⁻¹ Δ,
+    not a sum of independent terms. Ignoring the off-diagonal terms would
+    underestimate the true uncertainties.
+
+    File formats (as released by the Pantheon+ team, Brout et al. 2022):
+      * Data table `Pantheon+SH0ES.dat`: a header row of column names followed
+        by rows; we use the redshift column (zHD, with zCMB / zcmb as
+        fallbacks) and the distance-modulus columns (MU_SH0ES and its error,
+        with m_b_corr fallbacks).
+      * Covariance `...STAT+SYS.cov`: first line = N, then N*N entries (one per
+        line) in row-major order.
+
+    For the cleanest cosmology fit, SNe with very low redshift (z < 0.01) are
+    usually cut to avoid peculiar-velocity dominance; we apply z > 0.01 and
+    slice the covariance to the surviving indices.
+
+    Returns:
+        dict with 'z', 'mu' (distance modulus), 'cov' (N×N), 'cov_inv',
+        and helper sums for analytic M_abs marginalization; or None if the
+        files are not found.
+    """
+    names_data = [data_name, "Pantheon+SH0ES.dat", "PantheonPlusSH0ES.dat",
+                  "Pantheon+_data.txt"]
+    names_cov = [cov_name, "Pantheon+SH0ES_STAT+SYS.cov",
+                 "Pantheon+SH0ES_STAT+SYS.txt", "PantheonPlus.cov"]
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        script_dir = os.getcwd()
+    dirs = [script_dir, os.getcwd()] + list(search_dirs or [])
+
+    def _find(cands):
+        for d in dirs:
+            for nm in cands:
+                p = os.path.join(d, nm)
+                if os.path.exists(p):
+                    return p
+        return None
+
+    data_path = _find(names_data)
+    cov_path = _find(names_cov)
+    if data_path is None or cov_path is None:
+        return None
+
+    try:
+        # --- data table: header row of names, then values ---
+        with open(data_path) as fh:
+            header = fh.readline().split()
+        tbl = np.genfromtxt(data_path, names=header, skip_header=1,
+                            dtype=float, encoding='utf-8')
+        cols = {n.lower(): n for n in tbl.dtype.names}
+
+        def pick(options):
+            for o in options:
+                if o.lower() in cols:
+                    return tbl[cols[o.lower()]].astype(float)
+            return None
+
+        z = pick(['zHD', 'zCMB', 'zcmb', 'zhel'])
+        mu = pick(['MU_SH0ES', 'mu', 'MU'])
+        if mu is None:                       # fall back to apparent magnitude
+            mu = pick(['m_b_corr', 'mB', 'mb'])
+        if z is None or mu is None:
+            print("  ⚠  Pantheon+ data columns not recognized "
+                  f"(have: {list(tbl.dtype.names)})")
+            return None
+
+        # --- covariance: first line N, then N*N entries row-major ---
+        with open(cov_path) as fh:
+            first = fh.readline().split()
+        n_cov = int(first[0])
+        flat = np.loadtxt(cov_path, skiprows=1)
+        cov = flat.reshape(n_cov, n_cov)
+        if n_cov != len(z):
+            print(f"  ⚠  Pantheon+ size mismatch: data={len(z)} cov={n_cov}")
+            return None
+
+        # --- low-z cut (peculiar velocities) ---
+        keep = z > 0.01
+        z, mu = z[keep], mu[keep]
+        cov = cov[np.ix_(keep, keep)]
+
+        idx = np.argsort(z)
+        z, mu = z[idx], mu[idx]
+        cov = cov[np.ix_(idx, idx)]
+
+        cov_inv = np.linalg.inv(cov)
+        ones = np.ones(len(z))
+        C_marg = float(ones @ cov_inv @ ones)        # 1ᵀ C⁻¹ 1
+        print(f"  ✓ Pantheon+ (2022) loaded: {len(z)} SNe Ia with FULL "
+              f"covariance, z ∈ [{z[0]:.3f}, {z[-1]:.3f}]")
+        return {'z': z, 'mu': mu, 'cov': cov, 'cov_inv': cov_inv,
+                'C_marg': C_marg, 'ones': ones,
+                'path': data_path, 'cov_path': cov_path}
+    except Exception as e:
+        print(f"  ⚠  Error reading Pantheon+ ({data_path}, {cov_path}): {e}")
+        return None
+
+
 # =============================================================================
 # 3. LIKELIHOODS AND POSTERIOR (model-agnostic, N-dimensional)
 # =============================================================================
+
+#: Canonical dataset keys and the components each one activates.
+#  'cc'   -> the CC+BAO H(z) table (diagonal)
+#  'sn'   -> Pantheon 2018 SNe (diagonal, M_abs marginalized)
+#  'snp'  -> Pantheon+ 2022 SNe (full covariance, M_abs marginalized)
+DATASET_COMPONENTS: Dict[str, set] = {
+    'CC+BAO':            {'cc'},
+    'Pantheon':          {'sn'},
+    'Pantheon+':         {'snp'},
+    'CC+BAO+Pantheon':   {'cc', 'sn'},
+    'CC+BAO+Pantheon+':  {'cc', 'snp'},
+}
+
+#: Backward-compatible aliases so old commands / CSVs keep working.
+DATASET_ALIASES: Dict[str, str] = {
+    'CC': 'CC+BAO',
+    'CC+Pantheon+': 'CC+BAO+Pantheon',   # old "Pantheon+" was really Pantheon
+}
+
+
+def canonical_dataset(name: str) -> str:
+    """Map a dataset name (possibly an old alias) to its canonical key."""
+    return DATASET_ALIASES.get(name, name)
+
 
 class Posterior:
     """N-dimensional log-posterior tying together model + datasets + prior.
@@ -317,90 +510,140 @@ class Posterior:
 
     Args:
         model: CosmoModel instance (from the MODELS registry).
-        dataset: 'CC', 'Pantheon+' or 'CC+Pantheon+'.
+        dataset: one of DATASET_COMPONENTS (or an old alias):
+            'CC+BAO', 'Pantheon', 'Pantheon+', 'CC+BAO+Pantheon',
+            'CC+BAO+Pantheon+'. The legacy names 'CC' and 'CC+Pantheon+'
+            are accepted as aliases.
         prior_type: 'flat' (box) or 'gaussian' (Planck on Ωm and H0,
             flat on the extra parameters within bounds).
-        cc_data: (N,3) array of Cosmic Chronometers.
-        pantheon: dict from load_pantheon() or None.
+        cc_data: (N,3) array of CC+BAO H(z) points.
+        pantheon: dict from load_pantheon()/load_pantheon_plus() or None.
         n_zgrid: Resolution of the z grid for the SNe comoving-distance
             integral (cumulative trapezoid).
     """
 
-    def __init__(self, model: CosmoModel, dataset: str = 'CC',
+    def __init__(self, model: CosmoModel, dataset: str = 'CC+BAO',
                  prior_type: str = 'flat',
                  cc_data: Optional[np.ndarray] = None,
                  pantheon: Optional[dict] = None,
                  n_zgrid: int = 1200):
         self.model = model
-        self.dataset = dataset
+        self.dataset = canonical_dataset(dataset)
+        if self.dataset not in DATASET_COMPONENTS:
+            raise ValueError(
+                f"Unknown dataset '{dataset}'. Valid: "
+                f"{list(DATASET_COMPONENTS)} (or aliases {list(DATASET_ALIASES)})")
+        self.components = DATASET_COMPONENTS[self.dataset]
         self.prior_type = prior_type
 
+        # CC+BAO H(z) table (always loaded; used only if 'cc' is active).
         self.cc = cc_data if cc_data is not None else load_cc()
-        self.z_cc, self.H_cc, self.sig_cc = self.cc[:, 0], self.cc[:, 1], self.cc[:, 2]
+        self.z_cc, self.H_cc, self.sig_cc = (self.cc[:, 0], self.cc[:, 1],
+                                             self.cc[:, 2])
 
+        # SNe: pick the right loader for the requested component.
         self.pantheon = pantheon
-        if 'Pantheon' in dataset and pantheon is None:
+        if 'sn' in self.components and self.pantheon is None:
             self.pantheon = load_pantheon()
             if self.pantheon is None:
                 raise FileNotFoundError(
-                    "Dataset includes Pantheon+ but "
-                    "pantheon_full_parameters.txt was not found")
+                    "Dataset includes Pantheon (2018) but its data file "
+                    "(pantheon_full_parameters.txt) was not found")
+        if 'snp' in self.components and self.pantheon is None:
+            self.pantheon = load_pantheon_plus()
+            if self.pantheon is None:
+                found = _pantheon_plus_files_present()
+                if found:
+                    raise ValueError(
+                        "Dataset includes Pantheon+ (2022): the files were "
+                        f"found ({found}) but could NOT be loaded — check the "
+                        "covariance size matches the data and is invertible "
+                        "(see the warning printed above).")
+                raise FileNotFoundError(
+                    "Dataset includes Pantheon+ (2022) but its data and/or "
+                    "covariance files (Pantheon+SH0ES.dat and "
+                    "Pantheon+SH0ES_STAT+SYS.cov) were not found")
 
-        # Fine z grid for the cumulative trapezoid of d_C(z).
-        # [KEY CHANGE] replaces the precomputed Ωm lookup grid (ΛCDM-only)
-        # with an on-the-fly computation valid for any E²(z;θ).
+        # Fine z grid for the cumulative trapezoid of d_C(z), valid for ANY
+        # E²(z;θ). Built whenever an SNe component is active.
         if self.pantheon is not None:
             zmax = float(self.pantheon['z'].max()) * 1.02
             self._zg = np.linspace(0.0, zmax, n_zgrid)
-            self._inv_s2 = 1.0 / self.pantheon['dmb']**2
-            self._C_marg = float(np.sum(self._inv_s2))
+            if 'sn' in self.components:           # diagonal Pantheon 2018
+                self._inv_s2 = 1.0 / self.pantheon['dmb']**2
+                self._C_marg = float(np.sum(self._inv_s2))
 
     # ── total number of data points (for reduced χ² and BIC) ────────────────
     @property
     def n_data(self) -> int:
         """Total number of observational points of the active dataset."""
         n = 0
-        if self.dataset in ('CC', 'CC+Pantheon+'):
+        if 'cc' in self.components:
             n += len(self.z_cc)
-        if self.dataset in ('Pantheon+', 'CC+Pantheon+') and self.pantheon:
+        if ('sn' in self.components or 'snp' in self.components) and self.pantheon:
             n += len(self.pantheon['z'])
         return n
 
     # ── χ² components ────────────────────────────────────────────────────────
     def chi2_cc(self, theta: np.ndarray) -> float:
-        """Cosmic Chronometers χ² for the active model."""
+        """CC+BAO H(z) χ² for the active model (diagonal errors)."""
         Hm = self.model.H(self.z_cc, theta)
         return float(np.sum(((self.H_cc - Hm) / self.sig_cc)**2))
 
-    def chi2_pantheon(self, theta: np.ndarray) -> float:
-        """Pantheon+ effective χ² with analytic marginalization over M_abs.
-
-        Implements χ²_eff = A − B²/C (Goliath et al. 2001):
-            A = Σ Δ²/σ²,  B = Σ Δ/σ²,  C = Σ 1/σ²,  Δ = μ_obs − μ_th.
-        The comoving distance is obtained with a vectorized cumulative
-        trapezoid over self._zg, valid for any registered model.
-        """
+    def _mu_theory(self, z_sn: np.ndarray, theta: np.ndarray) -> np.ndarray:
+        """Theoretical distance modulus μ_th(z; θ) for the active model."""
         e2 = self.model.E2(self._zg, theta)
-        if np.any(e2 <= 0):           # unphysical region (e.g. extreme CPL)
-            return np.inf
+        if np.any(e2 <= 0):
+            return None
         invE = 1.0 / np.sqrt(e2)
         I = cumulative_trapezoid(invE, self._zg, initial=0.0)
-        z_sn = self.pantheon['z']
         I_sn = np.interp(z_sn, self._zg, I)
         dL = (C_LIGHT / theta[1]) * (1.0 + z_sn) * I_sn          # Mpc
-        mu_th = 5.0 * np.log10(np.clip(dL, 1e-10, None)) + 25.0
-        delta = self.pantheon['mb'] - mu_th                       # μ_obs − μ_th + M_abs
+        return 5.0 * np.log10(np.clip(dL, 1e-10, None)) + 25.0
+
+    def chi2_pantheon(self, theta: np.ndarray) -> float:
+        """Pantheon (2018) effective χ², DIAGONAL, M_abs marginalized.
+
+        χ²_eff = A − B²/C (Goliath et al. 2001):
+            A = Σ Δ²/σ², B = Σ Δ/σ², C = Σ 1/σ², Δ = m_obs − μ_th.
+        """
+        mu_th = self._mu_theory(self.pantheon['z'], theta)
+        if mu_th is None:
+            return np.inf
+        delta = self.pantheon['mb'] - mu_th       # m_obs − μ_th (+ M_abs offset)
         A = float(np.sum(delta**2 * self._inv_s2))
         B = float(np.sum(delta * self._inv_s2))
         return A - B**2 / self._C_marg
 
+    def chi2_pantheon_plus(self, theta: np.ndarray) -> float:
+        """Pantheon+ (2022) effective χ² with FULL covariance, M_abs marginalized.
+
+        The proper quadratic form with the covariance matrix C:
+            χ²_eff = A − B²/Cn,
+            A = Δᵀ C⁻¹ Δ,  B = Δᵀ C⁻¹ 1,  Cn = 1ᵀ C⁻¹ 1,
+        which is the matrix generalization of Goliath et al. (2001): it
+        analytically marginalizes the constant M_abs offset while keeping the
+        correlated systematics encoded in C.
+        """
+        mu_th = self._mu_theory(self.pantheon['z'], theta)
+        if mu_th is None:
+            return np.inf
+        delta = self.pantheon['mu'] - mu_th
+        Ci = self.pantheon['cov_inv']
+        Cid = Ci @ delta
+        A = float(delta @ Cid)
+        B = float(self.pantheon['ones'] @ Cid)
+        return A - B**2 / self.pantheon['C_marg']
+
     def chi2(self, theta: np.ndarray) -> Tuple[float, int]:
         """Total χ² of the active dataset. Returns (chi2, n_data)."""
         c = 0.0
-        if self.dataset in ('CC', 'CC+Pantheon+'):
+        if 'cc' in self.components:
             c += self.chi2_cc(theta)
-        if self.dataset in ('Pantheon+', 'CC+Pantheon+') and self.pantheon:
+        if 'sn' in self.components and self.pantheon:
             c += self.chi2_pantheon(theta)
+        if 'snp' in self.components and self.pantheon:
+            c += self.chi2_pantheon_plus(theta)
         return c, self.n_data
 
     # ── prior and posterior ──────────────────────────────────────────────────
@@ -458,32 +701,41 @@ class Posterior:
             lp += (-0.5 * ((T[:, 0] - OM_MU) / OM_SIG)**2
                    - 0.5 * ((T[:, 1] - H0_MU) / H0_SIG)**2)
 
-        # 2) vectorized CC: E2 with broadcasting (Bv, Ncc)
-        if self.dataset in ('CC', 'CC+Pantheon+'):
+        # 2) vectorized CC+BAO: E2 with broadcasting (Bv, Ncc)
+        if 'cc' in self.components:
             e2 = self.model.E2(self.z_cc[None, :], th_cols)
             Hm = T[:, 1:2] * np.sqrt(np.clip(e2, 1e-12, None))
             lp += -0.5 * np.sum(((self.H_cc[None, :] - Hm)
                                  / self.sig_cc[None, :])**2, axis=1)
 
-        # 3) vectorized Pantheon+: row-wise cumulative trapezoid (Bv, Nzg)
-        if self.dataset in ('Pantheon+', 'CC+Pantheon+') and self.pantheon:
+        # 3) vectorized SNe (Pantheon 2018 diagonal OR Pantheon+ covariance):
+        #    row-wise cumulative trapezoid for the comoving distance (Bv, Nzg)
+        if ('sn' in self.components or 'snp' in self.components) and self.pantheon:
             e2 = self.model.E2(self._zg[None, :], th_cols)
             bad = np.any(e2 <= 0, axis=1)
             e2 = np.clip(e2, 1e-12, None)
             I = cumulative_trapezoid(1.0 / np.sqrt(e2), self._zg,
                                      axis=1, initial=0.0)
             z_sn = self.pantheon['z']
-            # row-wise interpolation
             idx = np.searchsorted(self._zg, z_sn).clip(1, len(self._zg) - 1)
             z0, z1 = self._zg[idx - 1], self._zg[idx]
             w = (z_sn - z0) / (z1 - z0)
             I_sn = I[:, idx - 1] * (1 - w)[None, :] + I[:, idx] * w[None, :]
             dL = (C_LIGHT / T[:, 1:2]) * (1.0 + z_sn)[None, :] * I_sn
             mu_th = 5.0 * np.log10(np.clip(dL, 1e-10, None)) + 25.0
-            delta = self.pantheon['mb'][None, :] - mu_th
-            A = np.sum(delta**2 * self._inv_s2[None, :], axis=1)
-            Bm = np.sum(delta * self._inv_s2[None, :], axis=1)
-            chi2p = A - Bm**2 / self._C_marg
+
+            if 'sn' in self.components:        # diagonal (Pantheon 2018)
+                delta = self.pantheon['mb'][None, :] - mu_th
+                A = np.sum(delta**2 * self._inv_s2[None, :], axis=1)
+                Bm = np.sum(delta * self._inv_s2[None, :], axis=1)
+                chi2p = A - Bm**2 / self._C_marg
+            else:                              # full covariance (Pantheon+)
+                delta = self.pantheon['mu'][None, :] - mu_th       # (Bv, Nsn)
+                Ci = self.pantheon['cov_inv']
+                CiD = delta @ Ci                                   # (Bv, Nsn)
+                A = np.sum(CiD * delta, axis=1)                    # Δᵀ C⁻¹ Δ
+                Bm = CiD @ self.pantheon['ones']                   # Δᵀ C⁻¹ 1
+                chi2p = A - Bm**2 / self.pantheon['C_marg']
             chi2p[bad] = np.inf
             lp += -0.5 * chi2p
 

@@ -1,8 +1,9 @@
 # Quantum Algorithms for Cosmology — Classical vs Quantum Bayesian Inference
 
 A toolkit that fits cosmological models (ΛCDM, wCDM, CPL, PEDE, GEDE) to
-real data (cosmic chronometers, Pantheon+ supernovae) using **classical**
-and **quantum** sampling algorithms, and compares them head to head.
+real data (combined CC+BAO H(z) measurements, and Type Ia supernovae —
+Pantheon 2018 or Pantheon+ 2022) using **classical** and **quantum**
+sampling algorithms, and compares them head to head.
 
 This README has two parts:
 
@@ -123,6 +124,28 @@ Every run now saves its pictures, log and results table into its own
 timestamped folder, `results/run_<date>_<model>/`, so different runs never
 overwrite or mix.
 
+### Run everything at once (`--sweep-all`)
+
+For an HPC job you usually want **all models in one launch**. The
+`--sweep-all` flag runs the full quantumness benchmark (the QMCMC + QVMC
+ladders) for every model, into a single master folder with one subfolder
+per model, plus one cumulative CSV (`resultados_TODOS_los_modelos.csv`)
+collecting every model/method/quantumness row for easy comparison. If a
+model fails, the sweep logs it and continues with the rest.
+
+```bash
+# Samplers: benchmark of ALL models in one go
+python cosmo_modular_quantum.py --sweep-all --dataset CC+BAO+Pantheon+ \
+    --steps 15000 --qvmc-iter 3000 --nqpp 6 --gpu --profile
+
+# Genetic: CGA + QGA across all quantumness levels, all models
+python cosmo_genetic_optimizers.py --sweep-all --dataset CC+BAO+Pantheon+ \
+    --generations 120 --population-size 200 --n-bits 6 --gpu --profile
+```
+
+Restrict the sweep with `--sweep-models lcdm cpl` (and, for the genetic
+script, `--sweep-qga-levels 0 100`).
+
 ## How to read the pictures
 
 * **Corner plots** (`corner_ladder_*`) — estimated values and their
@@ -190,14 +213,17 @@ Strict physics ↔ sampling separation:
 * **`CosmoModel`** (dataclass) — name, parameters, bounds, fiducials and
   the Friedmann function `E2(z, θ)`. Registry `MODELS` holds `lcdm`,
   `wcdm`, `cpl`, `pede`, `gede`. Adding a model = one dict entry.
-* **`Posterior`** — the single contact point for the samplers. CC
-  likelihood (51 points) and Pantheon+ (1048 SNe, analytic M_abs
-  marginalization, Goliath et al. 2001). The luminosity distance uses a
-  vectorized `cumulative_trapezoid` over a fine z-grid, valid for **any**
-  E²(z; θ).
+* **`Posterior`** — the single contact point for the samplers. Combines a
+  **CC+BAO** H(z) likelihood (Cosmic Chronometers + BAO points, treated as
+  diagonal H(z) measurements) with a supernova likelihood that is EITHER
+  **Pantheon 2018** (1048 SNe, diagonal errors) OR **Pantheon+ 2022** (full
+  covariance matrix χ² = ΔᵀC⁻¹Δ), both with analytic M_abs marginalization
+  (Goliath et al. 2001; the Pantheon+ branch is its matrix generalization).
+  The luminosity distance uses a vectorized `cumulative_trapezoid` over a
+  fine z-grid, valid for **any** E²(z; θ).
 * **`log_prob_batch`** — vectorized batch evaluation of the log-posterior
-  (~4000 evals CC+Pantheon+ in ≈1 s); used by the QVMC targets and the
-  vectorized QMCMC kernel.
+  (used by the QVMC targets and the vectorized QMCMC kernel); handles the
+  diagonal and full-covariance SNe likelihoods alike.
 * **Statistics** — autocorrelation τ (FFT, O(N log N)), ESS (chains and
   Kish weights), Gelman-Rubin (max over parameters), `fit_statistics`
   (χ², χ²_red, AIC, BIC with Nelder-Mead refinement).
@@ -423,12 +449,24 @@ live routing trace. Audited issues:
   to ≈ 0.80 (slow mixing). Each block is normalized to unit std →
   acceptance ≈ 0.5.
 
-* **QVMC optimizer.** The stalled-KL symptom was the *classical* COBYLA
-  baseline, not the quantum trainer (parameter-shift drives KL ~8 → ~0.34).
-  Benchmarked fixed-lr SGD vs Adam vs lr-decay SGD on this landscape:
-  adopted **parameter-shift SGD with 1/(1+γ·i) learning-rate decay** (low
-  KL with a flat tail). Adam settled into a higher-KL basin here, so it was
-  not adopted; `lr_train` is exposed for tuning.
+* **QVMC optimizer & the high-quantumness divergence.** Two distinct
+  issues were untangled here. (1) The original "stalled-KL" symptom was the
+  *classical* COBYLA baseline, not the quantum trainer. (2) At high
+  quantumness (the rungs that switch quantum *training* on), the KL would
+  fall to a minimum near iteration ~150 and then **creep back up** to ~2,
+  collapsing the distribution and crashing the ESS — the tuning
+  (lr0=0.05, decay=0.02) had been calibrated for nqpp=3 (~42 ansatz
+  angles), but at nqpp=6 the ansatz has many more angles and a larger
+  gradient, so a fixed step overshoots near the optimum. Fixed with three
+  reinforcing measures: **(a) gradient-norm clipping** (one step can't
+  explode just because there are more angles, decoupling the step from
+  nqpp), **(b) learning-rate decay scaled by the number of angles** (larger
+  ansätze cool faster), and **(c) best-so-far selection** (the returned φ is
+  the lowest-KL iterate ever seen, not the last — so even a wobbly tail
+  reports the true minimum). The creep-up is gone. Note that the absolute
+  KL floor depends on grid resolution (see adaptive grid below): with a
+  coarse grid both classical and quantum plateau at a higher KL, which is a
+  *resolution* limit, not an optimizer failure.
 
 * **QVMC adaptive grid (resolving a smooth posterior).** QVMC represents
   the posterior as a probability mass function on a discrete 2^nqpp grid.
@@ -446,16 +484,59 @@ live routing trace. Audited issues:
   residual lumpiness in the QVMC *samples* is then the variational
   ansatz/training (more iterations, more layers), not the grid.
 
+### Hardening from adversarial testing
+
+A round of deliberate break-it testing (feeding deliberately bad inputs and
+edge cases) surfaced and fixed several robustness gaps that would only bite
+on an HPC queue:
+
+* **Input validation.** Out-of-range numeric args (negative `--steps`,
+  `--nqpp 0`, `--chains 0`, `--seed -1`, `population-size 0`, `n-bits 0`,
+  malformed `--config` JSON) used to crash deep inside NumPy/Qiskit with
+  cryptic messages. They now fail fast with an actionable note before any
+  work starts.
+* **Exponential-memory guard.** A too-large `nqpp` (e.g. nqpp=6 with CPL =
+  2^24 states) would attempt a multi-GB/TB allocation and get OOM-killed.
+  The `--max-qubits` cap (default 18) refuses it with the per-model limit;
+  raise the cap explicitly on a bigger machine (see *Memory limits* above).
+* **Corrupt data rows.** Data files with NaN/inf or non-positive sigma used
+  to load silently and poison every χ². They are now dropped with a warning.
+* **Concurrent CSV writes.** Multiple SLURM array jobs appending to the same
+  cumulative CSV could interleave and corrupt it. Writes are now guarded by a
+  POSIX file lock (verified with real multiprocessing); duplicate headers and
+  torn rows are gone.
+* **Pantheon+ error clarity.** "Files present but unloadable" (bad/singular
+  covariance) is now reported distinctly from "files missing" — different
+  problems, different fixes.
+
 ## Installation and data
 
 ```bash
 pip install -r requirements.txt
 ```
 
-* **CC**: 51 points embedded in `cosmo_core.py` (or
-  `cosmic_chronometers.txt` if present).
-* **Pantheon+**: place `pantheon_full_parameters.txt` (`name zcmb zhel dz
-  mb dmb`) next to the scripts.
+### Datasets
+
+The available datasets (pass via `--dataset`, or pick in the menu):
+
+| Key | What it is | Files needed |
+|-----|-----------|--------------|
+| `CC+BAO` | Combined Cosmic Chronometers + BAO H(z) measurements (diagonal) | embedded, or `cosmic_chronometers.txt` |
+| `Pantheon` | Pantheon 2018, 1048 SNe Ia, **diagonal** errors | `pantheon_full_parameters.txt` (`name zcmb zhel dz mb dmb`) |
+| `Pantheon+` | Pantheon+ 2022, **full covariance matrix** χ²=ΔᵀC⁻¹Δ | `Pantheon+SH0ES.dat` **and** `Pantheon+SH0ES_STAT+SYS.cov` |
+| `CC+BAO+Pantheon` | the two above combined | both sets |
+| `CC+BAO+Pantheon+` | CC+BAO with the full-covariance Pantheon+ | CC + Pantheon+ files |
+
+Legacy aliases `CC` → `CC+BAO` and `CC+Pantheon+` → `CC+BAO+Pantheon` are
+still accepted so old commands and CSVs keep working.
+
+The difference between **Pantheon** and **Pantheon+** is statistical, not
+just cosmetic: Pantheon+ ships a full N×N covariance matrix (correlated
+systematics), so its χ² is the quadratic form ΔᵀC⁻¹Δ rather than a sum of
+independent terms. The covariance code is ready and waiting for the
+`.dat` + `.cov` files; if they are not present, the `Pantheon+` options
+simply do not appear in the menu.
+
 * **IBM Quantum**: save your account once with
   `QiskitRuntimeService.save_account(channel="ibm_quantum_platform",
   token="...")` or pass `--token`.
@@ -465,6 +546,44 @@ pip install -r requirements.txt
   backend is found the script falls back to saving static figures (no crash),
   and in batch/HPC mode (any CLI argument) the live window is disabled by
   design.
+
+### Memory limits: how high can `nqpp` go?
+
+The quantum methods (QVMC, QGA) discretize the posterior on a statevector
+grid of **2^(nqpp·d)** states, where `d` is the number of model parameters.
+Both the time and the memory grow **exponentially** in `nqpp·d`: the grid
+itself, plus the auxiliary arrays the likelihood builds over it, roughly
+**quadruple with each extra qubit**. The scripts enforce a safety cap,
+`--max-qubits` (default **18**), and refuse a run that would exceed it with a
+clear message — so a typo can't silently trigger a 200 GB allocation on a
+shared node.
+
+The cap is on the **total** qubits `nqpp·d`, so the per-model `nqpp` limit
+depends on `d`. Worst-case auxiliary memory (combined dataset with ~1048 SNe):
+
+| Model | d | `nqpp` ≤ 18 q (laptop, default) | ≤ 22 q (workstation ~64 GB) | ≤ 24 q (HPC node ~256 GB) |
+|-------|---|------|------|------|
+| ΛCDM, PEDE | 2 | **9** | 11 | 12 |
+| wCDM, GEDE | 3 | **6** | 7 | 8 |
+| CPL | 4 | **4** | 5 | 6 |
+
+Approximate worst-case memory by total qubits: 12 q ≈ 54 MB · 16 q ≈ 0.9 GB ·
+18 q ≈ 3.5 GB · 20 q ≈ 14 GB · 22 q ≈ 56 GB · 24 q ≈ 224 GB.
+
+To go above the default cap on a bigger machine, raise it explicitly:
+
+```bash
+# CPL at nqpp=6 (24 qubits, ~224 GB) on an HPC node
+python cosmo_modular_quantum.py --benchmark --model cpl --nqpp 6 \
+    --max-qubits 24 --dataset CC+BAO+Pantheon+ --gpu --profile
+```
+
+**On real quantum hardware** (`qpu_cosmo_samplers.py`) this RAM limit does
+**not** apply — a QPU never materializes the statevector in memory, it holds
+the qubits physically. There the constraints are different (qubit count,
+circuit depth, and noise), not classical memory. The `--max-qubits` cap is
+purely a guard for the **classical statevector simulation** used everywhere
+else.
 
 ### Qiskit version compatibility (important)
 

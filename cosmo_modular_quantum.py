@@ -863,27 +863,39 @@ class QVMCModular:
                             f"E[theta]: {fmt_theta(self.model, theta_mean)}")
 
         if self.config.get('training', False):
-            # [FIX — evidence-based] The previous fixed-lr SGD reached a low
-            # KL but then CREPT BACK UP near the minimum (the constant step
-            # overshoots the shrinking gradient). We benchmarked three
-            # optimizers on this exact landscape (lcdm, nqpp=3, 42 angles):
+            # [FIX v4 — high-quantumness divergence] On the ladder, the rungs
+            # that turn quantum *training* ON (82% and 100%) used to DIVERGE:
+            # KL fell to a minimum near iter ~150 and then CREPT BACK UP to
+            # ~2.2, collapsing the distribution and crashing the ESS. The
+            # earlier tuning (lr0=0.05, decay=0.02) was calibrated for nqpp=3
+            # (~42 ansatz angles); with nqpp=6 the ansatz has many more angles
+            # and a larger-norm gradient, so a fixed lr overshoots the
+            # shrinking gradient near the optimum and the KL rebounds.
             #
-            #   fixed-lr SGD   : min KL 0.340, but +0.019 tail creep-up
-            #   Adam (lr 0.05) : very stable (+0.0004) BUT plateaus at 0.60
-            #   SGD + lr decay : min KL 0.344 AND +0.007 tail (best of both)
-            #
-            # Adam — although a natural suggestion — settles into a wider,
-            # higher-KL basin here, so we use parameter-shift SGD with a
-            # 1/(1+gamma*i) learning-rate decay: it keeps the low minimum of
-            # plain SGD while removing the late-iteration creep-up.
-            lr0, decay = self.lr_train, 0.02
+            # Three reinforcing fixes, all evidence-based:
+            #   (1) GRADIENT NORMALIZATION (clip to unit norm above a cap): one
+            #       step can no longer explode just because there are more
+            #       angles — decouples the step size from nqpp.
+            #   (2) lr DECAY SCALED BY #angles: gamma grows with n_p so larger
+            #       ansätze cool down faster (the regime that used to diverge).
+            #   (3) BEST-SO-FAR: we keep the φ with the lowest KL ever seen and
+            #       return THAT, not the last iterate. Even if the tail wobbles,
+            #       the returned model is the true minimum — this alone removes
+            #       the "creep-up" pathology from the reported result.
+            lr0 = self.lr_train
+            decay = 0.02 * max(1.0, n_p / 42.0)        # (2) scale with #angles
+            grad_cap = 1.0                              # (1) max gradient norm
+            best_kl, best_phi = np.inf, phi.copy()      # (3) best-so-far
             it_r = range(max_iter)
             if progress:
                 it_r = tqdm(it_r, desc=f"  {tag} param-shift",
                             leave=False, ncols=80)
             for i in it_r:
                 kl, Qs = self._kl_batch(phi, qc_t, P_target, return_q=True)
-                record(i, float(kl[0]), Qs[0])
+                kl0 = float(kl[0])
+                record(i, kl0, Qs[0])
+                if kl0 < best_kl:                       # (3) track the best
+                    best_kl, best_phi = kl0, phi.copy()
                 _sanity('QVMC.train', 'quantum',
                         'parameter-shift gradient + lr-decay SGD '
                         '(Aer statevector)')
@@ -894,8 +906,13 @@ class QVMCModular:
                     shifts[2 * j + 1, j] -= np.pi / 2
                 kl_s = self._kl_batch(shifts, qc_t, P_target)
                 grad = (kl_s[0::2] - kl_s[1::2]) / 2.0
+                # (1) clip the gradient norm so the step cannot blow up
+                gnorm = float(np.linalg.norm(grad))
+                if gnorm > grad_cap:
+                    grad = grad * (grad_cap / gnorm)
                 phi = phi - (lr0 / (1.0 + decay * i)) * grad
-            phi_opt = phi
+            # (3) return the best iterate, not the last — kills the creep-up
+            phi_opt = best_phi
         else:
             pbar = tqdm(total=max_iter, desc=f"  {tag} COBYLA", leave=False,
                         ncols=80) if progress else None
@@ -1896,14 +1913,39 @@ def csv_row_for_side(side: dict, model, method_label: str, is_mcmc: bool,
 
 
 def _write_csv_rows(rows: list, fields: list, csv_path: str) -> None:
-    """Append already-built row dicts to a CSV, writing the header if new."""
-    write_header = not os.path.exists(csv_path)
-    with open(csv_path, 'a', newline='') as fh:
-        wtr = csv.DictWriter(fh, fieldnames=fields, extrasaction='ignore')
-        if write_header:
-            wtr.writeheader()
-        for r in rows:
-            wtr.writerow(r)
+    """Append already-built row dicts to a CSV, writing the header if new.
+
+    [ROBUSTNESS — HPC] Guarded by an advisory file lock (fcntl, POSIX) so that
+    concurrent SLURM array jobs appending to the SAME cumulative CSV cannot
+    interleave/corrupt each other's rows or write duplicate headers. Best
+    effort: on platforms without fcntl it degrades to a plain append.
+    """
+    lock_fh = None
+    try:
+        import fcntl
+        lock_fh = open(csv_path + ".lock", 'w')
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+    except Exception:
+        lock_fh = None
+    try:
+        write_header = (not os.path.exists(csv_path)
+                        or os.path.getsize(csv_path) == 0)
+        with open(csv_path, 'a', newline='') as fh:
+            wtr = csv.DictWriter(fh, fieldnames=fields, extrasaction='ignore')
+            if write_header:
+                wtr.writeheader()
+            for r in rows:
+                wtr.writerow(r)
+            fh.flush()
+            os.fsync(fh.fileno())
+    finally:
+        if lock_fh is not None:
+            try:
+                import fcntl
+                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+                lock_fh.close()
+            except Exception:
+                pass
 
 
 def write_run_and_cumulative(side_rows: list, model, run_csv: str,
@@ -2043,7 +2085,7 @@ def sanity_check_routing(model_name: str = 'lcdm', nqpp: int = 2):
     print("\n  Live routing trace for P100 (fully quantum), 3 evals each:")
     SANITY_CHECK = True
     _SANITY_BUDGET.clear()
-    post = Posterior(model, 'CC', 'flat')
+    post = Posterior(model, 'CC+BAO', 'flat')
     _reseed(0)
     mc = QMCMCModular(post, dict(PRESETS[100]), n_chains=3, n_burn=0,
                       stop_on_convergence=False)
@@ -2071,7 +2113,7 @@ def interactive_menu() -> dict:
     """
     if not sys.stdin.isatty():
         print("  [Non-interactive mode detected] Preset P20, ΛCDM, CC, flat.")
-        return {'model': 'lcdm', 'dataset': 'CC', 'prior': 'flat',
+        return {'model': 'lcdm', 'dataset': 'CC+BAO', 'prior': 'flat',
                 'config': dict(PRESETS[20]), 'steps': 1000, 'qvmc_iter': 300,
                 'nqpp': 3, 'benchmark': False}
 
@@ -2095,13 +2137,18 @@ def interactive_menu() -> dict:
 
     print("\n  ── Dataset ──")
     pan = core.load_pantheon()
-    opts = {'CC': 'Cosmic Chronometers (51 pts)'}
+    panp = core.load_pantheon_plus()
+    opts = {'CC+BAO': 'CC+BAO H(z) measurements'}
     if pan is not None:
-        opts['Pantheon+'] = f"Pantheon+ ({len(pan['z'])} SNe Ia)"
-        opts['CC+Pantheon+'] = 'CC + Pantheon+ combined'
-    else:
-        print("    (pantheon_full_parameters.txt not found → CC only)")
-    dataset = _ask("Dataset", opts, 'CC')
+        opts['Pantheon'] = f"Pantheon 2018 ({len(pan['z'])} SNe, diagonal)"
+        opts['CC+BAO+Pantheon'] = 'CC+BAO + Pantheon 2018 combined'
+    if panp is not None:
+        opts['Pantheon+'] = (f"Pantheon+ 2022 ({len(panp['z'])} SNe, "
+                             f"full covariance)")
+        opts['CC+BAO+Pantheon+'] = 'CC+BAO + Pantheon+ 2022 combined'
+    if pan is None and panp is None:
+        print("    (no SNe files found → CC+BAO only)")
+    dataset = _ask("Dataset", opts, 'CC+BAO')
 
     print("\n  ── Prior ──")
     prior = _ask("Prior", {'flat': 'Flat (box)',
@@ -2215,13 +2262,32 @@ def build_parser() -> argparse.ArgumentParser:
                            'per-method ladders (QMCMC: proposal->acceptance; '
                            'QVMC: sampling->training->normalization). This is '
                            'the canonical quantumness scale.')
+    mode.add_argument('--sweep-all', action='store_true',
+                      help='HPC batch mode: run the full quantumness benchmark '
+                           '(QMCMC + QVMC ladders) for EVERY model in one go, '
+                           'into a single master folder with one subfolder per '
+                           'model. Designed to launch once on a supercomputer '
+                           'and collect all results for comparison. Combine '
+                           'with --sweep-models / --dataset / --steps / etc.')
     mode.add_argument('--config', type=str, metavar='JSON',
                       help='Component configuration as JSON')
 
+    p.add_argument('--sweep-models', nargs='+', choices=list(MODELS),
+                   default=None, metavar='MODEL',
+                   help='Restrict --sweep-all to these models '
+                        f'(default: all of {list(MODELS)})')
+
     p.add_argument('--model', choices=list(MODELS), default='lcdm',
                    help='Cosmological model (default: lcdm)')
-    p.add_argument('--dataset', choices=['CC', 'Pantheon+', 'CC+Pantheon+'],
-                   default='CC', help='Observational dataset (default: CC)')
+    p.add_argument('--dataset',
+                   choices=['CC+BAO', 'Pantheon', 'Pantheon+',
+                            'CC+BAO+Pantheon', 'CC+BAO+Pantheon+',
+                            'CC', 'CC+Pantheon+'],   # last two: legacy aliases
+                   default='CC+BAO',
+                   help='Observational dataset (default: CC+BAO). '
+                        'Pantheon = 2018 diagonal; Pantheon+ = 2022 full '
+                        'covariance. CC / CC+Pantheon+ are accepted as legacy '
+                        'aliases of CC+BAO / CC+BAO+Pantheon.')
     p.add_argument('--prior', choices=['flat', 'gaussian'], default='flat',
                    help='Prior type (default: flat)')
     p.add_argument('--steps', type=int, default=1000,
@@ -2250,6 +2316,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--profile', action='store_true',
                    help='Profile peak CPU/GPU memory, wall time and GPU-hours, '
                         'and save a resource_usage_*.png figure.')
+    p.add_argument('--max-qubits', type=int, default=18, metavar='N',
+                   help='Memory safety cap on the total statevector qubits '
+                        '(nqpp*d). Default 18 (~3.5 GB, safe on a laptop). '
+                        'Raise it on a supercomputer with more RAM, e.g. '
+                        '--max-qubits 22 (~56 GB) or 24 (~224 GB). Each +1 '
+                        'qubit roughly quadruples auxiliary memory.')
     p.add_argument('--sanity-check', action='store_true',
                    help='Run the routing/correctness sanity check and exit '
                         '(acceptance regression test + per-preset engine map)')
@@ -2277,10 +2349,139 @@ def _print_summary_block(title: str, model, st: dict, extra: str,
             logger.info(ln.strip())
 
 
+def run_sweep_all(models, dataset, prior, steps, qvmc_iter, nqpp, chains,
+                  shots, seed, master_dir, logger, log_every,
+                  no_csv=False, no_plot=False):
+    """Run the full quantumness benchmark for EVERY requested model in one go.
+
+    This is the HPC "launch once, get everything" mode. For each model it runs
+    the canonical per-method ladders (QMCMC: classical -> +proposal ->
+    +acceptance; QVMC: classical -> +sampling -> +training -> +normalization),
+    writes that model's figures + per-model CSV into its OWN subfolder of the
+    master run directory, and appends every row to ONE cumulative CSV at the
+    master level so all models sit in a single comparison table.
+
+    Robustness: each model runs inside a try/except, so if one model fails
+    (e.g. a numerical edge case) the sweep logs the error and CONTINUES with the
+    remaining models instead of aborting the whole batch — essential when a job
+    has been queued for hours on a cluster.
+
+    Args:
+        models: list of model keys to sweep (subset of MODELS).
+        dataset, prior: shared observational setup for all models.
+        steps, qvmc_iter, nqpp, chains, shots, seed: shared hyper-parameters.
+        master_dir: the master run folder; per-model subfolders are created in it.
+        logger, log_every: logging target and cadence.
+        no_csv, no_plot: pass-throughs to skip CSV / figures.
+
+    Returns:
+        dict mapping model key -> 'ok' or the error string, for the summary.
+    """
+    say = logger.info if logger else print
+    cumulative_master = os.path.join(master_dir, "resultados_TODOS_los_modelos.csv")
+    status = {}
+    t_start = time.time()
+
+    say("=" * 70)
+    say(f"SWEEP-ALL — {len(models)} model(s): {', '.join(models)}")
+    say(f"  dataset={dataset} | prior={prior} | steps={steps} "
+        f"| qvmc_iter={qvmc_iter} | nqpp={nqpp}")
+    say(f"  master folder: {master_dir}/")
+    say("=" * 70)
+
+    for i, model_name in enumerate(models, 1):
+        say("")
+        say(f"[{i}/{len(models)}] ===== MODEL: {model_name} "
+            f"({MODELS[model_name].label}) =====")
+        # Per-model subfolder INSIDE the master folder, so each model's figures
+        # land together and nothing overwrites across models.
+        model_dir = os.path.join(master_dir, f"model_{model_name}")
+        os.makedirs(model_dir, exist_ok=True)
+        try:
+            _reseed(seed)
+            post = Posterior(MODELS[model_name], dataset, prior)
+            # Two CSV destinations: the per-model file in its subfolder, plus
+            # the single cumulative master file shared by every model.
+            csv_paths = None
+            if not no_csv:
+                csv_paths = [os.path.join(model_dir, "resultados_config.csv"),
+                             cumulative_master]
+            run_quantumness_ladder(
+                post, n_steps_mcmc=steps, max_iter_qvmc=qvmc_iter, nqpp=nqpp,
+                outdir=model_dir, seed=seed, logger=logger,
+                log_every=log_every, n_chains_mcmc=chains, n_shots=shots,
+                csv_paths=csv_paths, dataset_label=dataset, prior_type=prior)
+            status[model_name] = 'ok'
+            say(f"[{i}/{len(models)}] {model_name}: DONE -> {model_dir}/")
+        except Exception as exc:                      # keep the batch alive
+            status[model_name] = f"FAILED: {exc}"
+            say(f"[{i}/{len(models)}] {model_name}: FAILED — {exc}")
+            import traceback
+            (logger.error if logger else print)(traceback.format_exc())
+
+    elapsed = time.time() - t_start
+    say("")
+    say("=" * 70)
+    say(f"SWEEP-ALL finished in {elapsed/60:.1f} min")
+    for m in models:
+        say(f"  {m:8s} : {status[m]}")
+    if not no_csv:
+        say(f"  Combined table: {cumulative_master}")
+    say("=" * 70)
+    return status
+
+
+def _validate_args(args) -> None:
+    """Reject out-of-range numeric arguments with a clear message.
+
+    [ROBUSTNESS] argparse validates choices/types but not the *range* of
+    integers, so values like --steps -5, --nqpp 0 or a huge --nqpp used to
+    crash deep inside NumPy/Qiskit with cryptic errors. On an HPC queue a typo
+    like that wastes a long job, so we fail fast here with an actionable note.
+
+    The qubit ceiling guards the EXPONENTIAL statevector cost: the grid is
+    2^(nqpp*d) states and the likelihood builds (2^(nqpp*d), N_data)
+    intermediates, so memory grows ~4x per added qubit. The cap is
+    --max-qubits (default 18 ≈ 3.5 GB, laptop-safe; raise on a supercomputer).
+    """
+    errs = []
+    pos = {'steps': 'steps', 'qvmc_iter': 'qvmc-iter', 'nqpp': 'nqpp',
+           'chains': 'chains', 'shots': 'shots'}
+    for attr, flag in pos.items():
+        v = getattr(args, attr, None)
+        if v is not None and v < 1:
+            errs.append(f"--{flag} must be >= 1 (got {v})")
+    if getattr(args, 'seed', 0) < 0:
+        errs.append(f"--seed must be >= 0 (got {args.seed})")
+
+    max_q = getattr(args, 'max_qubits', 18)
+    nqpp = getattr(args, 'nqpp', None)
+    if nqpp is not None and nqpp >= 1:
+        models = (args.sweep_models if getattr(args, 'sweep_all', False)
+                  and args.sweep_models else
+                  (list(MODELS) if getattr(args, 'sweep_all', False)
+                   else [args.model]))
+        max_d = max(MODELS[m].n_params for m in models)
+        total_q = nqpp * max_d
+        if total_q > max_q:
+            approx_gb = 2 ** total_q * 1660 * 8 / 1e9
+            errs.append(
+                f"--nqpp {nqpp} with a {max_d}-parameter model needs a "
+                f"2^{total_q}-state grid (~{approx_gb:.1f} GB worst case), "
+                f"above the --max-qubits {max_q} cap. Either lower nqpp to "
+                f"<= {max_q // max_d}, or raise --max-qubits if your machine "
+                f"has the RAM.")
+    if errs:
+        sys.stderr.write("Argument error(s):\n  " + "\n  ".join(errs) + "\n")
+        sys.exit(2)
+
+
 def main():
     """Entry point: interactive without arguments, CLI with logging if any."""
     parser = build_parser()
     args = parser.parse_args()
+    if len(sys.argv) > 1:
+        _validate_args(args)
 
     # --sanity-check short-circuits everything: routing + correctness only.
     if getattr(args, 'sanity_check', False):
@@ -2304,13 +2505,62 @@ def main():
 
     _reseed(args.seed)
 
+    # ── SWEEP-ALL: run the benchmark for every model in one master folder ──
+    if getattr(args, 'sweep_all', False):
+        # [FIX] Force the headless backend here: --sweep-all returns before the
+        # normal cli_mode branch that would otherwise call this, and on an HPC
+        # compute node (no display) Matplotlib must not try to open a GUI.
+        set_headless_backend()
+        device = resolve_device(USE_GPU)
+        sweep_models = args.sweep_models or list(MODELS)
+        # One master folder for the whole sweep; per-model subfolders inside.
+        if args.outdir == 'results':
+            master_dir = make_run_dir('results', tag='sweep_all')
+        else:
+            master_dir = args.outdir
+            os.makedirs(master_dir, exist_ok=True)
+        log_file = args.log_file or os.path.join(
+            master_dir, f"sweep_all_{time.strftime('%Y%m%d_%H%M%S')}.log")
+        logger = setup_logger(log_file)
+        print(f"  SWEEP-ALL mode: master folder {master_dir}/  | log {log_file}")
+        logger.info("Simulation device: %s%s", device,
+                    f"  | GPU available: {gpu_available()}" if USE_GPU else "")
+        if USE_GPU and device == 'CPU':
+            logger.info("  ⚠  --gpu requested but no Aer GPU device available; "
+                        "running on CPU.")
+        profiler = None
+        if do_profile:
+            import cosmo_profiling as _prof
+            profiler = _prof.ResourceProfiler(
+                tag=f"sweep_{'gpu' if device == 'GPU' else 'cpu'}",
+                device=device, interval=0.5)
+            profiler.start()
+        run_sweep_all(
+            sweep_models, args.dataset, args.prior, args.steps, args.qvmc_iter,
+            args.nqpp, args.chains, args.shots, args.seed, master_dir, logger,
+            args.log_every, no_csv=args.no_csv, no_plot=args.no_plot)
+        _finish_profile(profiler, master_dir, logger.info,
+                        f"sweep-all | {len(sweep_models)} models | "
+                        f"steps={args.steps} iters={args.qvmc_iter}")
+        return
+
     # ── mode selection ───────────────────────────────────────────────────
     if cli_mode:
         model_name, dataset, prior = args.model, args.dataset, args.prior
         steps, qvmc_iter, nqpp = args.steps, args.qvmc_iter, args.nqpp
         benchmark = args.benchmark
         if args.config:
-            cfg = json.loads(args.config)
+            try:
+                cfg = json.loads(args.config)
+            except json.JSONDecodeError as e:
+                sys.stderr.write(f"--config is not valid JSON: {e}\n"
+                                 f"  Example: --config '{{\"proposal\": true, "
+                                 f"\"acceptance\": false}}'\n")
+                sys.exit(2)
+            if not isinstance(cfg, dict):
+                sys.stderr.write("--config must be a JSON object (dict), "
+                                 f"got {type(cfg).__name__}\n")
+                sys.exit(2)
             cfg.setdefault('label', f"{compute_quantumness(cfg):.0f}% — JSON")
         elif args.preset is not None:
             cfg = dict(PRESETS[args.preset])
