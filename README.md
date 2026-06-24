@@ -146,6 +146,56 @@ python cosmo_genetic_optimizers.py --sweep-all --dataset CC+BAO+Pantheon+ \
 Restrict the sweep with `--sweep-models lcdm cpl` (and, for the genetic
 script, `--sweep-qga-levels 0 100`).
 
+### Run both pipelines in parallel on a cluster (`cosmo_hpc_runner.py`)
+
+On an HPC node you usually want the samplers **and** the genetic optimizer
+running at the same time, one model per process, with the cores split so
+nothing oversubscribes. `cosmo_hpc_runner.py` does exactly that: it launches
+each `(script × model × grid-size)` as its own subprocess, pins each one's
+internal BLAS/Aer thread count, monitors per-task wall time and peak RAM
+(process-tree aware), and writes a `master_profile.csv`/`.json`. It auto-detects
+the node's cores and RAM, so the same command works on a laptop or a
+supercomputer.
+
+```bash
+# Both pipelines, all models, cores auto-split (≈ J procs × T threads = cores)
+python cosmo_hpc_runner.py --dataset CC+BAO+Pantheon+ \
+    --steps 15000 --qvmc-iter 3000 --nqpp 6 \
+    --generations 120 --population-size 200 --n-bits 6 \
+    --threads-per-worker 8
+```
+
+**Per-model grid clamp.** You set one *target* `nqpp` (or `n_bits`); any model
+that would exceed the RAM/qubit ceiling is **lowered just for that model**
+until it fits, leaving the others at the target. Example: target `nqpp 6` keeps
+ΛCDM/wCDM/PEDE/GEDE at 6 and quietly drops **CPL** (d=4) to 4, because 6×4 =
+24 qubits ≈ 224 GB does not fit. Pass `--strict-qubits` to skip oversized
+combinations instead of clamping them.
+
+**Grid-convergence sweep.** `--nqpp-sweep LO HI` runs one samplers task per
+`nqpp` in the range (and `--nbits-sweep LO HI` does the same for the QGA grid),
+so you can study how grid resolution affects the answer:
+
+```bash
+python cosmo_hpc_runner.py --nqpp-sweep 2 6 --only-samplers \
+    --models lcdm wcdm --dataset CC+BAO+Pantheon+
+```
+
+When the run finishes the orchestrator **automatically** writes the convergence
+figures into the master folder: `convergence_<model>.png` (each parameter ± σ
+vs `nqpp`, one line per method, with Planck reference lines) and
+`cost_<model>.png` (wall time and peak RAM vs `nqpp`). To (re)generate the
+figures from an existing run without recomputing, or to skip them:
+
+```bash
+python cosmo_hpc_runner.py --plot-only results/hpc_<timestamp>/   # re-plot only
+python cosmo_hpc_runner.py ... --no-plots                         # skip plots
+```
+
+See *Part 2 — Parallel HPC orchestration* for the full rationale (why
+multiprocessing over multithreading, the anti-oversubscription core pinning,
+and the clamp/ceiling logic).
+
 ## How to read the pictures
 
 * **Corner plots** (`corner_ladder_*`) — estimated values and their
@@ -205,6 +255,13 @@ log, per-run `resultados_config.csv`, and — with `--profile` — a
 never mix. Pass an explicit `--outdir` to override. A cumulative
 `resultados_config.csv` is also kept in the working directory to compare
 methods across runs.
+
+Two HPC helpers sit on top of the executables (and import none of their
+internals): **`cosmo_hpc_runner.py`** runs the two simulators in parallel on a
+compute node (one model per process, cores partitioned to avoid
+oversubscription, per-task time/RAM profiling, per-model grid clamp) and, when
+a grid sweep was requested, automatically plots how the estimates converge as
+the grid (`nqpp`) refines. See *Parallel HPC orchestration* below.
 
 ### `cosmo_core.py` — shared physics module
 
@@ -508,6 +565,77 @@ on an HPC queue:
 * **Pantheon+ error clarity.** "Files present but unloadable" (bad/singular
   covariance) is now reported distinctly from "files missing" — different
   problems, different fixes.
+
+## Parallel HPC orchestration (`cosmo_hpc_runner.py`)
+
+`cosmo_hpc_runner.py` is a standalone orchestrator that runs the two
+simulators concurrently on one compute node. It does **not** modify the
+pipelines — it invokes their existing CLI (`--sweep-all --sweep-models <m>`),
+one model per process.
+
+### Why multiprocessing, not multithreading
+
+For these algorithms process-level parallelism wins:
+
+* **The GIL** serializes all pure-Python work (the MCMC transition kernel, the
+  GA generational loop, circuit construction). Threads give no real speed-up
+  there. Separate processes = separate GILs = real parallelism + crash
+  isolation (one model blowing up does not kill the batch).
+* The natural unit of parallelism is one `(script × model × grid-size)`
+  combination: independent, long-running, embarrassingly parallel.
+* The heavy numerical work (NumPy/BLAS and Qiskit-Aer's C++) is **already**
+  multi-threaded internally via OpenMP.
+
+### The real bottleneck: oversubscription
+
+Both BLAS (OpenBLAS/MKL) and Aer default to grabbing *all* cores. Launch W
+worker processes and each spawns ~all-core thread pools → W×cores threads
+fighting over the cores → cache thrashing, slower than serial. The orchestrator
+prevents this by **partitioning the cores**: with J concurrent processes and T
+threads each, it enforces J·T ≈ cores by exporting, in each child's
+environment (read at NumPy/Qiskit import time, hence a fresh subprocess), the
+thread caps `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`,
+`NUMEXPR_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, `RAYON_NUM_THREADS`. This is
+also why a `multiprocessing.Pool` (fork) is the *wrong* tool: it would inherit
+an already-initialized BLAS pool and the caps would not take effect.
+
+### Per-model grid clamp and the qubit/RAM ceiling
+
+`nqpp` (and the QGA `n_bits`) is **not** limited by core count — it is limited
+by RAM, because the statevector grid costs `2^(nqpp·d)` and the binding model is
+the highest-dimensional one (CPL, d=4). The orchestrator computes a per-task
+**effective qubit ceiling** = `min(--max-qubits, qubits that fit in the
+per-task RAM budget)`, then clamps each model's grid to the largest value ≤ the
+target that fits: `grid_eff = min(target, ceiling // d)`. So a target of
+`nqpp 6` keeps d≤3 models at 6 and lowers CPL to 4 — and even with
+`--max-qubits 24` the RAM term still caps CPL (e.g. to nqpp 5 ≈ 14 GB on a
+125 GB node) so a 224 GB allocation can never slip through. `--strict-qubits`
+disables clamping (oversized combinations are skipped instead).
+
+### What it returns
+
+A background monitor samples each child **process tree's** RSS (psutil), so the
+reported peak RAM includes any descendants — unlike the per-PID
+`cosmo_profiling.py` profiler, which each child still runs via `--profile` to
+produce its own `resource_usage_*.png`. The orchestrator writes a per-task and
+aggregate `master_profile.csv` / `.json` with wall time, peak RSS, effective
+grid value and exit status, and tails the log of any failed task. Concurrent
+appends to the shared cumulative CSV remain safe via the existing `fcntl` lock;
+each task also gets its own `--outdir` subfolder.
+
+### Grid-convergence study (built into the orchestrator)
+
+With `--nqpp-sweep LO HI` the orchestrator emits one samplers task per `nqpp`.
+After all runs finish it **automatically** reads every task's
+`resultados_*.csv` (using the `nqpp` column already present in the schema) and,
+for each model, writes `convergence_<model>.png` — every parameter's estimate
+± σ vs `nqpp`, one line per method, with Planck reference lines — and
+`cost_<model>.png` — wall time and peak RAM vs `nqpp`. Methods that ignore the
+grid (MCMC/QMCMC) show up as flat lines, a built-in consistency check; the
+VI/QVMC family is where you see the discretized posterior converge as the grid
+refines. The plotting is part of `cosmo_hpc_runner.py` itself (no separate
+script): use `--plot-only <master_dir>` to regenerate figures from an existing
+run, or `--no-plots` to skip them.
 
 ## Installation and data
 

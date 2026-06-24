@@ -1,0 +1,60 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Quantum Algorithms for Cosmology: a classical-quantum ablation framework for Bayesian inference"
+abstract: >-
+  A toolkit that fits cosmological models (LambdaCDM, wCDM, CPL, PEDE, GEDE)
+  to CC+BAO H(z) and Type Ia supernova data (Pantheon 2018 / Pantheon+ 2022)
+  with classical and quantum sampling and optimization algorithms (MCMC/QMCMC,
+  VI/QVMC, CGA/QGA), organized as a per-component classical-quantum ablation
+  framework. The scientific aim is faithful replication of classical results
+  by quantum methods, not a claim of quantum advantage.
+type: software
+authors:
+  - given-names: "Andrés"
+    family-names: "García Rivera"
+    affiliation: "Universidad Iberoamericana (IBERO), Mexico City"
+# TODO(author): add ORCID once available.
+# - orcid: "https://orcid.org/0000-0000-0000-0000"
+repository-code: "https://github.com/AndrewGari05/Quantum-Algorithms-Cosmology"
+license: MIT
+version: "2.0.0"
+date-released: "2026-01-01"
+keywords:
+  - quantum computing
+  - cosmology
+  - Bayesian inference
+  - MCMC
+  - variational quantum Monte Carlo
+  - genetic algorithms
+  - Qiskit
+references:
+  - type: article
+    authors:
+      - family-names: "Sarracino"
+    title: "Quantum-enhanced Markov chain Monte Carlo proposal"
+    year: 2025
+    notes: "QMCMC proposal circuit."
+  - type: article
+    authors:
+      - family-names: "Goliath"
+    title: "Supernovae and the nature of the dark energy"
+    year: 2001
+    notes: "Analytic marginalization of the absolute magnitude M_abs."
+  - type: article
+    authors:
+      - family-names: "Vehtari"
+      - family-names: "Gelman"
+      - family-names: "Simpson"
+      - family-names: "Carpenter"
+      - family-names: "Bürkner"
+    title: >-
+      Rank-normalization, folding, and localization: an improved R-hat for
+      assessing convergence of MCMC
+    year: 2021
+    notes: "Rank-normalized split-R-hat and the 1.01 convergence threshold."
+  - type: article
+    authors:
+      - family-names: "Spall"
+    title: "Implementation of the simultaneous perturbation algorithm (SPSA)"
+    year: 1998
+    notes: "SPSA optimizer used on the QPU path."

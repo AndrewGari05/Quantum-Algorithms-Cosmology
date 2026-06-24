@@ -1,0 +1,9 @@
+{
+  "wall_s": 156.07,
+  "peak_rss_mb": 279.5,
+  "peak_vram_mb": 0.0,
+  "gpu_hours": 0.0,
+  "mean_gpu_util_pct": 0.0,
+  "device": "CPU",
+  "gpu_name": "NVIDIA GeForce RTX 4070 Laptop GPU"
+}

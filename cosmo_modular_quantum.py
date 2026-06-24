@@ -81,7 +81,13 @@ from tqdm import tqdm
 
 import corner  # [NEW] corner.py for overlaid 2D contour + 1D marginal plots
 
-warnings.filterwarnings("ignore")
+# [A5] Do NOT silence ALL warnings: a blanket filter hides exactly the
+# RuntimeWarnings (overflow/invalid in log/exp/sqrt) that would flag an
+# unphysical E²<0 or a log(0) in the likelihood. We silence only the few
+# known-benign, library-emitted categories and let numerical warnings through.
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
 
 
 def set_headless_backend():
@@ -171,91 +177,176 @@ def _reseed(seed: int):
 
 
 # =============================================================================
-# 0.  QUANTUM COMPONENTS AND QUANTUMNESS SCORE
+# 0.  CLASSICAL-QUANTUM ABLATION FRAMEWORK
 # =============================================================================
+#
+#  WHAT THIS IS (and is NOT).
+#  --------------------------
+#  The "quantumness %" reported throughout the project is NOT a measure of
+#  quantum computational resource (it does not count entangling depth, magic,
+#  non-Clifford gates or quantum volume). It is the index of a CLASSICAL-
+#  QUANTUM ABLATION: the pipeline is decomposed into well-delimited
+#  substitution points (proposal, acceptance, sampling, training,
+#  normalization), each of which can be run classically or replaced by its
+#  quantum implementation. The index measures HOW MANY of those substitution
+#  points are currently switched to quantum — nothing more. This is the
+#  standard ablation methodology (isolate the effect of one module at a time),
+#  applied to classical→quantum substitution.
+#
+#  UNIFORM WEIGHTING (option A).
+#  ----------------------------
+#  Every substitution point counts EQUALLY. The previous version assigned
+#  hand-picked weights (proposal 20, acceptance 25, ...) meant to reflect
+#  "how much quantum structure each injects" — a subjective quantity with no
+#  measurable definition. Under the ablation reading the only defensible index
+#  is the plain fraction of active substitution points, so the global index is
+#
+#      ablation_index = 100 · (#components switched to quantum) / (#components).
+#
+#  The historical weighted numbers are still computed by
+#  `legacy_weighted_index` and may be reported as a clearly-labelled,
+#  heuristic secondary index for continuity with older CSVs/figures.
+#
+#  FAITHFUL vs ALGORITHMIC cells (the key classification).
+#  ------------------------------------------------------
+#  Each substitution point is tagged by the kind of ablation it produces:
+#
+#    * FAITHFUL  — the quantum implementation encodes the EXACT SAME rule as
+#                  the classical one, so flipping it MUST leave the result
+#                  statistically unchanged. These are the NULL CELLS of the
+#                  ablation: their job is to verify that the substitution is
+#                  faithful (introduces no bias). A faithful cell that changed
+#                  the answer would be the bug; a faithful cell that does NOT
+#                  change it is the *result* (the quantum step reproduces the
+#                  classical one). Example: the Metropolis acceptance encoded
+#                  as an RY amplitude — it computes min(1, e^Δ) either way.
+#    * ALGORITHMIC — the quantum implementation is a genuinely different
+#                  algorithm, expected to change the result. These are the
+#                  TREATMENT CELLS. Example: the QVMC quantum training
+#                  (parameter-shift) reaches a different KL minimum than
+#                  classical COBYLA.
+#
+#  This tag turns the project's central narrative ("some rungs coincide by
+#  design, others differ") into first-class metadata instead of prose, and
+#  makes every FAITHFUL cell a falsifiable correctness test (see tests/).
+
+FAITHFUL = 'faithful'        # null-cell: quantum must reproduce classical
+ALGORITHMIC = 'algorithmic'  # treatment-cell: quantum is a distinct algorithm
 
 QUANTUM_COMPONENTS = {
-    'proposal':      {'weight': 20, 'name': 'QMCMC proposal (statevector circuit)'},
-    'acceptance':    {'weight': 25, 'name': 'MH acceptance (Hadamard test)'},
-    'training':      {'weight': 20, 'name': 'QVMC training (parameter-shift)'},
-    'sampling':      {'weight': 25, 'name': 'QVMC sampling (quantum shots)'},
-    'normalization': {'weight': 10, 'name': 'Normalization (QAE)'},
+    'proposal':      {'kind': ALGORITHMIC,
+                      'name': 'QMCMC proposal (statevector circuit, Sarracino)'},
+    'acceptance':    {'kind': FAITHFUL,
+                      'name': 'MH acceptance (RY amplitude encoding of Metropolis)'},
+    'training':      {'kind': ALGORITHMIC,
+                      'name': 'QVMC training (parameter-shift gradient)'},
+    'sampling':      {'kind': FAITHFUL,
+                      'name': 'QVMC sampling (shots from the trained state)'},
+    'normalization': {'kind': FAITHFUL,
+                      'name': 'Normalization (exact renormalization)'},
 }
+
+#: Legacy hand-picked weights (NO measurable definition). Retained ONLY so
+#: `legacy_weighted_index` can reproduce the old numbers for continuity.
+_LEGACY_WEIGHTS = {'proposal': 20, 'acceptance': 25, 'training': 20,
+                   'sampling': 25, 'normalization': 10}
 
 PRESETS = {
     0:   dict(proposal=False, acceptance=False, training=False, sampling=False,
-              normalization=False, label='0% — Fully Classical'),
+              normalization=False, label='0/5 quantum — Fully Classical'),
     20:  dict(proposal=True, acceptance=False, training=False, sampling=False,
-              normalization=False, label='20% — Quantum proposal only (Sarracino)'),
+              normalization=False, label='1/5 quantum — Quantum proposal only (Sarracino)'),
     45:  dict(proposal=True, acceptance=False, training=False, sampling=True,
-              normalization=False, label='45% — Proposal + Quantum sampling'),
+              normalization=False, label='2/5 quantum — Proposal + Quantum sampling'),
     70:  dict(proposal=True, acceptance=True, training=False, sampling=True,
-              normalization=False, label='70% — No quantum training'),
+              normalization=False, label='3/5 quantum — + Quantum acceptance'),
     90:  dict(proposal=True, acceptance=True, training=True, sampling=True,
-              normalization=False, label='90% — No QAE'),
+              normalization=False, label='4/5 quantum — + Quantum training (no QAE)'),
     100: dict(proposal=True, acceptance=True, training=True, sampling=True,
-              normalization=True, label='100% — Fully Quantum'),
+              normalization=True, label='5/5 quantum — Fully Quantum'),
 }
 
 #: [BASE] The exact classical counterpart used as the mandatory baseline:
-#: same code path with every component switched off.
+#: same code path with every substitution point switched off.
 CLASSICAL_BASELINE = dict(PRESETS[0])
 
 
 def compute_quantumness(config: dict) -> float:
-    """0–100% score weighted by each quantum component's weight."""
-    total = sum(c['weight'] for c in QUANTUM_COMPONENTS.values())
-    earned = sum(QUANTUM_COMPONENTS[k]['weight']
-                 for k in QUANTUM_COMPONENTS if config.get(k, False))
+    """Global ablation index: 100 · (#quantum components)/(#components).
+
+    Uniform weighting (option A): every substitution point counts equally.
+    This is the fraction of substitution points currently switched to
+    quantum — an ablation index, NOT a quantum-resource metric.
+    """
+    n_total = len(QUANTUM_COMPONENTS)
+    n_quantum = sum(1 for k in QUANTUM_COMPONENTS if config.get(k, False))
+    return round(100.0 * n_quantum / n_total, 1)
+
+
+def legacy_weighted_index(config: dict) -> float:
+    """Historical hand-weighted index (heuristic; for CSV continuity only).
+
+    Reproduces the pre-ablation "quantumness %" that used subjective
+    per-component weights. Reported, if at all, as a clearly-labelled
+    secondary number — never as the primary index.
+    """
+    total = sum(_LEGACY_WEIGHTS.values())
+    earned = sum(_LEGACY_WEIGHTS[k] for k in _LEGACY_WEIGHTS
+                 if config.get(k, False))
     return round(100.0 * earned / total, 1)
 
 
+def component_kinds(config: dict) -> dict:
+    """Map each ACTIVE quantum component to its FAITHFUL/ALGORITHMIC kind.
+
+    Lets figures, tables and tests state, per configuration, which active
+    substitutions are null cells (must reproduce classical) and which are
+    treatment cells (expected to differ).
+    """
+    return {k: QUANTUM_COMPONENTS[k]['kind']
+            for k in QUANTUM_COMPONENTS if config.get(k, False)}
+
+
 def quantumness_label(pct: float) -> str:
-    """Human-readable label for a quantumness level."""
-    if pct == 0:
-        return "Fully Classical"
-    if pct < 25:
-        return "Mostly Classical"
-    if pct < 50:
-        return "Hybrid (classical-leaning)"
-    if pct < 75:
-        return "Hybrid (quantum-leaning)"
-    if pct < 100:
-        return "Mostly Quantum"
-    return "Fully Quantum"
+    """Human-readable label for a global ablation level (#quantum / 5)."""
+    n = int(round(pct / 100.0 * len(QUANTUM_COMPONENTS)))
+    if n == 0:
+        return "Fully Classical (0/5 quantum)"
+    if n >= len(QUANTUM_COMPONENTS):
+        return "Fully Quantum (5/5 quantum)"
+    return f"Hybrid ({n}/{len(QUANTUM_COMPONENTS)} quantum)"
 
 
-# ── Per-method quantumness axes (Option A) ───────────────────────────────────
-# The single global quantumness % bundles two INDEPENDENT samplers, so it is
-# not monotonic for either one. These per-method scales fix that: each one
-# counts only the components that the corresponding sampler actually reads,
-# and each ladder rung adds exactly ONE quantum component, so the axis is
-# monotonic and every step has a well-defined meaning.
+# ── Per-method ablation axes (uniform weighting) ─────────────────────────────
+# The global index bundles two INDEPENDENT samplers, so it is not monotonic
+# for either one. These per-method indices fix that: each counts only the
+# substitution points the corresponding sampler actually reads, and each
+# ladder rung flips exactly ONE point, so the axis is monotonic and every step
+# has a well-defined meaning. Under uniform weighting the per-method index is
+# simply (#active quantum points for that sampler)/(#points for that sampler):
 #
-#   QMCMC reads  : proposal (w=20), acceptance (w=25)            total 45
-#   QVMC  reads  : sampling (w=25), training (w=20), norm (w=10) total 55
+#   QMCMC reads : proposal, acceptance            -> rungs 0, 1/2 (50%), 2/2 (100%)
+#   QVMC  reads : sampling, training, normalization -> 0, 1/3 (33%), 2/3 (67%), 3/3 (100%)
 #
-# Ladder order = the order in which components are switched on. We keep the
-# historical progression (proposal→acceptance for QMCMC; sampling→training→
-# normalization for QVMC) so the levels line up with the thesis presets.
+# NOTE. These replace the old weighted per-method numbers (QMCMC 44/100,
+# QVMC 46/82/100), which were artifacts of the discarded subjective weights.
+# Ladder ORDER is unchanged (proposal→acceptance; sampling→training→norm), so
+# the rungs still line up one-to-one with the presets — only the axis labels
+# change from weighted percentages to honest equal-spaced fractions.
 _QMCMC_ORDER = ['proposal', 'acceptance']
 _QVMC_ORDER = ['sampling', 'training', 'normalization']
-_W = {'proposal': 20, 'acceptance': 25, 'training': 20, 'sampling': 25,
-      'normalization': 10}
 
 
 def quantumness_qmcmc(config: dict) -> float:
-    """QMCMC-only quantumness %: active (proposal, acceptance) weights."""
-    tot = sum(_W[c] for c in _QMCMC_ORDER)
-    return round(100.0 * sum(_W[c] for c in _QMCMC_ORDER
-                             if config.get(c, False)) / tot, 1)
+    """QMCMC-only ablation index: (#active of proposal, acceptance)/2 · 100."""
+    n = sum(1 for c in _QMCMC_ORDER if config.get(c, False))
+    return round(100.0 * n / len(_QMCMC_ORDER), 1)
 
 
 def quantumness_qvmc(config: dict) -> float:
-    """QVMC-only quantumness %: active (sampling, training, norm) weights."""
-    tot = sum(_W[c] for c in _QVMC_ORDER)
-    return round(100.0 * sum(_W[c] for c in _QVMC_ORDER
-                             if config.get(c, False)) / tot, 1)
+    """QVMC-only ablation index: (#active of sampling, training, norm)/3 · 100."""
+    n = sum(1 for c in _QVMC_ORDER if config.get(c, False))
+    return round(100.0 * n / len(_QVMC_ORDER), 1)
 
 
 def qmcmc_ladder() -> List[dict]:
@@ -423,6 +514,53 @@ def hadamard_accept_log(lp_cur: float, lp_prop: float) -> float:
     return float(np.log(prob_zero + 1e-12))
 
 
+def hadamard_accept_log_batch(lp_cur: np.ndarray,
+                              lp_prop: np.ndarray) -> np.ndarray:
+    """Vectorized quantum acceptance for a BATCH of chains in ONE Aer job.
+
+    [A2] The acceptance is a FAITHFUL (null) cell: the single-qubit RY circuit
+    reproduces the Metropolis A = min(1, e^Δ) EXACTLY (P(|0⟩) = A). The earlier
+    code ran one Aer job per chain inside a Python loop, breaking the
+    vectorization used everywhere else in the kernel. Here all M shifted
+    single-qubit circuits travel in ONE Aer call (one circuit per chain, same
+    transpiled template), then we read P(|0⟩) from each statevector. The
+    returned log-acceptances are identical to the per-chain version; only the
+    job overhead is removed.
+
+    Returns:
+        log A for each chain, shape (M,). Out-of-box proposals (non-finite
+        lp_prop) return -inf (rejected).
+    """
+    lp_cur = np.asarray(lp_cur, dtype=float)
+    lp_prop = np.asarray(lp_prop, dtype=float)
+    M = len(lp_prop)
+    out = np.full(M, -np.inf)
+    finite = np.isfinite(lp_prop)
+    if not np.any(finite):
+        return out
+    delta = np.clip(lp_prop[finite] - lp_cur[finite], -700, 700)
+    A = np.minimum(1.0, np.exp(delta))
+    A = np.clip(A, 1e-12, 1.0)
+    thetas = 2.0 * np.arccos(np.sqrt(A))           # RY angle per chain
+    if _HAD['qc_t'] is None:
+        par = ParameterVector('theta', 1)
+        qc = QuantumCircuit(1)
+        qc.ry(par[0], 0)
+        qc.save_statevector()
+        _HAD['sim'] = _sim('statevector')
+        _HAD['qc_t'] = transpile(qc, _HAD['sim'])
+        _HAD['par'] = par
+    circs = [_HAD['qc_t'].assign_parameters({_HAD['par'][0]: float(t)})
+             for t in thetas]
+    res = _HAD['sim'].run(circs).result()          # ONE job, all chains
+    logs = np.empty(len(thetas))
+    for k in range(len(thetas)):
+        sv = np.asarray(res.get_statevector(k))
+        logs[k] = np.log(float(np.abs(sv[0]) ** 2) + 1e-12)
+    out[finite] = logs
+    return out
+
+
 # =============================================================================
 # 2.  MODULAR QMCMC (N-dimensional)
 # =============================================================================
@@ -514,17 +652,16 @@ class QMCMCModular:
         Classical: log u < (lp_prop - lp_cur), fully vectorized. Non-finite
         lp_prop (out of prior box) gives delta = -inf and is rejected
         automatically (a finite log u is never < -inf).
-        Quantum acceptance: per-chain Hadamard test (short loop).
+        Quantum acceptance: ALL chains evaluated in ONE batched Aer job
+        (see hadamard_accept_log_batch) — no per-chain loop.
         """
         log_u = np.log(RNG.uniform(size=self.n_chains) + 1e-300)
         if self.q_acc:
             _sanity('QMCMC.accept', 'quantum',
-                    'RY amplitude encoding of min(1,e^Δ) (Metropolis) via Aer statevector')
-            acc = np.zeros(self.n_chains, dtype=bool)
-            for c in range(self.n_chains):
-                acc[c] = log_u[c] < hadamard_accept_log(lp_cur[c],
-                                                        lp_prop[c])
-            return acc
+                    'RY amplitude encoding of min(1,e^Δ) (Metropolis), '
+                    'all chains in one Aer job')
+            log_A = hadamard_accept_log_batch(lp_cur, lp_prop)
+            return log_u < log_A
         _sanity('QMCMC.accept', 'classical', 'NumPy Metropolis log u < Δ')
         return log_u < (lp_prop - lp_cur)
 
@@ -636,50 +773,11 @@ def quantum_amplitude_normalization(P_unnorm: np.ndarray) -> np.ndarray:
 
 def estimate_grid_window(post: Posterior, sigma_mult: float = 4.0,
                          n_steps: int = 400, n_chains: int = 4) -> List[tuple]:
-    """Quick classical pre-fit that positions the QVMC grid (adaptive grid).
-
-    [ADAPTIVE GRID — option b] The QVMC posterior lives on a discrete grid
-    of 2^nqpp points per parameter. If that grid spans the full (wide)
-    sample_box, the cosmological posterior — which is far narrower than the
-    grid spacing — collapses onto one or two cells and can never look like
-    a smooth distribution. This helper runs a short vectorized Metropolis
-    chain to locate the posterior mode and per-parameter width, then returns
-    per-parameter windows [mode − k·σ, mode + k·σ] (k = `sigma_mult`),
-    clipped to the model's physical bounds. Building the grid on this
-    zoomed window lets a small number of qubits actually RESOLVE the
-    posterior, so QVMC (and the classical VI baseline, which shares the
-    grid) recover a smooth, roughly Gaussian shape.
-
-    The pre-fit is used ONLY to place/scale the grid (an adaptive-grid
-    technique, like adaptive importance sampling); it does not feed the
-    QVMC result itself.
-    """
-    model = post.model
-    d = model.n_params
-    lo = np.array([b[0] for b in model.sample_box])
-    hi = np.array([b[1] for b in model.sample_box])
-    step = 0.06 * (hi - lo)
-    theta = lo + (hi - lo) * RNG.uniform(0.3, 0.7, size=(n_chains, d))
-    lp = post.log_prob_batch(theta)
-    samples = []
-    for s in range(n_steps):
-        prop = theta + step * RNG.normal(size=(n_chains, d))
-        lpp = post.log_prob_batch(prop)
-        acc = np.log(RNG.uniform(size=n_chains) + 1e-300) < (lpp - lp)
-        theta[acc] = prop[acc]
-        lp[acc] = lpp[acc]
-        if s >= n_steps // 3:                  # discard burn-in third
-            samples.append(theta.copy())
-    flat = np.concatenate(samples, axis=0)
-    mode, sd = flat.mean(0), flat.std(0) + 1e-9
-    blo = np.array([b[0] for b in model.bounds])
-    bhi = np.array([b[1] for b in model.bounds])
-    win_lo = np.clip(mode - sigma_mult * sd, blo, bhi)
-    win_hi = np.clip(mode + sigma_mult * sd, blo, bhi)
-    for i in range(d):                         # guard against a degenerate window
-        if win_hi[i] - win_lo[i] < 1e-6:
-            win_lo[i], win_hi[i] = model.sample_box[i]
-    return list(zip(win_lo.tolist(), win_hi.tolist()))
+    """[B3] Re-exported from cosmo_core so the adaptive grid is shared by the
+    simulator and QPU pipelines (single source of truth). See
+    `cosmo_core.estimate_grid_window` for the full docstring."""
+    return core.estimate_grid_window(post, sigma_mult=sigma_mult,
+                                     n_steps=n_steps, n_chains=n_chains)
 
 
 class QVMCModular:
@@ -2198,9 +2296,10 @@ def interactive_menu() -> dict:
                 'qvmc_iter': iters, 'nqpp': nqpp, 'benchmark': True, **_hw}
 
     # ── SINGLE configuration ─────────────────────────────────────────────────
-    print("\n  ── Quantum components ──")
+    print("\n  ── Quantum substitution points (ablation) ──")
     for i, (k, meta) in enumerate(QUANTUM_COMPONENTS.items(), 1):
-        print(f"    {i}. [{meta['weight']:2d}%]  {meta['name']}")
+        tag = 'null/faithful' if meta['kind'] == FAITHFUL else 'treatment'
+        print(f"    {i}. [{tag:>13s}]  {meta['name']}")
     print(f"\n  Presets: " + "  ".join(f"P{p}" for p in PRESETS))
     cfg = None
     while cfg is None:

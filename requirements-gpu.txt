@@ -1,0 +1,18 @@
+# =============================================================================
+# requirements-gpu.txt — CUDA 12 cuQuantum statevector backend (optional)
+# =============================================================================
+#
+# On this project the Aer GPU statevector path is provided by NVIDIA cuQuantum
+# (cuStateVec / cuTensorNet), as captured from the working `cosmologia` env —
+# NOT by a `qiskit-aer-gpu` wheel. Install these ON A CUDA 12 MACHINE only,
+# on top of requirements.txt. They are skipped on CPU-only nodes (Nicte-Ha).
+#
+#   pip install -r requirements.txt -r requirements-gpu.txt
+# =============================================================================
+cuquantum-cu12==26.3.2
+custatevec-cu12==1.13.1
+cutensornet-cu12==2.12.2
+cudensitymat-cu12==0.5.2
+custabilizer-cu12==0.3.0
+cupauliprop-cu12==0.3.2
+cutensor-cu12==2.7.0

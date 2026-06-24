@@ -38,7 +38,13 @@ from scipy.optimize import minimize
 
 # ── Physical constants and Planck 2018 values ────────────────────────────────
 C_LIGHT  = 299792.458        # km/s
-OMEGA_R0 = 9.4e-5            # radiation density today (fixed)
+# [P2] Radiation density today, FIXED. This is the photon term only; the
+# relativistic-neutrino contribution (a factor 1 + 7/8·(4/11)^{4/3}·N_eff ≈
+# 1.68 for N_eff = 3.046) is NOT included. Over the redshift range probed here
+# (CC+BAO to z≈2.3, SNe to z≈2.3) radiation is sub-percent in E², so this is a
+# deliberate, declared approximation rather than an omission; for high-z
+# (CMB-distance) extensions Ωr must be upgraded to include neutrinos.
+OMEGA_R0 = 9.4e-5            # radiation density today (photons only, fixed)
 
 H0_MU, H0_SIG = 67.66, 0.42      # Gaussian prior on H0  (Planck 2018, TT,TE,EE+lowE+lensing)
 OM_MU, OM_SIG = 0.3111, 0.0056   # Gaussian prior on Ωm  (Planck 2018)
@@ -145,6 +151,14 @@ def _E2_gede(z, th):
                  [1 + tanh(Δ·log10(1+z_t))]
     with z_t the matter-DE equality epoch: (1+z_t) = ((1-Ωm)/Ωm)^{1/3}.
     Δ=1 with z_t→0 recovers PEDE; Δ=0 recovers ΛCDM.
+
+    [P1 — normalization, verified] At z=0, (1+z)/(1+z_t) = 1/(1+z_t), so
+    num = 1 - tanh(-Δ·log10(1+z_t)) = 1 + tanh(Δ·log10(1+z_t)) = den, hence
+    f_DE(0) = 1 EXACTLY and E²(0) = Ωm + Ωr + Ω_DE = 1 by construction (the
+    `tests/` suite asserts this for all Ωm, Δ). The sign convention of z_t
+    follows Li & Shafieloo (2020) Eq. (2): an inverted sign would also give
+    f_DE(0)=1 but the OPPOSITE high-z evolution, so the unit test compares
+    f_DE at a non-zero z against the paper's convention, not only at z=0.
     """
     Om, _, Delta = th[0], th[1], th[2]
     ODE = 1.0 - Om - OMEGA_R0
@@ -591,7 +605,20 @@ class Posterior:
         return float(np.sum(((self.H_cc - Hm) / self.sig_cc)**2))
 
     def _mu_theory(self, z_sn: np.ndarray, theta: np.ndarray) -> np.ndarray:
-        """Theoretical distance modulus μ_th(z; θ) for the active model."""
+        """Theoretical distance modulus μ_th(z; θ) for the active model.
+
+        [P3 — FLAT universe only] The comoving (line-of-sight) distance is
+        d_C = (c/H0)∫dz/E, and here the transverse comoving distance is taken
+        equal to it, d_M = d_C, so d_L = (1+z)·d_C. This is correct ONLY for
+        spatially flat models (Ω_k = 0), which is the case for ALL models in
+        the registry (ΛCDM, wCDM, CPL, PEDE, GEDE are flat by construction).
+        A curved extension (Ω_k ≠ 0, e.g. a "Variable Curvature" model) would
+        need the generalized d_M:
+            d_M = (c/(H0√|Ω_k|)) · sinn(√|Ω_k|·H0·d_C/c),
+        with sinn = sinh for open (Ω_k>0) and sin for closed (Ω_k<0). Adding a
+        non-flat model therefore requires generalizing THIS method; the flat
+        form below would otherwise give wrong distances.
+        """
         e2 = self.model.E2(self._zg, theta)
         if np.any(e2 <= 0):
             return None
@@ -636,7 +663,19 @@ class Posterior:
         return A - B**2 / self.pantheon['C_marg']
 
     def chi2(self, theta: np.ndarray) -> Tuple[float, int]:
-        """Total χ² of the active dataset. Returns (chi2, n_data)."""
+        """Total χ² of the active dataset. Returns (chi2, n_data).
+
+        [B4 — combined datasets and M_abs] The SNe blocks marginalize the
+        absolute-magnitude offset M_abs ANALYTICALLY (Goliath 2001), which
+        also marginalizes the M_abs–H0 degeneracy WITHIN the SNe block: SNe
+        alone constrain only the shape E(z), not H0. When an H(z) block
+        (CC+BAO) is added, the total χ² = χ²_CC(θ) + χ²_SN(θ) and H0 is then
+        constrained DIRECTLY by CC+BAO (which does not marginalize it). This
+        is intentional and is the point of combining the datasets — CC+BAO is
+        what anchors H0 — but it means that for a combined dataset H0 is NOT
+        marginalized away; only the SNe nuisance offset is. Reduced-χ² and
+        BIC use the full n_data across both blocks.
+        """
         c = 0.0
         if 'cc' in self.components:
             c += self.chi2_cc(theta)
@@ -747,39 +786,161 @@ class Posterior:
 # 4. STATISTICAL AND MODEL-SELECTION ESTIMATORS
 # =============================================================================
 
-def autocorr_time_fft(x: np.ndarray) -> float:
-    """Integrated autocorrelation time τ via FFT, O(N log N).
+def autocorr_time_fft(x: np.ndarray, c: float = 5.0) -> float:
+    r"""Integrated autocorrelation time τ via FFT, with Sokal windowing.
 
-    For N = 160 000 samples this is ~250× faster than np.correlate
-    (mode='full'), avoiding the hang when building the results table.
+    Definition. For a stationary chain x_t with normalized autocorrelation
+    function ρ(t), the integrated autocorrelation time is
+
+        τ = 1 + 2 Σ_{t=1}^{∞} ρ(t).
+
+    The sum cannot be carried to ∞ on a finite chain: the tail of ρ(t) is
+    pure noise (variance ~1/N per lag) and adding it injects variance that
+    grows with the truncation window. The estimator must therefore truncate
+    at some window M, trading bias (M too small) against variance (M too
+    large).
+
+    Windowing rule (Sokal). We accumulate the partial sums
+
+        τ(M) = 1 + 2 Σ_{t=1}^{M} ρ(t)
+
+    and stop at the FIRST window M satisfying  M ≥ c · τ(M)  (default c = 5,
+    the value recommended by Sokal and used by emcee). This self-consistent
+    rule adapts the window to the chain's own correlation length and is the
+    community standard; it replaces the earlier ad-hoc "first lag below
+    0.05, else N/4" cutoff, which mis-fired in two opposite regimes (a chain
+    whose ρ never drops below 0.05 and a chain already below 0.05 at lag 1
+    both returned argmax = 0, conflating a terrible chain with an excellent
+    one).
+
+    Complexity. The autocovariance is obtained from a single zero-padded FFT
+    and its inverse, so the cost is O(N log N) in time and O(N) in space —
+    for N = 1.6×10^5 this is ~250× faster than an O(N²) np.correlate.
+
+    Args:
+        x: 1-D chain of samples for ONE parameter.
+        c: Sokal window constant (window must reach c·τ before stopping).
+
+    Returns:
+        τ ≥ 1. Returns 1.0 for degenerate input (n < 5 or zero variance).
+
+    Reference:
+        A. D. Sokal, "Monte Carlo Methods in Statistical Mechanics" (1996);
+        Foreman-Mackey et al. (2013), emcee, autocorr module.
     """
     x = np.asarray(x, dtype=float)
     n = len(x)
     if n < 5:
         return 1.0
     x = x - x.mean()
+    # autocovariance via FFT (Wiener-Khinchin), normalized to ρ(0) = 1
     f = np.fft.rfft(x, n=2 * n)
     acf = np.fft.irfft(f * np.conj(f))[:n].real
     if acf[0] <= 0:
         return 1.0
     acf /= acf[0]
-    w = int(np.argmax(acf < 0.05))
-    if w == 0:
-        w = n // 4
-    return float(max(1.0, 1 + 2 * np.sum(acf[1:max(w, 2)])))
+    # cumulative τ(M) = 1 + 2 Σ_{t=1..M} ρ(t); Sokal stop at M ≥ c·τ(M).
+    tau_cum = 1.0 + 2.0 * np.cumsum(acf[1:])          # tau_cum[M-1] = τ(M)
+    windows = np.arange(1, n)                          # M = 1, 2, ...
+    reached = windows >= c * tau_cum
+    if np.any(reached):
+        M = int(np.argmax(reached))                    # first True
+        tau = float(tau_cum[M])
+    else:
+        # ρ never decorrelates within the chain: report the full-window τ as
+        # a (conservative, high) estimate rather than silently truncating.
+        tau = float(tau_cum[-1])
+    return max(1.0, tau)
+
+
+def autocorr_time_max(chains: np.ndarray) -> float:
+    """Worst-case τ across chains and parameters for a (M, N, d) array.
+
+    Averages τ over the M chains per parameter, then takes the maximum over
+    the d parameters (the conservative choice that drives ESS).
+    """
+    M, N, d = chains.shape
+    taus = [np.mean([autocorr_time_fft(chains[c, :, p]) for c in range(M)])
+            for p in range(d)]
+    return float(max(taus))
 
 
 def ess_chains(chains: np.ndarray) -> float:
-    """Effective Sample Size for MCMC chains, shape (M, N, d).
+    r"""Effective Sample Size for MCMC chains, shape (M, N, d).
 
-    ESS = M·N / τ_max, with τ_max the worst τ across parameters
-    (conservative).
+    Formula. With M chains of length N in d dimensions,
+
+        ESS = (M · N) / τ_max,
+
+    where τ_max = max_p ( (1/M) Σ_c τ(x_{c,·,p}) ) is the per-chain-averaged
+    integrated autocorrelation time of the WORST-mixing parameter (see
+    `autocorr_time_max`). Taking the max over parameters (rather than a
+    per-parameter ESS) yields a single conservative scalar: the number of
+    effectively independent draws is governed by the slowest direction.
+
+    This is the same MN/τ convention used by emcee; it is intentionally
+    distinct from ArviZ's rank-normalized bulk-ESS, which is reported
+    separately by the diagnostics layer when needed.
     """
-    M, N, d = chains.shape
-    taus = []
-    for p in range(d):
-        taus.append(np.mean([autocorr_time_fft(chains[c, :, p]) for c in range(M)]))
-    return float(M * N / max(taus))
+    M, N, _ = chains.shape
+    return float(M * N / autocorr_time_max(chains))
+
+
+def estimate_grid_window(post, sigma_mult: float = 4.0,
+                         n_steps: int = 400, n_chains: int = 4,
+                         use_median: bool = True) -> List[tuple]:
+    """Quick classical pre-fit that positions a discrete inference grid.
+
+    [ADAPTIVE GRID] A grid-based method (QVMC, classical VI, the QPU
+    GridEncoding) represents the posterior on a discrete 2^nqpp grid per
+    parameter. Spanning the full (wide) sample_box, the cosmological
+    posterior — far narrower than the grid spacing — collapses onto one or
+    two cells and can never look smooth, independent of the iteration budget.
+    This helper runs a short vectorized Metropolis chain to locate the
+    posterior centre and per-parameter width, then returns per-parameter
+    windows [centre − k·σ, centre + k·σ] (k = `sigma_mult`), clipped to the
+    model's physical bounds, so a few qubits actually RESOLVE the posterior.
+
+    [B3] Lives in cosmo_core so BOTH the simulator pipeline
+    (cosmo_modular_quantum) and the real-hardware pipeline
+    (qpu_cosmo_samplers) build their grids the SAME way — otherwise the QPU
+    KL is computed on a different (coarser) grid than the simulator and the
+    two are not comparable.
+
+    [S1] The centre defaults to the per-parameter MEDIAN (robust to the
+    asymmetric posteriors of wCDM/GEDE, where the mean can fall outside the
+    high-density region); pass use_median=False for the mean.
+
+    The pre-fit only places/scales the grid (an adaptive-grid technique); it
+    does not feed the downstream result itself.
+    """
+    model = post.model
+    d = model.n_params
+    lo = np.array([b[0] for b in model.sample_box])
+    hi = np.array([b[1] for b in model.sample_box])
+    step = 0.06 * (hi - lo)
+    theta = lo + (hi - lo) * RNG.uniform(0.3, 0.7, size=(n_chains, d))
+    lp = post.log_prob_batch(theta)
+    samples = []
+    for s in range(n_steps):
+        prop = theta + step * RNG.normal(size=(n_chains, d))
+        lpp = post.log_prob_batch(prop)
+        acc = np.log(RNG.uniform(size=n_chains) + 1e-300) < (lpp - lp)
+        theta[acc] = prop[acc]
+        lp[acc] = lpp[acc]
+        if s >= n_steps // 3:                  # discard burn-in third
+            samples.append(theta.copy())
+    flat = np.concatenate(samples, axis=0)
+    centre = np.median(flat, axis=0) if use_median else flat.mean(0)
+    sd = flat.std(0) + 1e-9
+    blo = np.array([b[0] for b in model.bounds])
+    bhi = np.array([b[1] for b in model.bounds])
+    win_lo = np.clip(centre - sigma_mult * sd, blo, bhi)
+    win_hi = np.clip(centre + sigma_mult * sd, blo, bhi)
+    for i in range(d):                         # guard a degenerate window
+        if win_hi[i] - win_lo[i] < 1e-6:
+            win_lo[i], win_hi[i] = model.sample_box[i]
+    return list(zip(win_lo.tolist(), win_hi.tolist()))
 
 
 def ess_weights(w: np.ndarray) -> float:
@@ -800,8 +961,96 @@ def gelman_rubin(chains: np.ndarray) -> float:
 
 
 def gelman_rubin_max(chains: np.ndarray) -> float:
-    """Maximum R̂ over all parameters, shape (M, N, d)."""
+    """Maximum classical R̂ over all parameters, shape (M, N, d)."""
     return max(gelman_rubin(chains[:, :, p]) for p in range(chains.shape[2]))
+
+
+def _split_chains(chains: np.ndarray) -> np.ndarray:
+    """Split each chain in half: (M, N, d) -> (2M, N//2, d).
+
+    Splitting is what lets R̂ detect WITHIN-chain non-stationarity (e.g. a
+    slow trend): a drifting chain disagrees with its own two halves, which a
+    whole-chain R̂ cannot see. Required for the modern split-R̂ of Vehtari
+    et al. (2021). If N is odd the last sample is dropped.
+    """
+    M, N, d = chains.shape
+    half = N // 2
+    if half < 2:
+        return chains
+    first, second = chains[:, :half, :], chains[:, half:2 * half, :]
+    return np.concatenate([first, second], axis=0)
+
+
+def _rank_normalize(x: np.ndarray) -> np.ndarray:
+    """Rank-normalize a flat array to approximate normal scores.
+
+    Replaces each value by Φ⁻¹((r − 3/8)/(n − 1/4)) with r its (1-based,
+    average-tie) rank. This makes R̂ robust to heavy tails and
+    non-Gaussian marginals (the rank-normalized R̂ of Vehtari 2021); a
+    purely Gaussian estimator can otherwise look "converged" on a skewed
+    posterior it has not actually explored.
+    """
+    from scipy.stats import norm, rankdata
+    n = x.size
+    r = rankdata(x.ravel(), method='average')
+    z = norm.ppf((r - 0.375) / (n - 0.25))
+    return z.reshape(x.shape)
+
+
+def split_rhat(chains: np.ndarray, rank_normalize: bool = True) -> float:
+    r"""Rank-normalized split-R̂ over all parameters (Vehtari et al. 2021).
+
+    Pipeline per parameter: split each chain in half (catches drift),
+    optionally rank-normalize the pooled draws (robust to heavy tails),
+    then apply the standard between/within variance ratio
+
+        R̂ = sqrt( ((N-1)/N · W + B/N) / W ).
+
+    The reported value is the MAX over parameters. The community
+    convergence threshold for this statistic is R̂ < 1.01 (see
+    `mcmc_converged`), markedly stricter than the legacy 1.05.
+
+    Args:
+        chains: (M, N, d) array.
+        rank_normalize: apply the rank-normal transform before R̂.
+
+    Returns:
+        max-over-parameters split-R̂ (≥ 1; ~1 means converged).
+    """
+    sc = _split_chains(chains)
+    M, N, d = sc.shape
+    if N < 2:
+        return np.nan
+    rhats = []
+    for p in range(d):
+        x = sc[:, :, p]
+        if rank_normalize:
+            x = _rank_normalize(x)
+        mu_j = x.mean(axis=1)
+        B = N * np.var(mu_j, ddof=1)
+        W = np.mean(np.var(x, axis=1, ddof=1))
+        if W <= 1e-12:
+            rhats.append(np.nan)
+            continue
+        var_hat = (1.0 - 1.0 / N) * W + B / N
+        rhats.append(float(np.sqrt(var_hat / W)))
+    finite = [r for r in rhats if np.isfinite(r)]
+    return float(max(finite)) if finite else np.nan
+
+
+#: Community-standard convergence threshold for rank-normalized split-R̂
+#: (Vehtari et al. 2021). Stricter than the legacy 1.05; with 1.05 a chain
+#: that has not actually mixed can be declared converged, which would make
+#: the project's central "quantum reproduces classical" comparison vacuous
+#: (agreement between two unconverged chains proves nothing).
+RHAT_THRESHOLD = 1.01
+
+
+def mcmc_converged(chains: np.ndarray, threshold: float = RHAT_THRESHOLD
+                   ) -> bool:
+    """True if rank-normalized split-R̂ is below `threshold` (default 1.01)."""
+    r = split_rhat(chains)
+    return bool(np.isfinite(r) and r < threshold)
 
 
 def fit_statistics(post: Posterior, theta_mean: np.ndarray,
@@ -881,10 +1130,18 @@ def setup_logger(log_file: Optional[str] = None,
 # =============================================================================
 #
 #  All quantum simulators in the project are created through `make_simulator`
-#  so the CPU/GPU choice lives in ONE place. On the HPC cluster (RTX PRO 6000),
-#  pass prefer_gpu=True and, if qiskit-aer-gpu + CUDA expose a GPU device, the
-#  simulator runs on it; otherwise it transparently falls back to CPU. This is
-#  what the `--gpu` flag toggles in both executable scripts.
+#  so the CPU/GPU choice lives in ONE place. On a CUDA node, pass
+#  prefer_gpu=True; if Aer exposes a 'GPU' device the simulator runs on it,
+#  otherwise it transparently falls back to CPU. This is what the `--gpu` flag
+#  toggles in both executable scripts.
+#
+#  [GPU BACKEND] On the development machine the GPU statevector path is
+#  provided by NVIDIA cuQuantum / cuStateVec (packages cuquantum-cu12,
+#  custatevec-cu12), against which qiskit-aer 0.17.x is built — NOT by a
+#  separate `qiskit-aer-gpu` wheel. Either way, `AerSimulator().
+#  available_devices()` reports 'GPU' when a usable CUDA device is present, so
+#  the probe below is backend-agnostic. On a CPU-only node (e.g. Nicte-Ha) it
+#  returns CPU and the project runs unchanged.
 
 _GPU_PROBED = False
 _GPU_AVAILABLE = False
@@ -893,8 +1150,9 @@ _GPU_AVAILABLE = False
 def gpu_available() -> bool:
     """True if qiskit-aer exposes a 'GPU' device (probed once and cached).
 
-    Requires the `qiskit-aer-gpu` build on a CUDA-capable machine. On a CPU-only
-    node (e.g. Nicte-Ha) this returns False and the project runs on CPU.
+    Works for both GPU backends: a cuQuantum/cuStateVec-enabled qiskit-aer
+    (this project's setup) and a legacy `qiskit-aer-gpu` build. On a CPU-only
+    node this returns False and the project runs on CPU.
     """
     global _GPU_PROBED, _GPU_AVAILABLE
     if _GPU_PROBED:
@@ -922,28 +1180,41 @@ def resolve_device(prefer_gpu: bool) -> str:
 
 
 def make_simulator(method: str = 'statevector', prefer_gpu: bool = False,
-                   **kwargs):
+                   n_qubits: Optional[int] = None, **kwargs):
     """Create an AerSimulator on the resolved device (single source of truth).
 
     Args:
         method: Aer simulation method (default 'statevector').
         prefer_gpu: if True and a GPU is available, run on it; else CPU.
+        n_qubits: optional circuit width hint. Blocking (which splits the
+            statevector across the GPU) only helps for LARGE circuits; for the
+            many tiny circuits of QMCMC/QVMC/QGA it adds pure overhead, so it
+            is enabled only when n_qubits is large (or unknown). [A4]
         **kwargs: forwarded to AerSimulator (e.g. precision, blocking options).
 
     Returns:
-        A configured AerSimulator. For GPU, batched-shots and per-shot circuit
-        distribution are enabled, which is where the GPU's parallelism pays off
-        for the many-small-circuits workload of QMCMC/QVMC/QGA.
+        A configured AerSimulator. On GPU, batched-shots distribution is
+        enabled (it helps the many-small-circuits workload); statevector
+        blocking is enabled only for wide circuits, where it actually pays off.
+        cuStateVec is requested when available (the project's cuQuantum
+        backend); Aer ignores the flag if the build lacks cuStateVec.
     """
     from qiskit_aer import AerSimulator
     device = resolve_device(prefer_gpu)
     opts = dict(method=method, device=device)
     if device == 'GPU':
-        # These options let Aer spread many shots / many circuits across the
-        # GPU, which matches our workload (lots of tiny circuits per step).
-        opts.update(batched_shots_gpu=True,
-                    blocking_enable=True, blocking_qubits=kwargs.pop(
-                        'blocking_qubits', 22))
+        # Batched shots distribute many circuits/shots across the GPU — always
+        # useful for our workload.
+        opts.update(batched_shots_gpu=True)
+        # Prefer the cuStateVec kernels when the Aer build supports them
+        # (cuQuantum). Harmlessly ignored otherwise.
+        opts.setdefault('cuStateVec_enable', True)
+        # [A4] Statevector blocking only helps for WIDE statevectors; for the
+        # tiny proposal/acceptance circuits it is wasted overhead. Enable it
+        # only when the circuit is large or the width is unknown.
+        blocking_qubits = kwargs.pop('blocking_qubits', 22)
+        if n_qubits is None or n_qubits >= blocking_qubits:
+            opts.update(blocking_enable=True, blocking_qubits=blocking_qubits)
     opts.update(kwargs)
     return AerSimulator(**opts)
 

@@ -52,12 +52,16 @@ Key design differences vs the simulator version
     sets -> ONE job with B parameter bindings -> B displacements. The
     Metropolis chain consumes them sequentially from a local queue.
 
-4.  [QPU] The Metropolis acceptance does NOT run on the QPU by default:
-    it is inherently sequential (step t depends on t-1), so on hardware it
-    would cost one job + one full queue wait PER STEP. We use the
-    analytically equivalent expression P(ancilla=0) = e^D/(1+e^D) that the
-    Hadamard test implements (Barker rule) — identical stationary
-    distribution.
+4.  [QPU] The Metropolis acceptance does NOT run on the QPU: it is inherently
+    sequential (step t depends on t-1), so on hardware it would cost one job +
+    one full queue wait PER STEP. It is evaluated on the CPU using the SAME
+    Metropolis rule A = min(1, e^Δ) as the simulator pipeline's quantum
+    acceptance (`hadamard_accept_log`, which encodes that rule as an RY
+    amplitude). Using Metropolis on both sides — rather than the Barker rule
+    σ(Δ) used in an earlier version — keeps the QPU and simulator chains
+    directly comparable (same acceptance, hence the same stationary
+    distribution AND the same mixing). The code in `metropolis_log_accept`
+    reflects this; any earlier mention of Barker is obsolete.
 
 5.  Error suppression via SamplerV2 options: dynamical decoupling (XY4) +
     Pauli twirling of gates and measurement.
@@ -246,6 +250,60 @@ def _fmt_t(seconds: float) -> str:
 # 2.  HARDWARE CONNECTION
 # =============================================================================
 
+def _extract_exec_seconds(result) -> Optional[float]:
+    """Best-effort REAL on-QPU execution time (seconds) from a SamplerV2 result.
+
+    [B2] Handles the metadata shapes used across qiskit-ibm-runtime versions,
+    in order of preference, returning None only if none are present (so the
+    caller falls back to an explicit estimate rather than silently doing so):
+
+      1. result.metadata['execution']['execution_spans'] — an ExecutionSpans
+         container (or list) of spans with .start/.stop datetimes; we sum
+         (stop - start) over spans (the actual QPU-active duration).
+      2. A scalar 'execution_time' / 'quantum_seconds' / usage field, if the
+         backend reports one directly.
+
+    All access is defensive: any unexpected shape returns None.
+    """
+    def _spans_to_seconds(spans) -> Optional[float]:
+        try:
+            total = 0.0
+            found = False
+            # ExecutionSpans is iterable; each span has .start/.stop datetimes
+            # (or a .duration in seconds on some versions).
+            for sp in spans:
+                dur = getattr(sp, 'duration', None)
+                if dur is not None:
+                    total += float(dur)
+                    found = True
+                    continue
+                start = getattr(sp, 'start', None)
+                stop = getattr(sp, 'stop', None)
+                if start is not None and stop is not None:
+                    total += (stop - start).total_seconds()
+                    found = True
+            return total if (found and total > 0) else None
+        except Exception:
+            return None
+
+    try:
+        meta = getattr(result, 'metadata', None) or {}
+        exec_meta = meta.get('execution', {}) if isinstance(meta, dict) else {}
+        if isinstance(exec_meta, dict):
+            spans = exec_meta.get('execution_spans', None)
+            if spans is not None:
+                s = _spans_to_seconds(spans)
+                if s is not None:
+                    return s
+            for key in ('execution_time', 'quantum_seconds'):
+                v = exec_meta.get(key, None)
+                if isinstance(v, (int, float)) and v > 0:
+                    return float(v)
+    except Exception:
+        pass
+    return None
+
+
 class QPUConnection:
     """Encapsulates service, backend, ISA transpilation and Sampler options.
 
@@ -371,18 +429,19 @@ class QPUConnection:
         result = job.result()
         t_wall = time.time() - t0
 
-        # Usage metrics if the backend reports them
-        t_exec = None
-        try:
-            t_exec = float(result.metadata.get('execution',
-                                               {}).get('execution_spans',
-                                                       None) or 0) or None
-        except Exception:
-            t_exec = None
+        # [B2] Extract the REAL on-QPU execution time from the result metadata.
+        # The previous code did float(... 'execution_spans' ...), but
+        # execution_spans is a list of ExecutionSpan objects (each with
+        # .start/.stop), not a number, so float() always raised and t_exec
+        # silently fell back to the shots*circuits estimate — i.e. the timer
+        # never actually measured. We now sum the real span durations, with
+        # graceful fallbacks across qiskit-ibm-runtime versions.
+        t_exec = _extract_exec_seconds(result)
         rec = self.timer.record(B, shots, t_wall, t_exec)
         self.log.debug("Job: %d circuits x %d shots | wall %.1fs "
-                       "(queue~%.1fs, exec~%.1fs)", B, shots, rec.t_total,
-                       rec.t_queue, rec.t_exec)
+                       "(queue~%.1fs, exec~%.1fs%s)", B, shots, rec.t_total,
+                       rec.t_queue, rec.t_exec,
+                       "" if t_exec is not None else ", exec ESTIMATED")
 
         outs = []
         for k in range(B):
@@ -480,17 +539,28 @@ class GridEncoding:
     Same bit convention as the simulator: parameter i occupies qubits
     [i·nqpp, (i+1)·nqpp), with the lowest bit position as the MSB of the
     chunk (Qiskit little-endian bitstrings).
+
+    [B3] The grid spans an ADAPTIVE per-parameter window (centred and zoomed
+    on the posterior via cosmo_core.estimate_grid_window), IDENTICAL to the
+    simulator's QVMC grid. Spanning the raw (wide) sample_box instead would
+    collapse the narrow cosmological posterior onto 1–3 cells, so the QPU KL
+    would be computed on a different, coarser grid than the simulator and the
+    two pipelines would not be comparable. Pass grid_window=None to fall back
+    to the raw sample_box (e.g. for a deliberate full-box study).
     """
 
-    def __init__(self, model: CosmoModel, nqpp: int):
+    def __init__(self, model: CosmoModel, nqpp: int,
+                 grid_window: Optional[List[tuple]] = None):
         self.model = model
         self.nqpp = nqpp
         self.d = model.n_params
         self.n_qubits = self.d * nqpp
         self.n_grid = 2 ** nqpp
         self.n_states = 2 ** self.n_qubits
-        self.grids = [np.linspace(b[0], b[1], self.n_grid)
-                      for b in model.sample_box]
+        window = grid_window if grid_window is not None else model.sample_box
+        self.grid_window = list(window)
+        self.grids = [np.linspace(lo, hi, self.n_grid)
+                      for lo, hi in self.grid_window]
         self.theta_table = self._build_theta_table()
 
     def _build_theta_table(self) -> np.ndarray:
@@ -615,10 +685,11 @@ class MCMC_QPU:
 
     The proposal displacements are produced by :class:`QPUProposalEngine`,
     i.e. measured on real hardware (per-qubit <Z_q> from counts). The
-    acceptance uses the Barker rule, analytically equivalent to the
-    Hadamard test (see :func:`metropolis_log_accept`); it runs on the CPU
-    because the chain is inherently sequential and a per-step QPU job would
-    waste a full queue wait on every step.
+    acceptance uses the Metropolis rule A = min(1, e^Δ) (see
+    :func:`metropolis_log_accept`), identical to the simulator pipeline's
+    quantum acceptance; it runs on the CPU because the chain is inherently
+    sequential and a per-step QPU job would waste a full queue wait on every
+    step.
 
     Args:
         post: cosmo_core posterior.
@@ -730,7 +801,13 @@ class QVMC_QPU:
         self.post = post
         self.model = post.model
         self.conn = conn
-        self.enc = GridEncoding(self.model, n_qubits_per_param)
+        # [B3] Build the SAME adaptive grid window the simulator uses, so the
+        # QPU KL is comparable to the simulator KL (same grid). The pre-fit is
+        # a short classical Metropolis run; on a CPU it is negligible next to
+        # the hardware job times.
+        grid_window = core.estimate_grid_window(post)
+        self.enc = GridEncoding(self.model, n_qubits_per_param,
+                                grid_window=grid_window)
         self.P = self.enc.build_target(post)
         self.a0, self.c0 = a0, c0
         self.log_every = log_every

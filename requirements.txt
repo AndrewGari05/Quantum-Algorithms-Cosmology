@@ -1,37 +1,46 @@
 # =============================================================================
-#  Quantum-Algorithms-Cosmology — runtime dependencies
-#  Stack verified on Python 3.12. Pin or relax as your cluster image requires.
+# requirements.txt — pinned to the verified `cosmologia` environment
+# =============================================================================
+#
+# These versions are taken from `pip freeze` of the actual working conda
+# environment (Qiskit 2.x line). Qiskit and Qiskit-Aer MUST come from the same
+# generation; this 2.4.x / 0.17.x pair is the verified-good combination on the
+# development machine (WSL2/Ubuntu, RTX 4070).
+#
+#   Install:   pip install -r requirements.txt
+#
+# GPU note: on this machine the GPU statevector path is provided by the
+# cuQuantum / cuStateVec stack (cuquantum-cu12, custatevec-cu12), NOT by a
+# separate `qiskit-aer-gpu` wheel. Install the matching CUDA 12 cuQuantum
+# packages (see requirements-gpu.txt) on a CUDA node; on CPU-only machines omit
+# them and the project runs on CPU automatically.
 # =============================================================================
 
-# --- core numerics ---
-# numpy<2 is required by the known-good Qiskit 1.0.x line below.
-numpy>=1.26,<2
-scipy>=1.13
+# --- core scientific stack (verified) ---
+numpy==1.26.4                # <2 required by Aer 0.17.x and cuQuantum
+scipy==1.17.1
+matplotlib==3.10.9
 
-# --- quantum (CPU) ---
-# Qiskit and Qiskit-Aer MUST be from the same generation, or Aer fails with
-# "cannot import name 'convert_to_target' from 'qiskit.providers'".
-# Known-good CPU combination (verified on Python 3.12):
-qiskit==1.0.2
-qiskit-aer==0.14.2
-# The Qiskit 2.x line also works if Aer matches it (qiskit==2.4.x +
-# qiskit-aer==0.17.x); pick ONE generation and keep them paired.
-qiskit-ibm-runtime>=0.20    # only for real-hardware runs (qpu_cosmo_samplers.py)
+# --- quantum stack (same generation; verified working together) ---
+qiskit==2.4.2
+qiskit-aer==0.17.2
 
-# --- plotting & analysis ---
-matplotlib>=3.8
-corner>=2.2
-pandas>=2.0
+# --- inference / plotting / progress (verified) ---
+corner==2.2.3
+tqdm==4.67.3
 
-# --- progress bars & resource profiling ---
-tqdm>=4.66
-psutil>=5.9                # host RAM / CPU profiling (cosmo_profiling.py)
+# --- profiling (cosmo_profiling.py) ---
+psutil==7.2.2
+# pynvml is OPTIONAL: if absent, cosmo_profiling falls back to parsing
+# `nvidia-smi`. Uncomment to use the faster in-process NVML path:
+# pynvml==11.5.0
 
-# --- optional: GPU acceleration ----------------------------------------------
-# On a CUDA-capable node, REPLACE qiskit-aer with the GPU build:
-#     pip uninstall qiskit-aer
-#     pip install qiskit-aer-gpu
-# and (optional, for richer GPU telemetry in the profiler):
-#     pip install nvidia-ml-py
-# The code auto-detects the GPU via AerSimulator().available_devices(); no
-# source change is needed — just pass --gpu (CLI) or pick GPU in the menu.
+# --- testing ---
+pytest>=8.0
+
+# --- real IBM Quantum hardware (OPTIONAL) -----------------------------------
+# qpu_cosmo_samplers.py needs qiskit-ibm-runtime, which is NOT installed in the
+# base `cosmologia` env (the QPU path is exercised only when running on real
+# hardware, not in --dry-run). Install a runtime that matches qiskit 2.4.x
+# BEFORE a real-hardware run; pin it from your own `pip freeze` at that time:
+# qiskit-ibm-runtime>=0.30,<0.40   # must be compatible with qiskit 2.4.x

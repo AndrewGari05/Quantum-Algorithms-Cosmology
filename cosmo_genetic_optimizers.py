@@ -56,7 +56,7 @@
 #    python cosmo_genetic_optimizers.py                       # interactive menu
 #    python cosmo_genetic_optimizers.py --methods cga --model lcdm --generations 80
 #    python cosmo_genetic_optimizers.py --methods cga qga --dataset CC+Pantheon+ \
-#           --population-size 200 --generations 120 --qga-preset 55
+#           --population-size 200 --generations 120 --qga-preset 67
 # =============================================================================
 
 from __future__ import annotations
@@ -83,7 +83,12 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
-warnings.filterwarnings("ignore")
+# [A5] Scope warning suppression to benign library categories only; let
+# numerical RuntimeWarnings (overflow/invalid) surface — they signal real
+# physics/likelihood problems.
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
 
 # ── Physics & shared infrastructure: imported, never re-implemented ───────────
 import cosmo_core as core
@@ -245,33 +250,64 @@ def diagnose_gui_backend() -> str:
 #  A QGA with all three OFF (0 %) reduces EXACTLY to the CGA operators, which
 #  is the mandatory classical baseline (verified in the self-test).
 
+# =============================================================================
+# 0.  QGA CLASSICAL-QUANTUM ABLATION (uniform weighting)
+# =============================================================================
+#
+#  Same ablation philosophy as cosmo_modular_quantum: the QGA is the CGA with
+#  one or more genetic operators (init / mutation / crossover) substituted by a
+#  quantum implementation. The index counts HOW MANY operators are quantum,
+#  with UNIFORM weighting (option A) — every operator counts equally, because
+#  "how much quantum structure each injects" has no measurable definition. The
+#  three operators are ALGORITHMIC substitutions (a quantum-sampled population,
+#  a coherent RY mutation and an entangling crossover are genuinely different
+#  operators from their classical counterparts, expected to change the
+#  trajectory), while the 0% configuration reproduces the CGA exactly and is
+#  the FAITHFUL baseline cell.
+
+FAITHFUL = 'faithful'
+ALGORITHMIC = 'algorithmic'
+
 QGA_COMPONENTS: Dict[str, dict] = {
-    'q_init':      {'weight': 25, 'name': 'Quantum initialization (superposition population)'},
-    'q_mutation':  {'weight': 35, 'name': 'Quantum mutation (parametrized RY rotations)'},
-    'q_crossover': {'weight': 40, 'name': 'Quantum crossover (entanglement + interference)'},
+    'q_init':      {'kind': ALGORITHMIC,
+                    'name': 'Quantum initialization (superposition population)'},
+    'q_mutation':  {'kind': ALGORITHMIC,
+                    'name': 'Quantum mutation (parametrized RY rotations)'},
+    'q_crossover': {'kind': ALGORITHMIC,
+                    'name': 'Quantum crossover (entanglement + interference)'},
 }
 
-#: Convenience presets spanning the quantumness ladder. The keys are the
-#: nominal percentages; `compute_qga_quantumness` recomputes the exact value.
+#: Legacy hand-picked weights (no measurable definition), kept only so
+#: `legacy_qga_weighted_index` can reproduce old CSV numbers.
+_LEGACY_QGA_WEIGHTS = {'q_init': 25, 'q_mutation': 35, 'q_crossover': 40}
+
+#: Convenience presets spanning the ablation ladder. Keys are the UNIFORM
+#: index (#quantum operators / 3 · 100, rounded), recomputed by
+#: `compute_qga_quantumness`.
 QGA_PRESETS: Dict[int, dict] = {
     0:   dict(q_init=False, q_mutation=False, q_crossover=False,
-              label='0% — Classical operators (CGA baseline)'),
-    25:  dict(q_init=True,  q_mutation=False, q_crossover=False,
-              label='25% — Quantum initialization only'),
-    60:  dict(q_init=True,  q_mutation=True,  q_crossover=False,
-              label='60% — Quantum init + mutation'),
-    75:  dict(q_init=False, q_mutation=False, q_crossover=True,
-              label='75% — Quantum crossover only'),
+              label='0/3 quantum — Classical operators (CGA baseline)'),
+    33:  dict(q_init=True,  q_mutation=False, q_crossover=False,
+              label='1/3 quantum — Quantum initialization only'),
+    67:  dict(q_init=True,  q_mutation=True,  q_crossover=False,
+              label='2/3 quantum — Quantum init + mutation'),
     100: dict(q_init=True,  q_mutation=True,  q_crossover=True,
-              label='100% — Fully quantum operators'),
+              label='3/3 quantum — Fully quantum operators'),
 }
 
 
 def compute_qga_quantumness(config: dict) -> float:
-    """0–100 % quantumness score, weighted by active quantum operators."""
-    total = sum(c['weight'] for c in QGA_COMPONENTS.values())
-    earned = sum(QGA_COMPONENTS[k]['weight']
-                 for k in QGA_COMPONENTS if config.get(k, False))
+    """QGA ablation index: 100 · (#quantum operators)/3 (uniform weighting)."""
+    n_total = len(QGA_COMPONENTS)
+    n_quantum = sum(1 for k in QGA_COMPONENTS if config.get(k, False))
+    return round(100.0 * n_quantum / n_total, 1)
+
+
+def legacy_qga_weighted_index(config: dict) -> float:
+    """Historical hand-weighted QGA index (heuristic; CSV continuity only)."""
+    total = sum(_LEGACY_QGA_WEIGHTS.values())
+    earned = sum(_LEGACY_QGA_WEIGHTS[k] for k in _LEGACY_QGA_WEIGHTS
+                 if config.get(k, False))
     return round(100.0 * earned / total, 1)
 
 
@@ -725,42 +761,62 @@ class QGA(GeneticEvolver):
         weights = (1 << np.arange(n_bits - 1, -1, -1))
         return np.sum(bits * weights, axis=-1).astype(int)
 
-    # ── circuit templates (built & transpiled once) ──────────────────────────
+    # ── circuit templates (built & transpiled ONCE) ─────────────────────────
     def _build_circuits(self):
-        """Construct and transpile the init / mutation / crossover templates."""
+        """Construct and transpile the init / mutation / crossover templates.
+
+        [A1] CRITICAL: the templates are PARAMETRIZED so that the per-
+        individual gene bits are carried by BOUND ANGLES, not by structural
+        X gates. That lets every individual reuse the SAME transpiled circuit
+        via `assign_parameters` — the hot loop never calls `transpile` again.
+        The previous version built one fresh circuit per (individual, gene)
+        with X-gate state-prep and transpiled the WHOLE list every generation
+        (e.g. pop=200, d=4 → 800 transpilations/generation), which dominated
+        the QGA runtime and broke the project's own "transpile once" rule.
+        """
         nb = self.n_bits
 
-        # (a) Quantum initialization: d·nb qubits, all in superposition.
+        # (a) Quantum initialization: d·nb qubits in uniform superposition.
         n_init = self.d * nb
         qc_init = QuantumCircuit(n_init)
         qc_init.h(range(n_init))
         qc_init.measure_all()
         self._qc_init = transpile(qc_init, self.sim)
 
-        # (b) Quantum mutation: ONE gene register (nb qubits). The incoming
-        #     gene bits are prepared with X gates (done per-individual via a
-        #     parametrized X is not possible, so we prepend X at assembly
-        #     time); here we only template the RY mutation layer + measure.
+        # (b) Quantum mutation template (nb qubits, nb angle parameters).
+        #     State-prep is folded into the angle: a qubit representing bit b
+        #     with per-qubit flip probability p must measure 1 with probability
+        #     P1 = b·(1−p) + (1−b)·p, achieved by RY(2·arcsin(√P1))|0⟩. So the
+        #     gene bits enter ONLY through the bound angles — no X gates, one
+        #     transpiled template for all individuals.
         phi_m = ParameterVector('m', nb)
         qc_mut = QuantumCircuit(nb)
         for q in range(nb):
             qc_mut.ry(phi_m[q], q)
         qc_mut.measure_all()
-        self._qc_mut = qc_mut                  # bound per call (state prep added)
+        self._qc_mut_t = transpile(qc_mut, self.sim)     # transpiled ONCE
         self._phi_m = phi_m
 
-        # (c) Quantum crossover: two gene registers A,B (nb qubits each).
-        #     Entangle homologous qubits with CX(B→A) and add a controlled-RY
-        #     interference layer, then measure A as the child gene.
+        # (c) Quantum crossover template (2·nb qubits). Parent bits are loaded
+        #     by per-qubit prep angles (RY(π)|0⟩ = |1⟩, RY(0)|0⟩ = |0⟩), then
+        #     the fixed entangling+interference layer mixes B into A. The prep
+        #     angles (2·nb of them) plus the nb interference angles are all
+        #     ParameterVector entries, so each parent pair is just a binding on
+        #     the ONE transpiled template.
+        prep_a = ParameterVector('pa', nb)
+        prep_b = ParameterVector('pb', nb)
         phi_c = ParameterVector('c', nb)
         qc_cx = QuantumCircuit(2 * nb)
         for q in range(nb):
-            qc_cx.cx(nb + q, q)                # entangle parent B into A
+            qc_cx.ry(prep_a[q], q)                 # load parent A bit on qubit q
+            qc_cx.ry(prep_b[q], nb + q)            # load parent B bit
         for q in range(nb):
-            qc_cx.cry(phi_c[q], nb + q, q)     # controlled interference
+            qc_cx.cx(nb + q, q)                    # entangle B into A
+        for q in range(nb):
+            qc_cx.cry(phi_c[q], nb + q, q)         # controlled interference
         qc_cx.measure_all()
-        self._qc_cx = qc_cx
-        self._phi_c = phi_c
+        self._qc_cx_t = transpile(qc_cx, self.sim)       # transpiled ONCE
+        self._prep_a, self._prep_b, self._phi_c = prep_a, prep_b, phi_c
 
     # ── operator 1: quantum initialization ──────────────────────────────────
     def do_init(self) -> np.ndarray:
@@ -797,38 +853,36 @@ class QGA(GeneticEvolver):
         genes = self._encode(pop)              # (P, d)
         P = len(pop)
 
-        # Rotation amplitude: a per-qubit flip probability tied to the same
-        # `mutation_scale` used classically, so the two mutations are comparable
-        # in strength. p_flip ≈ mutation_rate spread over the bits; we set
-        # φ = 2·arcsin(√p) with p = mutation_scale (bounded to a sane range).
+        # Per-qubit flip probability tied to the same `mutation_scale` used
+        # classically, so the two mutations are comparable in strength.
         p_flip = float(np.clip(self.ga.mutation_scale, 1e-3, 0.5))
-        phi_val = 2.0 * np.arcsin(np.sqrt(p_flip))
 
-        # Build one circuit per (individual, gene): state-prep X gates for the
-        # current bits, then the templated RY layer. Batch ALL of them in a
-        # single Aer job.
-        circuits = []
-        meta = []                              # (i, j) index bookkeeping
-        bound_phi = {self._phi_m[q]: phi_val for q in range(nb)}
-        for i in range(P):
-            for j in range(self.d):
-                bits = self._int_to_bits(np.array(genes[i, j]), nb)  # (nb,)
-                qc = QuantumCircuit(nb)
-                for q in range(nb):
-                    if bits[q] == 1:
-                        qc.x(nb - 1 - q)       # MSB-first → qubit index
-                qc.compose(self._qc_mut.assign_parameters(bound_phi),
-                           inplace=True)
-                circuits.append(qc)
-                meta.append((i, j))
-        tcirc = transpile(circuits, self.sim)
-        res = self.sim.run(tcirc, shots=1, memory=True).result()
+        # [A1] Build the (B, nb) angle-binding array. For each (individual,
+        # gene) the nb angles encode the gene bits with flip probability
+        # p_flip: a bit b maps to RY angle 2·arcsin(√(b·(1−p)+(1−b)·p)). No
+        # X gates, no per-call transpilation — we bind on the ONE pre-
+        # transpiled template and run all bindings in a single Aer job.
+        gene_flat = genes.reshape(-1)                       # (P*d,)
+        bits = self._int_to_bits(gene_flat, nb)             # (P*d, nb), MSB-first
+        # qubit q holds bit (nb-1-q) under the MSB-first/qubit-index convention
+        bits_q = bits[:, ::-1]                              # (P*d, nb) per qubit
+        P1 = bits_q * (1.0 - p_flip) + (1 - bits_q) * p_flip
+        angles = 2.0 * np.arcsin(np.sqrt(P1))               # (P*d, nb)
+
+        tmpl = self._qc_mut_t
+        param_order = list(self._phi_m)
+        circuits = [tmpl.assign_parameters(
+                        {param_order[q]: float(angles[k, q])
+                         for q in range(nb)})
+                    for k in range(angles.shape[0])]
+        res = self.sim.run(circuits, shots=1, memory=True).result()
 
         new_genes = genes.copy()
-        for k, (i, j) in enumerate(meta):
+        for k in range(gene_flat.shape[0]):
+            i, j = divmod(k, self.d)
             bs = res.get_memory(k)[0].replace(' ', '')
-            bits = np.array([int(c) for c in bs[::-1]], dtype=int)
-            new_genes[i, j] = self._bits_to_int(bits[::-1])
+            mb = np.array([int(c) for c in bs[::-1]], dtype=int)   # qubit order
+            new_genes[i, j] = self._bits_to_int(mb[::-1])          # MSB first
         return self._clip(self._decode(new_genes))
 
     # ── operator 3: quantum crossover ────────────────────────────────────────
@@ -845,36 +899,32 @@ class QGA(GeneticEvolver):
         # Interference amplitude per qubit (fixed, moderate): π/4 gives a
         # balanced controlled mixing without fully swapping the registers.
         phi_val = np.pi / 4.0
-        bound_phi = {self._phi_c[q]: phi_val for q in range(nb)}
 
-        circuits, meta = [], []
-        for i in range(P):
-            if not do[i]:
-                continue
-            for j in range(self.d):
-                bits_a = self._int_to_bits(np.array(ga_[i, j]), nb)
-                bits_b = self._int_to_bits(np.array(gb[i, j]), nb)
-                qc = QuantumCircuit(2 * nb)
-                for q in range(nb):
-                    if bits_a[q] == 1:
-                        qc.x(nb - 1 - q)               # register A (qubits 0..nb-1)
-                    if bits_b[q] == 1:
-                        qc.x(nb + (nb - 1 - q))         # register B (qubits nb..)
-                qc.compose(self._qc_cx.assign_parameters(bound_phi),
-                           inplace=True)
-                circuits.append(qc)
-                meta.append((i, j))
-
+        # [A1] Parent bits are loaded by PREP ANGLES (RY(π)→|1⟩, RY(0)→|0⟩)
+        # bound on the ONE pre-transpiled template, instead of structural X
+        # gates that forced a per-pair retranspile. Collect the (i,j) pairs
+        # that recombine, build their bindings, run in a single Aer job.
+        idx_pairs = [(i, j) for i in range(P) if do[i] for j in range(self.d)]
         child = a.copy()                                # default: parent A
-        if circuits:
-            tcirc = transpile(circuits, self.sim)
-            res = self.sim.run(tcirc, shots=1, memory=True).result()
+        if idx_pairs:
+            pa, pb, pc = self._prep_a, self._prep_b, self._phi_c
+            tmpl = self._qc_cx_t
+            circuits = []
+            for (i, j) in idx_pairs:
+                bits_a = self._int_to_bits(np.array(ga_[i, j]), nb)[::-1]  # per qubit
+                bits_b = self._int_to_bits(np.array(gb[i, j]), nb)[::-1]
+                binding = {}
+                for q in range(nb):
+                    binding[pa[q]] = float(np.pi) if bits_a[q] == 1 else 0.0
+                    binding[pb[q]] = float(np.pi) if bits_b[q] == 1 else 0.0
+                    binding[pc[q]] = phi_val
+                circuits.append(tmpl.assign_parameters(binding))
+            res = self.sim.run(circuits, shots=1, memory=True).result()
             new_genes = ga_.copy()
-            for k, (i, j) in enumerate(meta):
+            for k, (i, j) in enumerate(idx_pairs):
                 bs = res.get_memory(k)[0].replace(' ', '')
-                bits = np.array([int(c) for c in bs[::-1]], dtype=int)
-                # measure register A (first nb qubits, little-endian → index)
-                segA = bits[:nb]
+                mb = np.array([int(c) for c in bs[::-1]], dtype=int)
+                segA = mb[:nb]                          # register A = qubits 0..nb-1
                 new_genes[i, j] = self._bits_to_int(segA[::-1])
             child = self._decode(new_genes)
         return self._clip(child)
@@ -1426,7 +1476,7 @@ def build_parser() -> argparse.ArgumentParser:
   python cosmo_genetic_optimizers.py
   python cosmo_genetic_optimizers.py --methods cga --model lcdm --generations 80
   python cosmo_genetic_optimizers.py --methods cga qga --dataset CC+Pantheon+ \\
-         --population-size 200 --generations 120 --qga-preset 60
+         --population-size 200 --generations 120 --qga-preset 67
   python cosmo_genetic_optimizers.py --methods qga --qga-config \\
          '{"q_init":true,"q_mutation":true,"q_crossover":false}'""")
 
@@ -1553,10 +1603,14 @@ def self_test() -> int:
 
         ga_s = GAConfig(pop_size=20, n_generations=10, seed=2)
         ok3 = True
-        for nm, cfg in [('q_init', QGA_PRESETS[25]),
+        # One ALGORITHMIC operator switched on at a time (single-operator
+        # ablation): each should still locate the MAP region.
+        for nm, cfg in [('q_init',
+                         dict(q_init=True, q_mutation=False, q_crossover=False)),
                         ('q_mutation',
                          dict(q_init=False, q_mutation=True, q_crossover=False)),
-                        ('q_crossover', QGA_PRESETS[75])]:
+                        ('q_crossover',
+                         dict(q_init=False, q_mutation=False, q_crossover=True))]:
             q = QGA(post, ga_s, cfg, n_bits=5, rng=np.random.default_rng(2))
             r = q.evolve(live=False, log_every=999)
             good = abs(r.theta_map[0] - 0.2574) < 0.03
