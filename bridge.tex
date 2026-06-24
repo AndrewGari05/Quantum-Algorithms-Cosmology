@@ -1,0 +1,568 @@
+% =============================================================================
+%  bridge.tex — From the Bloch Sphere to Cosmological Posteriors
+%  A code-level bridge between classical and quantum Bayesian inference.
+%
+%  Audience: a reader fluent in cosmology and Bayesian statistics whose
+%  quantum-computing background does not exceed the Bloch sphere. Every
+%  quantum construction is introduced FROM a single qubit and TOWARD its
+%  algorithmic role, and every code function is anchored to one of three
+%  categories (Physics / Statistics / Quantum Computation) with its
+%  time/space complexity.
+%
+%  Compile:  pdflatex bridge.tex  (run twice for the table of contents)
+% =============================================================================
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{braket}            % Dirac notation: \ket, \bra, \braket
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{seqsplit}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue!55!black,
+            citecolor=blue!55!black, urlcolor=blue!55!black}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{quantikz2} % quantum circuits; falls back gracefully if absent
+
+% --- code listing style ------------------------------------------------------
+\definecolor{codebg}{gray}{0.96}
+\definecolor{codekw}{rgb}{0.0,0.3,0.6}
+\definecolor{codecm}{rgb}{0.3,0.5,0.3}
+\lstdefinestyle{py}{
+  language=Python, backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\footnotesize, keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecm}\itshape, stringstyle=\color{red!50!black},
+  showstringspaces=false, breaklines=true, frame=single,
+  framerule=0pt, columns=fullflexible, xleftmargin=4pt, xrightmargin=4pt}
+\lstset{style=py}
+
+% --- theorem-like environments ----------------------------------------------
+\newtheorem{definition}{Definition}[section]
+\newtheorem{proposition}{Proposition}[section]
+\newtheorem{remark}{Remark}[section]
+
+% --- shorthands --------------------------------------------------------------
+\newcommand{\Om}{\Omega_m}
+\newcommand{\OL}{\Omega_\Lambda}
+\newcommand{\Or}{\Omega_r}
+\newcommand{\ODE}{\Omega_{\mathrm{DE}}}
+\newcommand{\Ez}{E(z;\theta)}
+\newcommand{\Ezsq}{E^2(z;\theta)}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\bigO}{\mathcal{O}}
+\newcommand{\KL}{\mathrm{KL}}
+\newcommand{\Rhat}{\hat{R}}
+\newcommand{\faithful}{\textsc{faithful}}
+\newcommand{\algorithmic}{\textsc{algorithmic}}
+
+\title{\bfseries From the Bloch Sphere to Cosmological Posteriors\\[2pt]
+\large A Code-Level Bridge Between Classical and Quantum Bayesian Inference}
+\author{Andr\'es Garc\'ia Rivera\\
+\small Engineering Physics, Universidad Iberoamericana (IBERO)}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This document is the theoretical companion to the \emph{Quantum Algorithms
+for Cosmology} codebase. It is written for a reader who is at home with
+cosmology and Bayesian statistics but whose quantum-computing knowledge stops
+at the Bloch sphere. Its purpose is threefold: to separate and explain every
+function of the code under three headings (Physics, Statistics, Quantum
+Computation); to build a bridge from a single qubit to the quantum samplers,
+so the connection between circuit and inference is explicit; and to give the
+time and space complexity of each component. The guiding scientific principle
+throughout is \emph{fidelity, not advantage}: for classical parametric model
+fitting there is no structural quantum speed-up to be had, so the genuine
+contribution is to show that quantum methods faithfully \emph{replicate}
+trusted classical results. We make that idea precise by casting the whole
+project as a \emph{classical--quantum ablation framework}, in which each
+algorithmic component is a substitution point that is either \faithful{}
+(a quantum re-encoding of the exact classical rule, expected to reproduce it)
+or \algorithmic{} (a genuinely different quantum algorithm, expected to
+differ).
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% =============================================================================
+\section{Preliminaries}
+% =============================================================================
+
+\subsection{Purpose and the code\texorpdfstring{$\to$}{->}theory map}
+
+The codebase is organized so that \emph{physics}, \emph{statistics}, and
+\emph{sampling/optimization} never bleed into one another. All physics lives
+in \code{cosmo\_core.py}; the samplers in \code{cosmo\_modular\_quantum.py}
+(simulator) and \code{qpu\_cosmo\_samplers.py} (hardware); the global
+optimizers in \code{cosmo\_genetic\_optimizers.py}. This document mirrors that
+separation. Table~\ref{tab:map} is the master index: each function appears
+under exactly one category, with the section that explains it and its
+complexity.
+
+\begin{table}[h]
+\centering
+\footnotesize
+\begin{tabular}{@{}lllc@{}}
+\toprule
+\textbf{Function / object} & \textbf{Category} & \textbf{Section} & \textbf{Complexity (time)}\\
+\midrule
+\code{CosmoModel}, \code{\_E2\_*}        & Physics    & \S\ref{sec:physics}  & $\bigO(N_z)$ \\
+\code{Posterior.\_mu\_theory}            & Physics    & \S\ref{sec:physics}  & $\bigO(N_z)$ \\
+\code{Posterior.log\_prob\_batch}        & Statistics & \S\ref{sec:stats}    & $\bigO(B(N_z{+}N_{\mathrm{SN}}^2))$ \\
+\code{chi2\_pantheon\_plus}              & Statistics & \S\ref{sec:stats}    & $\bigO(N_{\mathrm{SN}}^2)$ \\
+\code{autocorr\_time\_fft}               & Statistics & \S\ref{sec:stats}    & $\bigO(N\log N)$ \\
+\code{split\_rhat}                       & Statistics & \S\ref{sec:stats}    & $\bigO(MN)$ \\
+\code{QMCMCModular}                      & Statistics/QC & \S\ref{sec:qmcmc} & per step $\bigO(M\cdot c_{\mathrm{post}})$ \\
+\code{hadamard\_accept\_log\_batch}      & QC (\faithful) & \S\ref{sec:bridge} & $\bigO(M)$ \\
+\code{QuantumProposalEngine}             & QC (\algorithmic) & \S\ref{sec:bridge} & $\bigO(2^{n_q})$/refill \\
+\code{QVMCModular}                       & Statistics/QC & \S\ref{sec:qvmc}  & target $\bigO(2^{n\cdot\mathrm{nqpp}})$ \\
+\code{estimate\_grid\_window}            & Statistics & \S\ref{sec:qvmc}     & $\bigO(n_{\mathrm{steps}}M c_{\mathrm{post}})$ \\
+\code{CGA}/\code{QGA}                    & Statistics/QC & \S\ref{sec:genetic} & $\bigO(G\cdot P\cdot d)$ \\
+\code{compute\_quantumness}              & Framework  & \S\ref{sec:ablation} & $\bigO(1)$ \\
+\bottomrule
+\end{tabular}
+\caption{Master map: every component, its category, the section that explains
+it, and its dominant time complexity. $B$ = batch size, $N_z$ = distance-grid
+size, $N_{\mathrm{SN}}$ = number of supernovae, $M$ = chains, $N$ = chain
+length, $d$ = parameters, $\mathrm{nqpp}$ = qubits per parameter, $G$ =
+generations, $P$ = population, $c_{\mathrm{post}}$ = cost of one posterior
+evaluation.}
+\label{tab:map}
+\end{table}
+
+\subsection{Notation and the guiding principle}
+
+We write the dimensionless Hubble function as $\Ez$ with $\Ezsq =
+H^2(z;\theta)/H_0^2$, and $\theta$ for the parameter vector (by convention
+$\theta_0=\Om$, $\theta_1=H_0$). Quantum states use Dirac notation; a single
+qubit is $\ket{\psi}=\alpha\ket{0}+\beta\ket{1}$ with $|\alpha|^2+|\beta|^2=1$.
+
+\begin{remark}[Fidelity, not advantage]
+For fitting a handful of cosmological parameters to fixed data, the bottleneck
+is the \emph{likelihood evaluation}, which is classical arithmetic over the
+data. No quantum subroutine in this project changes that asymptotics, and we
+make no claim of quantum advantage. The scientific value is the demonstration
+that quantum re-encodings of the inference steps \emph{reproduce} the
+classical posterior --- a fidelity result. Section~\ref{sec:ablation} turns
+this into a falsifiable framework.
+\end{remark}
+
+% =============================================================================
+\section{Physics}
+\label{sec:physics}
+% =============================================================================
+
+The only physics a model must expose is $\Ezsq$; every observable is derived
+generically from it. This is the \code{CosmoModel} contract.
+
+\subsection{The Friedmann function and the model registry}
+
+\begin{definition}[Background model]
+A flat FLRW background with matter, radiation and dark energy obeys
+\begin{equation}
+\Ezsq = \Om(1+z)^3 + \Or(1+z)^4 + \ODE\, f_{\mathrm{DE}}(z),
+\end{equation}
+with $\ODE = 1-\Om-\Or$ (flatness) and $f_{\mathrm{DE}}(z)$ the dark-energy
+density evolution, $f_{\mathrm{DE}}(0)=1$. The Hubble rate is
+$H(z;\theta)=H_0\,\Ez$.
+\end{definition}
+
+The five registered models differ only in $f_{\mathrm{DE}}$:
+\begin{align}
+\text{$\Lambda$CDM:}\quad & f_{\mathrm{DE}}=1,\\
+\text{wCDM:}\quad & f_{\mathrm{DE}}=(1+z)^{3(1+w)},\\
+\text{CPL:}\quad & f_{\mathrm{DE}}=(1+z)^{3(1+w_0+w_a)}\exp\!\big(\!-3w_a z/(1+z)\big),\\
+\text{PEDE:}\quad & f_{\mathrm{DE}}=1-\tanh\!\big(\log_{10}(1+z)\big),\\
+\text{GEDE:}\quad & f_{\mathrm{DE}}=\frac{1-\tanh\!\big(\Delta\log_{10}\frac{1+z}{1+z_t}\big)}
+{1+\tanh\!\big(\Delta\log_{10}(1+z_t)\big)},\quad (1+z_t)=\Big(\tfrac{1-\Om}{\Om}\Big)^{1/3}.
+\end{align}
+
+\begin{proposition}[Emergent dark-energy normalization]
+PEDE and GEDE satisfy $f_{\mathrm{DE}}(0)=1$ exactly, hence $\Ezsq|_{z=0}=1$.
+\end{proposition}
+\begin{proof}
+For PEDE, $\tanh(\log_{10}1)=\tanh 0=0$, so $f_{\mathrm{DE}}(0)=1$. For GEDE at
+$z=0$, $\tfrac{1+z}{1+z_t}=\tfrac{1}{1+z_t}$, so the numerator is
+$1-\tanh(-\Delta\log_{10}(1+z_t))=1+\tanh(\Delta\log_{10}(1+z_t))$, identical
+to the denominator; their ratio is $1$. This holds for every $\Om,\Delta$ and
+is asserted in \code{\seqsplit{tests/test\_core.py::test\_emergent\_de\_normalization}}.
+\end{proof}
+
+\begin{remark}[Convention caveat checked at $z\neq0$]
+An inverted sign of $z_t$ would also give $f_{\mathrm{DE}}(0)=1$ but the
+opposite high-$z$ evolution. The test
+\code{\seqsplit{test\_gede\_reduces\_to\_lcdm\_at\_delta\_zero}} therefore checks
+$\Delta=0\Rightarrow f_{\mathrm{DE}}\equiv1$ at $z=0.5,1,2$, not only at $z=0$.
+\end{remark}
+
+\subsection{From $\Ezsq$ to observables}
+
+Two observables enter the likelihood. The Hubble rate $H(z;\theta)$ is read
+directly. The distance modulus requires the comoving distance:
+\begin{equation}
+d_C(z) = \frac{c}{H_0}\int_0^z \frac{dz'}{\Ez[z']},\qquad
+d_L=(1+z)\,d_C,\qquad
+\mu_{\mathrm{th}}=5\log_{10}\!\big(d_L/\text{Mpc}\big)+25.
+\end{equation}
+
+\begin{remark}[Flatness, made explicit]
+The code takes the transverse comoving distance equal to $d_C$, valid only for
+$\Omega_k=0$. All five models are flat. A curved extension would need
+$d_M=(c/H_0\sqrt{|\Omega_k|})\,\mathrm{sinn}(\sqrt{|\Omega_k|}H_0 d_C/c)$;
+\code{\_mu\_theory} documents this so a future non-flat model is not silently
+wrong.
+\end{remark}
+
+\paragraph{Complexity.}
+The integral is computed once on a fixed grid of $N_z$ points by cumulative
+trapezoid, then interpolated to the supernova redshifts: $\bigO(N_z)$ time and
+space, and crucially \emph{model-agnostic} --- the same code serves CPL or
+GEDE. The earlier point-by-point \code{scipy.integrate.quad} was $\bigO(N_{
+\mathrm{SN}}\cdot\text{(integrand evals)})$ and $\sim$10$\times$ slower.
+
+% =============================================================================
+\section{Statistics}
+\label{sec:stats}
+% =============================================================================
+
+\subsection{Posterior, likelihoods and the marginalized $M_{\mathrm{abs}}$}
+
+The log-posterior ties model, data and prior:
+\begin{equation}
+\log P(\theta\mid \mathrm{data}) = \log\pi(\theta) - \tfrac12\chi^2(\theta),
+\qquad
+\chi^2 = \chi^2_{\mathrm{CC}} + \chi^2_{\mathrm{SN}}.
+\end{equation}
+The H($z$) (CC+BAO) term is diagonal,
+$\chi^2_{\mathrm{CC}}=\sum_i\big((H_{\mathrm{obs},i}-H(z_i;\theta))/\sigma_i\big)^2$.
+The supernova term marginalizes the unknown absolute magnitude
+$M_{\mathrm{abs}}$ analytically.
+
+\begin{proposition}[Analytic $M_{\mathrm{abs}}$ marginalization, Goliath 2001]
+With residuals $\Delta_i=m_{\mathrm{obs},i}-\mu_{\mathrm{th}}(z_i;\theta)$ and a
+flat prior on the constant offset $M_{\mathrm{abs}}$, integrating it out gives
+\begin{equation}
+\chi^2_{\mathrm{eff}} = A - \frac{B^2}{C},\quad
+A=\Delta^\top C_{\!*}^{-1}\Delta,\;
+B=\Delta^\top C_{\!*}^{-1}\mathbf{1},\;
+C=\mathbf{1}^\top C_{\!*}^{-1}\mathbf{1},
+\end{equation}
+with $C_{\!*}$ the (diagonal for Pantheon 2018, full for Pantheon+) covariance.
+The result is invariant under $m_{\mathrm{obs}}\!\to\!m_{\mathrm{obs}}+\text{const}$.
+\end{proposition}
+
+The shift-invariance is the defining correctness property and is asserted in
+\code{\seqsplit{test\_mabs\_marginalization\_shift\_invariance}}.
+
+\begin{remark}[Combined datasets and $H_0$]
+SNe with $M_{\mathrm{abs}}$ marginalized constrain only the \emph{shape}
+$\Ez$, not $H_0$. When CC+BAO is added, $H_0$ is anchored \emph{directly} by
+the H($z$) term: the combined fit does not marginalize $H_0$, only the SNe
+nuisance offset. This is intentional --- CC+BAO is what pins $H_0$ --- and is
+documented in \code{Posterior.chi2}.
+\end{remark}
+
+\subsection{Vectorized batch evaluation}
+
+\code{log\_prob\_batch} evaluates the posterior for a batch of $B$ parameter
+vectors in one pass, broadcasting $\Ezsq$ over the redshift grid. This is the
+single hot path for the QVMC grid target and the vectorized QMCMC kernel.
+
+\paragraph{Complexity.}
+For a batch of $B$: the CC term is $\bigO(B N_{\mathrm{CC}})$; the SNe distance
+integral is $\bigO(B N_z)$; the Pantheon+ quadratic form $\Delta^\top
+C^{-1}\Delta$ is $\bigO(B N_{\mathrm{SN}}^2)$ (the $C^{-1}$ is precomputed
+once). Time $\bigO\!\big(B(N_z+N_{\mathrm{SN}}^2)\big)$; space
+$\bigO(B N_z + N_{\mathrm{SN}}^2)$.
+
+\subsection{Diagnostics: $\tau$, ESS and split-$\Rhat$}
+
+\begin{definition}[Integrated autocorrelation time]
+For a stationary chain with normalized autocorrelation $\rho(t)$,
+$\tau = 1 + 2\sum_{t\ge1}\rho(t)$. On a finite chain the sum must be truncated;
+\code{autocorr\_time\_fft} uses \textbf{Sokal automatic windowing}: accumulate
+$\tau(M)=1+2\sum_{t=1}^{M}\rho(t)$ and stop at the first $M$ with $M\ge c\,
+\tau(M)$ ($c=5$). The autocovariance comes from one zero-padded FFT, so the
+cost is $\bigO(N\log N)$.
+\end{definition}
+
+\begin{remark}[Why the old cutoff was wrong]
+The previous rule ``first lag with $\rho<0.05$, else $N/4$'' returned the same
+sentinel ($\arg\max=0$) for a chain that never decorrelates \emph{and} for one
+already decorrelated at lag 1, conflating the worst and best chains. The Sokal
+rule is self-consistent and is the community standard (emcee). Tests:
+\code{test\_autocorr\_white\_noise} ($\tau\!\approx\!1$),
+\code{test\_autocorr\_ar1} (AR(1) $\phi=0.9\Rightarrow\tau\!\approx\!19$), and
+the regression \code{test\_autocorr\_excellent\_chain\_regression}.
+\end{remark}
+
+The effective sample size is $\mathrm{ESS}=MN/\tau_{\max}$ with $\tau_{\max}$
+the worst per-chain-averaged $\tau$ across parameters (the slowest direction
+governs independence). For weighted QVMC samples the Kish ESS
+$(\sum w)^2/\sum w^2$ is used instead.
+
+\begin{definition}[Rank-normalized split-$\Rhat$, Vehtari et al.\ 2021]
+Split each chain in half (catching within-chain drift), rank-normalize the
+pooled draws (robust to heavy tails), then form
+$\Rhat=\sqrt{\big(\tfrac{N-1}{N}W+B/N\big)/W}$ from the between- ($B$) and
+within-chain ($W$) variances; report the max over parameters. Convergence
+threshold $\Rhat<1.01$.
+\end{definition}
+
+\begin{remark}[Why 1.01 matters here]
+The project's central claim is ``quantum reproduces classical.'' Agreement
+between two \emph{unconverged} chains proves nothing, so a lax threshold
+(1.05) would make the comparison vacuous. The stricter rank-normalized
+split-$\Rhat<1.01$ guards this; tests
+\code{test\_split\_rhat\_converged\_vs\_drift} and
+\code{\seqsplit{test\_split\_rhat\_catches\_within\_chain\_trend}} show it separates
+converged from drifting chains and catches a trend the classical $\Rhat$
+misses.
+\end{remark}
+
+% =============================================================================
+\section{Quantum Computation: from one qubit to the circuits}
+\label{sec:bridge}
+% =============================================================================
+
+This is the bridge. We start where the reader is --- one qubit on the Bloch
+sphere --- and build up exactly the machinery the samplers use.
+
+\subsection{One qubit, rotations, and the birth of probability}
+
+A qubit state $\ket{\psi}=\cos\tfrac{\theta}{2}\ket{0}
++e^{i\varphi}\sin\tfrac{\theta}{2}\ket{1}$ is a point $(\theta,\varphi)$ on the
+Bloch sphere. The rotation $R_Y(\lambda)$ takes $\ket{0}$ to
+$\cos\tfrac{\lambda}{2}\ket{0}+\sin\tfrac{\lambda}{2}\ket{1}$, so measuring in
+the computational basis gives
+\begin{equation}
+P(\ket{1}) = \sin^2(\lambda/2),\qquad P(\ket{0})=\cos^2(\lambda/2).
+\label{eq:ry}
+\end{equation}
+Equation~\eqref{eq:ry} is the entire trick behind the \faithful{} acceptance
+cell below: any target probability $A\in[0,1]$ is obtained with
+$\lambda=2\arccos\sqrt{A}$.
+
+\subsection{Amplitude encoding of the Metropolis rule (a \faithful{} cell)}
+\label{ssec:accept}
+
+\begin{proposition}[Quantum acceptance reproduces Metropolis exactly]
+Let $\Delta=\log P(\theta')-\log P(\theta)$ and $A=\min(1,e^{\Delta})$ the
+Metropolis acceptance. Preparing $R_Y\!\big(2\arccos\sqrt{A}\big)\ket{0}$ and
+reading $|\!\braket{0|\psi}\!|^2$ returns $A$ exactly. Hence a chain using the
+quantum acceptance is identical (given the same proposal and random stream) to
+the classical one.
+\end{proposition}
+
+This is why the acceptance is labelled \faithful{}: the circuit computes the
+\emph{same number} the CPU would. \code{hadamard\_accept\_log\_batch} evaluates
+all $M$ chains' single-qubit circuits in one Aer job; the test
+\code{test\_qpu\_helpers::test\_b1\_metropolis\_rule} checks monotonicity in
+$\Delta$ (the regression guard for the historically inverted readout).
+
+\begin{center}
+\begin{quantikz}
+\lstick{$\ket{0}$} & \gate{R_Y(2\arccos\sqrt{A})} & \meter{} 
+\end{quantikz}
+\end{center}
+
+\subsection{Registers, superposition and the parameter grid}
+
+Stacking $n$ qubits and applying $H^{\otimes n}$ creates a uniform
+superposition over $2^n$ basis states. The QVMC/QGA encode a discretized
+parameter grid in such a register: parameter $i$ occupies $\mathrm{nqpp}$
+qubits, so $d$ parameters need $d\cdot\mathrm{nqpp}$ qubits and the grid has
+$2^{d\cdot\mathrm{nqpp}}$ points. \code{\_build\_theta\_table} is the bijection
+between a basis-state index and a $\theta$ on this grid.
+
+\subsection{Entanglement and the hardware-efficient ansatz}
+
+Two-qubit gates (CX, controlled-$R_Y$) create entanglement --- correlations no
+product state can represent. The QVMC \emph{ansatz} interleaves single-qubit
+$R_Y/R_Z$ rotations with a ring of CX gates; its tunable angles $\varphi$
+define a variational family $\ket{\psi(\varphi)}$ whose measurement
+distribution $|\!\braket{x|\psi(\varphi)}\!|^2$ is fitted to the posterior.
+
+\subsection{The quantum proposal (an \algorithmic{} cell)}
+
+The QMCMC proposal circuit (Sarracino et al.\ 2025) is
+$H^{\otimes n}\!\to[R_Y R_Z\text{ + chained }CR_Y]^{\times L}\!\to H^{\otimes
+n}\!\to R_Y$; the real parts of its output amplitudes define a displacement of
+$\theta$. Because the displacement depends only on random angles (not on the
+current $\theta$), a whole block is generated in one Aer job and consumed from
+a queue (\code{QuantumProposalEngine}). The raw displacement is zero-mean but
+has std $\approx0.35$; it is rescaled to unit std so it is a drop-in for the
+classical $\mathcal N(0,1)$ proposal (keeping acceptance in a healthy band).
+This is an \algorithmic{} cell: it is genuinely not the classical Gaussian, so
+it changes the chain.
+
+\paragraph{Complexity.}
+A statevector refill of $b$ proposals on $n_q$ qubits is
+$\bigO(b\cdot 2^{n_q})$ time, $\bigO(2^{n_q})$ space; amortized per step it is
+one queue pop, $\bigO(1)$.
+
+% =============================================================================
+\section{The samplers}
+% =============================================================================
+
+\subsection{QMCMC}
+\label{sec:qmcmc}
+
+\code{QMCMCModular} is a hand-written Metropolis--Hastings (not emcee), so that
+each component can be swapped classical$\leftrightarrow$quantum and the
+baseline and quantum run share the exact transition structure, step scale and
+RNG stream. The kernel is vectorized: one \code{log\_prob\_batch} call scores
+all $M$ chains per step.
+
+\paragraph{Complexity.}
+Per step the cost is dominated by the likelihood, $\bigO(M\,c_{\mathrm{post}})$
+with $c_{\mathrm{post}}=\bigO(N_z+N_{\mathrm{SN}}^2)$; the quantum proposal
+adds $\bigO(M)$ queue pops and the quantum acceptance one $\bigO(M)$ Aer job.
+Space $\bigO(MNd)$ for the stored chains.
+
+\subsection{QVMC and the adaptive grid}
+\label{sec:qvmc}
+
+\code{QVMCModular} represents the posterior on the discrete grid as
+$|\psi(\varphi)|^2$ and minimizes $\KL(Q_\varphi\,\|\,P)$. A naive grid over
+the full \code{sample\_box} collapses the (narrow) cosmological posterior onto
+1--3 cells; \code{estimate\_grid\_window} (now in \code{cosmo\_core}, shared
+with the QPU path) runs a short classical pre-fit and centres a zoomed
+$\pm k\sigma$ window on the posterior, using the \emph{median} (robust to
+asymmetric posteriors).
+
+Training is the \algorithmic{} cell: quantum parameter-shift gradients (or
+SPSA on hardware) reach a different KL minimum than classical COBYLA. Sampling
+and normalization are \faithful{} cells (shots from the trained state; exact
+renormalization).
+
+\paragraph{Complexity.}
+Building the target evaluates the posterior on all $2^{d\cdot\mathrm{nqpp}}$
+grid points: $\bigO(2^{d\cdot\mathrm{nqpp}}\,c_{\mathrm{post}})$ time and
+$\bigO(2^{d\cdot\mathrm{nqpp}})$ space --- the \textbf{exponential} cost in
+$d\cdot\mathrm{nqpp}$ that the \code{--max-qubits} guard protects.
+Parameter-shift adds $2n_\varphi$ circuit evaluations per iteration, batched
+into one Aer job.
+
+\subsection{Genetic optimizers (CGA / QGA)}
+\label{sec:genetic}
+
+The genetic fitness is the \emph{same} log-posterior, so maximizing fitness
+$\equiv$ finding the MAP. CGA is pure NumPy; QGA substitutes quantum operators
+(init / mutation / crossover), all \algorithmic{}. 
+
+\begin{remark}[The transpile-once fix, A1]
+Each QGA operator circuit is \emph{parametrized} and transpiled once; an
+individual's gene bits enter only through bound rotation angles (a bit $b$ with
+flip probability $p$ maps to $R_Y(2\arcsin\sqrt{b(1{-}p)+(1{-}b)p})$). The hot
+loop then only \code{assign\_parameters} on the cached transpiled template,
+instead of building and transpiling one fresh circuit per individual per
+generation ($P\!\cdot\!d$ transpilations/generation in the old code).
+\end{remark}
+
+\paragraph{Complexity.}
+$\bigO(G\cdot P\cdot d)$ classical work per run; the QGA adds one batched Aer
+job per operator per generation (no per-individual transpilation after A1).
+
+% =============================================================================
+\section{The classical--quantum ablation framework}
+\label{sec:ablation}
+% =============================================================================
+
+\begin{definition}[Ablation index, uniform weighting]
+The \emph{quantumness} of a configuration is the fraction of substitution
+points switched to quantum, every point weighted equally:
+\begin{equation}
+\text{index} = 100\cdot\frac{\#\{\text{quantum components}\}}{\#\{\text{components}\}}.
+\end{equation}
+It is an \textbf{ablation index}, not a quantum-resource metric: it counts how
+many algorithmic steps are quantum, nothing more.
+\end{definition}
+
+Each substitution point is \faithful{} (a quantum re-encoding of the exact
+classical rule; a null cell whose job is to verify the substitution introduces
+no bias) or \algorithmic{} (a genuinely different quantum algorithm; a
+treatment cell). The per-method ladders (uniform spacing) are
+\[
+\text{QMCMC: } 0\to50\to100\,\%,\qquad
+\text{QVMC: } 0\to33\to67\to100\,\%,\qquad
+\text{QGA: } 0\to33\to67\to100\,\%.
+\]
+
+\begin{table}[h]
+\centering\footnotesize
+\begin{tabular}{@{}llll@{}}
+\toprule
+Sampler & Substitution point & Kind & Expected outcome of flipping it\\
+\midrule
+QMCMC & proposal      & \algorithmic & changes (genuine quantum proposal)\\
+QMCMC & acceptance    & \faithful    & identical (reproduces Metropolis)\\
+QVMC  & sampling      & \faithful    & $\approx$identical (shot noise only)\\
+QVMC  & training      & \algorithmic & changes strongly (lower KL)\\
+QVMC  & normalization & \faithful    & $\approx$identical (faithful renorm.)\\
+\bottomrule
+\end{tabular}
+\caption{The ablation map. Faithful cells are falsifiable correctness tests;
+algorithmic cells are where the science happens.}
+\end{table}
+
+\begin{remark}[Why this resolves the ``ornamental circuit'' objection]
+A faithful cell runs a quantum circuit that, by construction, returns the same
+number as the CPU. Far from being ornamental, it is the \emph{control} of the
+experiment: its coincidence with the classical baseline is the evidence that
+the quantum re-encoding is faithful. The framework thus turns the project's
+narrative (``some rungs coincide by design, others differ'') into first-class,
+testable metadata. The historical hand-picked weights are retained only as
+\code{legacy\_weighted\_index} for CSV continuity.
+\end{remark}
+
+% =============================================================================
+\section{Complexity summary}
+\label{sec:complexity}
+% =============================================================================
+
+\begin{center}
+\footnotesize
+\begin{longtable}{@{}lll@{}}
+\toprule
+\textbf{Component} & \textbf{Time} & \textbf{Space}\\
+\midrule
+\endhead
+$\Ezsq$, $H(z)$              & $\bigO(N_z)$ & $\bigO(N_z)$\\
+$\mu_{\mathrm{th}}$ (cumulative trapezoid) & $\bigO(N_z)$ & $\bigO(N_z)$\\
+\code{log\_prob\_batch}      & $\bigO(B(N_z+N_{\mathrm{SN}}^2))$ & $\bigO(BN_z+N_{\mathrm{SN}}^2)$\\
+$\tau$ (FFT, Sokal)          & $\bigO(N\log N)$ & $\bigO(N)$\\
+split-$\Rhat$                & $\bigO(MN)$ & $\bigO(MN)$\\
+QMCMC (per step)             & $\bigO(M\,c_{\mathrm{post}})$ & $\bigO(MNd)$\\
+quantum proposal (refill)    & $\bigO(b\,2^{n_q})$ & $\bigO(2^{n_q})$\\
+quantum acceptance (batch)   & $\bigO(M)$ & $\bigO(M)$\\
+QVMC target build            & $\bigO(2^{d\cdot\mathrm{nqpp}}c_{\mathrm{post}})$ & $\bigO(2^{d\cdot\mathrm{nqpp}})$\\
+QVMC parameter-shift (iter)  & $\bigO(n_\varphi\,2^{d\cdot\mathrm{nqpp}})$ & $\bigO(2^{d\cdot\mathrm{nqpp}})$\\
+CGA / QGA (per run)          & $\bigO(GPd)$ & $\bigO(Pd)$\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+The single dominant scaling to internalize is the QVMC/QGA grid:
+$2^{d\cdot\mathrm{nqpp}}$ in both time and space. This is the exponential wall
+that \code{--max-qubits} guards and the reason a QPU --- which never
+materializes the statevector --- is the only way past it for large grids,
+though at the cost of shot noise and queue-dominated wall time rather than RAM.
+
+\section*{Acknowledgements}
+This document accompanies the \emph{Quantum Algorithms for Cosmology}
+codebase. The scientific framing throughout is fidelity, not advantage.
+
+\end{document}

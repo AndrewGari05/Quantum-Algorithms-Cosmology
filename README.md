@@ -53,38 +53,46 @@ the same place as the classical ones?** If yes, that's a meaningful result
 — it shows these quantum methods faithfully reproduce trusted classical
 results.
 
-## What does "quantumness %" mean?
+## What does the "quantumness %" mean?
 
 Each method is built from swappable parts. You can run each part on a
 normal computer ("classical") or on a quantum circuit ("quantum"). The
-**quantumness %** is simply *how many of the parts are running on the
-quantum circuit*, from 0% (all classical) to 100% (all quantum).
+**quantumness %** is an *ablation index*: it counts *how many of the parts
+are currently running on the quantum circuit*, from 0% (all classical) to
+100% (all quantum). Every part counts equally — it is simply the fraction of
+parts switched to quantum. (It is **not** a measure of "how much quantum
+power" is used; it is a bookkeeping index for a controlled
+classical-vs-quantum ablation, where we swap one part at a time and watch
+what happens.)
 
 There are **two separate dials**, one per method, because the two methods
-are made of different parts:
+are made of different numbers of parts:
 
 ```
-QMCMC dial:  0%  →  44% (quantum step direction)  →  100% (quantum accept/reject)
-QVMC  dial:  0%  →  46% (quantum draw)  →  82% (quantum fitting)  →  100% (quantum normalize)
+QMCMC dial:  0%  →  50% (quantum step direction)  →  100% (quantum accept/reject)
+QVMC  dial:  0%  →  33% (quantum draw)  →  67% (quantum fitting)  →  100% (quantum normalize)
 ```
 
-Turning a dial up adds one more quantum part. That's it.
+Turning a dial up switches one more part to quantum. That's it. (The numbers
+are just even fractions: QMCMC has 2 parts, so its rungs are halves; QVMC
+has 3 parts, so its rungs are thirds.)
 
 ## The one thing that surprises everyone
 
 When you turn a dial up, **sometimes the answer changes and sometimes it
-stays exactly the same** — and that is *expected*, not a bug:
+stays exactly the same** — and that is *expected*, not a bug. We label every
+part as one of two kinds:
 
-* Some quantum parts are genuinely new algorithms, so they change the
+* **Treatment parts** are genuinely new algorithms, so they change the
   answer (the quantum *step direction* in QMCMC; the quantum *fitting* in
-  QVMC).
-* Other quantum parts are quantum *re-implementations of the exact same
-  rule* the classical computer uses. Those give an identical answer **on
-  purpose** — that identity is the proof that "the quantum version
-  reproduces the classical one."
+  QVMC). These are the parts where something interesting happens.
+* **Faithful parts** are quantum *re-implementations of the exact same rule*
+  the classical computer uses. Those give an identical answer **on purpose**
+  — that identity is the proof that "the quantum version reproduces the
+  classical one." They are the control of the experiment.
 
-So when two neighboring dial settings look identical, that's the project
-succeeding at its goal, not failing.
+So when two neighboring dial settings look identical, that's a faithful part
+doing its job — the project succeeding at its goal, not failing.
 
 ## How to run it
 
@@ -146,56 +154,6 @@ python cosmo_genetic_optimizers.py --sweep-all --dataset CC+BAO+Pantheon+ \
 Restrict the sweep with `--sweep-models lcdm cpl` (and, for the genetic
 script, `--sweep-qga-levels 0 100`).
 
-### Run both pipelines in parallel on a cluster (`cosmo_hpc_runner.py`)
-
-On an HPC node you usually want the samplers **and** the genetic optimizer
-running at the same time, one model per process, with the cores split so
-nothing oversubscribes. `cosmo_hpc_runner.py` does exactly that: it launches
-each `(script × model × grid-size)` as its own subprocess, pins each one's
-internal BLAS/Aer thread count, monitors per-task wall time and peak RAM
-(process-tree aware), and writes a `master_profile.csv`/`.json`. It auto-detects
-the node's cores and RAM, so the same command works on a laptop or a
-supercomputer.
-
-```bash
-# Both pipelines, all models, cores auto-split (≈ J procs × T threads = cores)
-python cosmo_hpc_runner.py --dataset CC+BAO+Pantheon+ \
-    --steps 15000 --qvmc-iter 3000 --nqpp 6 \
-    --generations 120 --population-size 200 --n-bits 6 \
-    --threads-per-worker 8
-```
-
-**Per-model grid clamp.** You set one *target* `nqpp` (or `n_bits`); any model
-that would exceed the RAM/qubit ceiling is **lowered just for that model**
-until it fits, leaving the others at the target. Example: target `nqpp 6` keeps
-ΛCDM/wCDM/PEDE/GEDE at 6 and quietly drops **CPL** (d=4) to 4, because 6×4 =
-24 qubits ≈ 224 GB does not fit. Pass `--strict-qubits` to skip oversized
-combinations instead of clamping them.
-
-**Grid-convergence sweep.** `--nqpp-sweep LO HI` runs one samplers task per
-`nqpp` in the range (and `--nbits-sweep LO HI` does the same for the QGA grid),
-so you can study how grid resolution affects the answer:
-
-```bash
-python cosmo_hpc_runner.py --nqpp-sweep 2 6 --only-samplers \
-    --models lcdm wcdm --dataset CC+BAO+Pantheon+
-```
-
-When the run finishes the orchestrator **automatically** writes the convergence
-figures into the master folder: `convergence_<model>.png` (each parameter ± σ
-vs `nqpp`, one line per method, with Planck reference lines) and
-`cost_<model>.png` (wall time and peak RAM vs `nqpp`). To (re)generate the
-figures from an existing run without recomputing, or to skip them:
-
-```bash
-python cosmo_hpc_runner.py --plot-only results/hpc_<timestamp>/   # re-plot only
-python cosmo_hpc_runner.py ... --no-plots                         # skip plots
-```
-
-See *Part 2 — Parallel HPC orchestration* for the full rationale (why
-multiprocessing over multithreading, the anti-oversubscription core pinning,
-and the clamp/ceiling logic).
-
 ## How to read the pictures
 
 * **Corner plots** (`corner_ladder_*`) — estimated values and their
@@ -256,13 +214,6 @@ never mix. Pass an explicit `--outdir` to override. A cumulative
 `resultados_config.csv` is also kept in the working directory to compare
 methods across runs.
 
-Two HPC helpers sit on top of the executables (and import none of their
-internals): **`cosmo_hpc_runner.py`** runs the two simulators in parallel on a
-compute node (one model per process, cores partitioned to avoid
-oversubscription, per-task time/RAM profiling, per-model grid clamp) and, when
-a grid sweep was requested, automatically plots how the estimates converge as
-the grid (`nqpp`) refines. See *Parallel HPC orchestration* below.
-
 ### `cosmo_core.py` — shared physics module
 
 Strict physics ↔ sampling separation:
@@ -281,19 +232,32 @@ Strict physics ↔ sampling separation:
 * **`log_prob_batch`** — vectorized batch evaluation of the log-posterior
   (used by the QVMC targets and the vectorized QMCMC kernel); handles the
   diagonal and full-covariance SNe likelihoods alike.
-* **Statistics** — autocorrelation τ (FFT, O(N log N)), ESS (chains and
-  Kish weights), Gelman-Rubin (max over parameters), `fit_statistics`
+* **Statistics** — integrated autocorrelation τ (FFT, O(N log N), with
+  Sokal automatic windowing), ESS (chains via τ_max, and Kish weights),
+  classical Gelman-Rubin **and** rank-normalized split-R̂ (Vehtari et al.
+  2021) with the modern convergence threshold R̂ < 1.01, `fit_statistics`
   (χ², χ²_red, AIC, BIC with Nelder-Mead refinement).
 
-### `cosmo_modular_quantum.py` — simulator with switchable quantumness
+### `cosmo_modular_quantum.py` — simulator with switchable ablation
 
-Five quantum/classical switchable components, grouped by which sampler
-reads them:
+Five quantum/classical switchable **substitution points**, grouped by which
+sampler reads them and tagged by ablation kind — **faithful** (the quantum
+version reproduces the classical rule exactly; a null cell) or
+**algorithmic** (a genuinely different quantum algorithm; a treatment cell):
 
-| Sampler | Components (weights) |
-|---|---|
-| **QMCMC** | proposal (20), acceptance (25) |
-| **QVMC** | sampling (25), training (20), normalization (10) |
+| Sampler | Substitution point | Kind |
+|---|---|---|
+| **QMCMC** | proposal | algorithmic |
+| **QMCMC** | acceptance | faithful |
+| **QVMC** | sampling | faithful |
+| **QVMC** | training | algorithmic |
+| **QVMC** | normalization | faithful |
+
+The **quantumness %** is the *uniform-weight ablation index*: the fraction of
+substitution points switched to quantum, every point counting equally. (An
+earlier version used hand-picked subjective weights; those have no measurable
+definition and are gone. `legacy_weighted_index` still reproduces the old
+numbers for continuity with older CSVs.)
 
 Classical MCMC is a **hand-written Metropolis-Hastings** (not `emcee`):
 owning every line of the transition kernel is required to swap individual
@@ -301,17 +265,19 @@ components classical↔quantum and to guarantee the classical baseline and
 the quantum run share the exact same transition structure, step scale and
 RNG stream. The kernel is fully **vectorized in NumPy** (one
 `log_prob_batch` call scores all chains per step; 6 chains × 2000 steps in
-~0.1 s).
+~0.1 s). The quantum acceptance, a faithful cell, is likewise evaluated for
+all chains in a single Aer job.
 
-#### The canonical quantumness scale: per-method ladders
+#### The canonical scale: per-method ablation ladders
 
-The benchmark sweeps **each sampler along its own monotonic axis**, adding
-one quantum component at a time. Each per-method % counts only that
-sampler's component weights (QMCMC total 45, QVMC total 55):
+The benchmark sweeps **each sampler along its own monotonic axis**, switching
+one substitution point to quantum at a time. Under uniform weighting each
+per-method index is just (#quantum points)/(#points for that sampler), so the
+rungs are even fractions:
 
 ```
-QMCMC ladder:  0%  →  44% (+proposal)  →  100% (+acceptance)
-QVMC  ladder:  0%  →  46% (+sampling)  →  82% (+training)  →  100% (+norm)
+QMCMC ladder:  0%  →  50% (+proposal)  →  100% (+acceptance)
+QVMC  ladder:  0%  →  33% (+sampling)  →  67% (+training)  →  100% (+norm)
 ```
 
 Run modes (CLI `--benchmark`, or the interactive menu):
@@ -319,7 +285,7 @@ Run modes (CLI `--benchmark`, or the interactive menu):
 * **Single configuration** — one preset/custom config + its forced
   classical baseline (overlaid corner/marginal/KL/R̂/trace figures).
 * **Benchmark** (`--benchmark`) — the two per-method ladders. **This is the
-  one canonical quantumness scale.**
+  one canonical scale.**
 * **Quick Test Run** (menu) — the same ladders at small fixed sizes
   (steps 200, iters 40, nqpp 2) for a fast stability check.
 
@@ -332,16 +298,16 @@ its classical baseline), `ladder_summary` (table). Single-config figures:
 steps/iterations. Colours: classical blue, QMCMC red, QVMC orange.
 
 Because **Metropolis** acceptance is kept (so quantum methods can be shown
-to *replicate* the classical ones), some adjacent rungs coincide — by
-design:
+to *replicate* the classical ones), the faithful rungs coincide with their
+classical neighbour — by design:
 
-| Ladder step | What changes | Outcome |
-|---|---|---|
-| QMCMC 0→44 % | proposal C→Q | **changes** (genuine quantum proposal) |
-| QMCMC 44→100 % | acceptance C→Q | **identical** — quantum Metropolis reproduces classical |
-| QVMC 0→46 % | sampling C→Q | ~identical (same trained state, only shot noise) |
-| QVMC 46→82 % | training C→Q | **changes strongly** (param-shift reaches a far lower KL) |
-| QVMC 82→100 % | normalization C→Q | ~identical (faithful renormalization) |
+| Ladder step | What changes | Kind | Outcome |
+|---|---|---|---|
+| QMCMC 0→50 % | proposal C→Q | algorithmic | **changes** (genuine quantum proposal) |
+| QMCMC 50→100 % | acceptance C→Q | faithful | **identical** — quantum Metropolis reproduces classical |
+| QVMC 0→33 % | sampling C→Q | faithful | ~identical (same trained state, only shot noise) |
+| QVMC 33→67 % | training C→Q | algorithmic | **changes strongly** (param-shift reaches a far lower KL) |
+| QVMC 67→100 % | normalization C→Q | faithful | ~identical (faithful renormalization) |
 
 ```bash
 # Interactive (menu)
@@ -370,19 +336,26 @@ a model (VC, …) needs zero changes here.
 * **CGA — Classical Genetic Algorithm**, written from scratch (no DEAP),
   fully NumPy-vectorized: uniform-box init, tournament selection, blend
   (BLX) crossover, Gaussian mutation, elitism.
-* **QGA — Quantum Genetic Algorithm** (Qiskit), with a modular *quantumness*
-  score over three independently switchable operators. Each parameter is
-  encoded in `n_bits` qubits (grid = 2^n_bits per axis):
+* **QGA — Quantum Genetic Algorithm** (Qiskit), with the same
+  uniform-weight *ablation index* over three independently switchable
+  operators (each an **algorithmic** substitution — a genuinely different
+  operator from its classical counterpart). Each parameter is encoded in
+  `n_bits` qubits (grid = 2^n_bits per axis):
 
-  | Operator | Weight | Quantum implementation |
+  | Operator | Kind | Quantum implementation |
   |---|---|---|
-  | `q_init` | 25 | Hadamard layer → superposition → population sampled by measurement |
-  | `q_mutation` | 35 | parametrized RY rotation per gene-qubit (amplitude tied to `mutation_scale`) |
-  | `q_crossover` | 40 | CX entanglement between homologous parent qubits + controlled-RY interference |
+  | `q_init` | algorithmic | Hadamard layer → superposition → population sampled by measurement |
+  | `q_mutation` | algorithmic | parametrized RY rotation per gene-qubit (amplitude tied to `mutation_scale`) |
+  | `q_crossover` | algorithmic | CX entanglement between homologous parent qubits + controlled-RY interference |
 
-  QGA with all operators OFF (0%) reproduces the CGA **bit-for-bit** — the
-  mandatory classical baseline. Circuits are transpiled once at `__init__`
-  and evaluated in batched Aer jobs.
+  The ablation index is (#quantum operators)/3 · 100, so the QGA ladder is
+  `0 → 33 → 67 → 100 %`. QGA with all operators OFF (0%) reproduces the CGA
+  **bit-for-bit** — the mandatory classical baseline (a faithful cell).
+  [A1] All operator circuits are PARAMETRIZED and transpiled **once** at
+  `__init__`; each individual's gene bits enter only through bound rotation
+  angles, so the per-generation hot loop binds parameters on the cached
+  transpiled template and never re-transpiles (the previous version
+  transpiled one fresh circuit per individual per generation).
 
 **Live GUI** (interactive mode only): a two-panel Matplotlib window —
 phase-space scatter (population colored by fitness, converging to the MAP in
@@ -405,9 +378,9 @@ python cosmo_genetic_optimizers.py
 # Batch: classical genetic on ΛCDM
 python cosmo_genetic_optimizers.py --methods cga --model lcdm --generations 80
 
-# Batch: CGA + QGA at 60% quantumness, CC+Pantheon+
+# Batch: CGA + QGA at 67% quantumness, CC+Pantheon+
 python cosmo_genetic_optimizers.py --methods cga qga --dataset CC+Pantheon+ \
-  --population-size 200 --generations 120 --qga-preset 60 --n-bits 6
+  --population-size 200 --generations 120 --qga-preset 67 --n-bits 6
 
 # Custom quantum components via JSON
 python cosmo_genetic_optimizers.py --methods qga --qga-config \
@@ -566,77 +539,6 @@ on an HPC queue:
   covariance) is now reported distinctly from "files missing" — different
   problems, different fixes.
 
-## Parallel HPC orchestration (`cosmo_hpc_runner.py`)
-
-`cosmo_hpc_runner.py` is a standalone orchestrator that runs the two
-simulators concurrently on one compute node. It does **not** modify the
-pipelines — it invokes their existing CLI (`--sweep-all --sweep-models <m>`),
-one model per process.
-
-### Why multiprocessing, not multithreading
-
-For these algorithms process-level parallelism wins:
-
-* **The GIL** serializes all pure-Python work (the MCMC transition kernel, the
-  GA generational loop, circuit construction). Threads give no real speed-up
-  there. Separate processes = separate GILs = real parallelism + crash
-  isolation (one model blowing up does not kill the batch).
-* The natural unit of parallelism is one `(script × model × grid-size)`
-  combination: independent, long-running, embarrassingly parallel.
-* The heavy numerical work (NumPy/BLAS and Qiskit-Aer's C++) is **already**
-  multi-threaded internally via OpenMP.
-
-### The real bottleneck: oversubscription
-
-Both BLAS (OpenBLAS/MKL) and Aer default to grabbing *all* cores. Launch W
-worker processes and each spawns ~all-core thread pools → W×cores threads
-fighting over the cores → cache thrashing, slower than serial. The orchestrator
-prevents this by **partitioning the cores**: with J concurrent processes and T
-threads each, it enforces J·T ≈ cores by exporting, in each child's
-environment (read at NumPy/Qiskit import time, hence a fresh subprocess), the
-thread caps `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`,
-`NUMEXPR_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, `RAYON_NUM_THREADS`. This is
-also why a `multiprocessing.Pool` (fork) is the *wrong* tool: it would inherit
-an already-initialized BLAS pool and the caps would not take effect.
-
-### Per-model grid clamp and the qubit/RAM ceiling
-
-`nqpp` (and the QGA `n_bits`) is **not** limited by core count — it is limited
-by RAM, because the statevector grid costs `2^(nqpp·d)` and the binding model is
-the highest-dimensional one (CPL, d=4). The orchestrator computes a per-task
-**effective qubit ceiling** = `min(--max-qubits, qubits that fit in the
-per-task RAM budget)`, then clamps each model's grid to the largest value ≤ the
-target that fits: `grid_eff = min(target, ceiling // d)`. So a target of
-`nqpp 6` keeps d≤3 models at 6 and lowers CPL to 4 — and even with
-`--max-qubits 24` the RAM term still caps CPL (e.g. to nqpp 5 ≈ 14 GB on a
-125 GB node) so a 224 GB allocation can never slip through. `--strict-qubits`
-disables clamping (oversized combinations are skipped instead).
-
-### What it returns
-
-A background monitor samples each child **process tree's** RSS (psutil), so the
-reported peak RAM includes any descendants — unlike the per-PID
-`cosmo_profiling.py` profiler, which each child still runs via `--profile` to
-produce its own `resource_usage_*.png`. The orchestrator writes a per-task and
-aggregate `master_profile.csv` / `.json` with wall time, peak RSS, effective
-grid value and exit status, and tails the log of any failed task. Concurrent
-appends to the shared cumulative CSV remain safe via the existing `fcntl` lock;
-each task also gets its own `--outdir` subfolder.
-
-### Grid-convergence study (built into the orchestrator)
-
-With `--nqpp-sweep LO HI` the orchestrator emits one samplers task per `nqpp`.
-After all runs finish it **automatically** reads every task's
-`resultados_*.csv` (using the `nqpp` column already present in the schema) and,
-for each model, writes `convergence_<model>.png` — every parameter's estimate
-± σ vs `nqpp`, one line per method, with Planck reference lines — and
-`cost_<model>.png` — wall time and peak RAM vs `nqpp`. Methods that ignore the
-grid (MCMC/QMCMC) show up as flat lines, a built-in consistency check; the
-VI/QVMC family is where you see the discretized posterior converge as the grid
-refines. The plotting is part of `cosmo_hpc_runner.py` itself (no separate
-script): use `--plot-only <master_dir>` to regenerate figures from an existing
-run, or `--no-plots` to skip them.
-
 ## Installation and data
 
 ```bash
@@ -717,18 +619,18 @@ else.
 
 Qiskit and Qiskit-Aer must come from the **same generation**. Mixing them
 raises errors such as `ImportError: cannot import name 'convert_to_target'
-from 'qiskit.providers'` (Aer built against a different Qiskit). A known-good
-CPU combination is:
+from 'qiskit.providers'` (Aer built against a different Qiskit). The
+**verified-good combination** used to produce the reference results (and
+pinned in `requirements.txt`) is the Qiskit 2.x line:
 
 ```bash
-pip install "qiskit==1.0.2" "qiskit-aer==0.14.2" "numpy<2"
+pip install "qiskit==2.4.2" "qiskit-aer==0.17.2" "numpy==1.26.4"
 ```
 
-The current Qiskit 2.x line also works as long as Aer matches it
-(`qiskit==2.4.x` with `qiskit-aer==0.17.x`). Do **not** install
-`qiskit-aer-gpu` on a machine without a CUDA GPU: it pins `qiskit>=1.1.0` and
-will fight the rest of the stack. The GPU build is only for the cluster /
-local RTX (see below).
+The older 1.x line also works if Aer matches it (`qiskit==1.0.2` with
+`qiskit-aer==0.14.2`, `numpy<2`). `numpy<2` is required either way (Aer and
+cuQuantum need it). See `requirements.txt` for the full pinned set and
+`requirements-gpu.txt` for the CUDA extras.
 
 ### GPU acceleration and resource profiling
 
@@ -741,10 +643,20 @@ GPU VRAM, CPU/GPU utilization, wall time and GPU-hours, and save a
 # CPU run with profiling
 python cosmo_modular_quantum.py --model lcdm --preset 45 --profile
 
-# On a CUDA node: swap in the GPU build of Aer first, then add --gpu
-pip uninstall qiskit-aer && pip install qiskit-aer-gpu
+# On a CUDA node: install the cuQuantum extras, then add --gpu
+pip install -r requirements.txt -r requirements-gpu.txt
 python cosmo_modular_quantum.py --benchmark --model cpl --gpu --profile
 ```
+
+**GPU backend note.** On the development machine the Aer GPU statevector path
+is provided by NVIDIA **cuQuantum / cuStateVec** (`cuquantum-cu12`,
+`custatevec-cu12`), against which `qiskit-aer==0.17.2` is built — **not** by a
+separate `qiskit-aer-gpu` wheel. `make_simulator` requests cuStateVec when
+available and is otherwise backend-agnostic: `AerSimulator().
+available_devices()` reports `'GPU'` whenever a usable CUDA device is present,
+so `--gpu` engages it and `--profile`'s NVML/`nvidia-smi` sampling records the
+VRAM and GPU-hours. On CPU-only nodes (e.g. Nicte-Ha) omit the GPU extras and
+everything runs on CPU automatically.
 
 The device is auto-detected via `AerSimulator().available_devices()`; no
 source change is needed. The `cosmo_profiling.py` module is standalone and
@@ -784,7 +696,36 @@ ladder + classical baseline; the QPU dispatches it quantum-only.
 
 * Sarracino et al. (2025) — QMCMC proposal circuit.
 * Goliath et al. (2001) — analytic M_abs marginalization.
+* Brout et al. (2022) — Pantheon+ data and covariance.
+* Li & Shafieloo (2019, 2020) — PEDE / GEDE dark-energy models.
 * Planck Collaboration (2018) — Gaussian priors (Ωm, H0).
 * Spall (1998) — SPSA.
-* Gelman & Rubin (1992) — R̂ diagnostic.
-* Foreman-Mackey (2016) — corner.py.
+* Gelman & Rubin (1992) — original R̂ diagnostic.
+* Vehtari, Gelman, Simpson, Carpenter & Bürkner (2021) — rank-normalized
+  split-R̂ and the 1.01 convergence threshold.
+* Sokal (1996) — integrated autocorrelation time and automatic windowing.
+* Foreman-Mackey et al. (2013, 2016) — emcee autocorrelation, corner.py.
+
+## Reproducibility
+
+This project follows the modern reproducibility checklist for computational
+physics:
+
+* **Pinned environment.** `requirements.txt` is pinned to the verified
+  working environment (Qiskit 2.4.2 / Aer 0.17.2 / numpy 1.26.4); CUDA extras
+  live in `requirements-gpu.txt`.
+* **Tests + CI.** `tests/` holds a pure-NumPy correctness floor (physics,
+  statistics, the ablation framework, the QPU helpers) that runs without
+  Qiskit; `pytest` runs it, and `.github/workflows/tests.yml` runs it on every
+  push. Faithful (null) ablation cells are encoded as falsifiable tests.
+* **Data provenance.** `data_manifest.py` records SHA256 checksums and the
+  source of every dataset; run `python data_manifest.py --generate` after
+  placing the data files, and `--verify` to check integrity. The data files
+  themselves are not redistributed — download them from the official releases
+  listed in the manifest.
+* **License & citation.** `LICENSE` (MIT) and `CITATION.cff` (add your ORCID
+  and the archived DOI once you mint a release on Zenodo).
+* **Determinism.** Runs are seeded (`--seed`, default 42). Note that
+  float-reduction order under multi-threaded BLAS can make bit-for-bit
+  identity across machines fragile; the "QGA(0%) == CGA" claim is verified at
+  fixed thread count and is otherwise statistically (not bitwise) identical.
