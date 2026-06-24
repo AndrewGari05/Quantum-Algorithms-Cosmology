@@ -414,6 +414,190 @@ $\bigO(b\cdot 2^{n_q})$ time, $\bigO(2^{n_q})$ space; amortized per step it is
 one queue pop, $\bigO(1)$.
 
 % =============================================================================
+\section{MCMC and Variational Inference: two ways to know a posterior}
+\label{sec:mcmc_vi}
+% =============================================================================
+
+Both samplers attack the same object --- the posterior $P(\theta\mid
+\mathrm{data})$ --- but in fundamentally different ways. Understanding why they
+differ is the key to reading the results, and to understanding why some quantum
+substitutions change the answer and others cannot.
+
+\subsection{MCMC: approximate by \emph{sampling}}
+
+Markov Chain Monte Carlo does not try to write down $P$. It builds a random
+walk through parameter space whose \emph{visited points}, after equilibration,
+are distributed according to $P$. The Metropolis--Hastings recipe: from the
+current $\theta_t$, draw a proposal $\theta'\sim q(\cdot\mid\theta_t)$, and
+accept it with probability
+\begin{equation}
+A(\theta_t\!\to\!\theta') = \min\!\Big(1,\;
+\frac{P(\theta')\,q(\theta_t\mid\theta')}{P(\theta_t)\,q(\theta'\mid\theta_t)}\Big).
+\label{eq:mh}
+\end{equation}
+For a symmetric proposal ($q(\theta'\mid\theta_t)=q(\theta_t\mid\theta')$, e.g.
+a Gaussian step) the ratio collapses to $A=\min(1,P(\theta')/P(\theta_t))=
+\min(1,e^{\Delta})$ with $\Delta=\log P(\theta')-\log P(\theta_t)$. Accepted
+and rejected steps both produce a sample (on rejection $\theta_{t+1}=\theta_t$).
+
+\begin{proposition}[Why it works]
+The Metropolis rule satisfies \emph{detailed balance},
+$P(\theta)\,T(\theta\!\to\!\theta')=P(\theta')\,T(\theta'\!\to\!\theta)$, where
+$T$ is the full transition kernel (proposal $\times$ acceptance). Detailed
+balance makes $P$ the stationary distribution of the chain, so for large $t$
+the samples $\{\theta_t\}$ are draws from $P$ --- regardless of the proposal
+$q$, which affects only the \emph{efficiency} of mixing, not the
+\emph{destination}.
+\end{proposition}
+
+The two sub-algorithms of MCMC are therefore:
+\begin{itemize}[nosep]
+\item \textbf{proposal} --- where to step ($q$); changes how fast you explore,
+not where you end up;
+\item \textbf{acceptance} --- whether to keep the step (Eq.~\ref{eq:mh});
+enforces detailed balance and fixes the stationary distribution.
+\end{itemize}
+The output is a set of correlated samples; means, credible intervals and the
+corner plot are computed by histogramming them. Diagnostics ($\tau$, ESS,
+split-$\Rhat$, \S\ref{sec:stats}) ask ``has the walk equilibrated and how many
+\emph{independent} samples do I effectively have?''
+
+\subsection{Variational Inference: approximate by \emph{optimizing}}
+
+VI takes the opposite stance. Instead of sampling, it picks a family of simple
+distributions $Q_\varphi(\theta)$ and \emph{tunes} $\varphi$ until $Q_\varphi$
+is as close as possible to $P$, measured by the Kullback--Leibler divergence
+\begin{equation}
+\KL(Q_\varphi\,\|\,P) = \int Q_\varphi(\theta)\,
+\log\frac{Q_\varphi(\theta)}{P(\theta\mid\mathrm{data})}\,d\theta
+= \mathbb{E}_{Q_\varphi}\!\big[\log Q_\varphi - \log P\big].
+\label{eq:kl}
+\end{equation}
+Inference becomes \emph{optimization}: $\varphi^\star=\arg\min_\varphi
+\KL(Q_\varphi\|P)$, solved by gradient descent (classical VI here uses a grid
+representation of $Q_\varphi$ and COBYLA/SGD). Once trained, $Q_{\varphi^\star}$
+\emph{is} the approximate posterior --- you have a closed object you can sample
+or read moments from directly, with no autocorrelation and no burn-in.
+
+In this project $Q_\varphi$ lives on the discrete $2^{\mathrm{nqpp}}$ grid per
+parameter (\S\ref{sec:bridge}), so the two sub-algorithms of VI are:
+\begin{itemize}[nosep]
+\item \textbf{training} --- minimize Eq.~\ref{eq:kl} over $\varphi$; this is
+where the approximation is actually fitted;
+\item \textbf{sampling} --- once trained, draw from $Q_{\varphi^\star}$ to
+report means and a corner plot;
+\item \textbf{normalization} --- ensure $Q_\varphi$ sums to one over the
+(masked) grid support, so the KL and the reported distribution are proper.
+\end{itemize}
+
+\subsection{Why they are fundamentally different}
+
+\begin{table}[h]
+\centering\footnotesize
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & \textbf{MCMC} & \textbf{Variational Inference}\\
+\midrule
+Strategy & sample the posterior & optimize a proxy to the posterior\\
+Output & correlated draws & a fitted closed-form $Q_{\varphi^\star}$\\
+Exactness & asymptotically exact (given mixing) & only as good as the family $Q_\varphi$\\
+Failure mode & slow mixing / non-convergence & too-rigid family, biased $Q$\\
+Cost driver & \#steps $\times$ likelihood & \#iters $\times$ grid $2^{n\cdot\mathrm{nqpp}}$\\
+Diagnostic & $\Rhat$, ESS, $\tau$ & KL curve vs iteration\\
+\bottomrule
+\end{tabular}
+\caption{MCMC is unbiased but can be slow to converge; VI is fast and gives a
+closed object but is only as good as the chosen family $Q_\varphi$ can
+represent. They are complementary, not interchangeable --- which is why the
+project runs both and compares them against the \emph{same} classical
+baselines.}
+\end{table}
+
+A blunt way to put it: MCMC is asymptotically exact but you never quite know
+when you have arrived; VI always ``arrives'' (the optimizer converges) but to a
+point that is only as correct as your family $Q_\varphi$ allows. The KL floor
+you see in the QVMC training curve (it bottoms out at some $\KL>0$) is exactly
+this family-limitation: even a perfectly trained $Q_\varphi$ on a coarse grid
+cannot match $P$ to zero KL.
+
+\subsection{The quantum counterparts, sub-algorithm by sub-algorithm}
+
+Each classical sub-algorithm has a quantum re-encoding. The crucial point ---
+and the heart of the ablation framework (\S\ref{sec:ablation}) --- is that some
+re-encodings compute the \emph{identical} mathematical object (\faithful), while
+others are genuinely different algorithms (\algorithmic).
+
+\begin{center}
+\footnotesize
+\begin{longtable}{@{}p{2.1cm}p{4.3cm}p{4.6cm}c@{}}
+\toprule
+\textbf{Sub-alg.} & \textbf{Classical} & \textbf{Quantum} & \textbf{Kind}\\
+\midrule
+\endhead
+MCMC proposal & Gaussian step $\theta'=\theta+\mathcal N(0,\sigma)$ &
+Statevector circuit (Sarracino): random-angle circuit whose amplitudes define
+the displacement, rescaled to unit std & \algorithmic\\[4pt]
+MCMC acceptance & $A=\min(1,e^\Delta)$ on the CPU &
+$R_Y(2\arccos\!\sqrt{A})\ket0$, read $P(\ket0)=A$ --- the \emph{same} number &
+\faithful\\[4pt]
+VI training & gradient descent on $\KL$ (COBYLA/SGD) &
+parameter-shift gradients of a variational circuit (or SPSA on hardware) ---
+a different optimizer reaching a different optimum & \algorithmic\\[4pt]
+VI sampling & draw indices from the trained grid pmf &
+measure shots of the trained state $|\psi(\varphi^\star)|^2$ --- same
+distribution, finite-shot noise & \faithful\\[4pt]
+VI normalization & divide by the sum over support &
+exact renormalization over the masked support --- identical & \faithful\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{Why QMCMC 50\% and 100\% give the same corner plot}
+\label{ssec:why5050}
+
+This is the question the corner plots provoke, and it has a clean answer.
+
+Recall the QMCMC ladder switches its two sub-algorithms to quantum one at a
+time:
+\[
+\underbrace{0\%}_{\text{classical}}
+\;\to\;
+\underbrace{50\%}_{\text{+ quantum \emph{proposal}}}
+\;\to\;
+\underbrace{100\%}_{\text{+ quantum \emph{acceptance}}}.
+\]
+The step from 50\% to 100\% switches \textbf{only the acceptance} from the CPU
+formula $\min(1,e^\Delta)$ to its quantum encoding $R_Y(2\arccos\sqrt A)\ket0$.
+But by the proposition of \S\ref{ssec:accept}, that circuit returns
+\emph{exactly} $A=\min(1,e^\Delta)$ --- the same number, to machine precision.
+The acceptance is a \faithful{} cell.
+
+Now recall \emph{why} the acceptance cannot change the answer even in
+principle: by detailed balance, the acceptance rule \emph{defines the
+stationary distribution}, and both 50\% and 100\% use the \emph{same}
+acceptance rule (Metropolis), computed two different ways that agree bit-for-
+bit. With the same proposal, the same rule, and the same random-number stream,
+the two chains take \emph{identical} steps. Their samples are identical, so
+their corner plots, means and credible intervals coincide exactly.
+
+Contrast the $0\%\!\to\!50\%$ step, which switches the \emph{proposal}
+(\algorithmic): the quantum proposal is a genuinely different $q$, so the chain
+explores differently and the corner plot shifts slightly (same destination $P$,
+different path and mixing). And contrast the QVMC ladder, where the
+$33\%\!\to\!67\%$ step switches \emph{training} (\algorithmic) and the KL drops
+sharply --- there the quantum sub-algorithm really is a different optimizer.
+
+\begin{remark}[The take-away]
+A coincident corner plot between two adjacent rungs is not a bug and not a
+boring null result: it is a \emph{measurement}. It confirms that the quantum
+re-encoding of that sub-algorithm is faithful --- it reproduces the classical
+computation exactly. That confirmation is the whole point of the project's
+``fidelity, not advantage'' thesis. The rungs that \emph{should} coincide do,
+and the rungs that \emph{should} differ do.
+\end{remark}
+
+
+% =============================================================================
 \section{The samplers}
 % =============================================================================
 

@@ -49,6 +49,16 @@ OMEGA_R0 = 9.4e-5            # radiation density today (photons only, fixed)
 H0_MU, H0_SIG = 67.66, 0.42      # Gaussian prior on H0  (Planck 2018, TT,TE,EE+lowE+lensing)
 OM_MU, OM_SIG = 0.3111, 0.0056   # Gaussian prior on Ωm  (Planck 2018)
 
+# --- Literature reference values for plot comparison (the Hubble tension) ----
+# Used ONLY to draw reference lines/bands on figures so one can see where each
+# algorithm's posterior lands relative to the two anchor measurements. These
+# are NOT priors and never enter any likelihood.
+# SH0ES/Riess is a LOCAL distance-ladder H0 measurement; it does NOT provide an
+# independent Omega_m. Hence H0 has TWO references (Planck vs SH0ES — the
+# tension) while Omega_m has only Planck. Do not invent a "Riess Omega_m".
+REF_PLANCK = {'label': 'Planck 2018', 'H0': (67.66, 0.42), 'Om': (0.3111, 0.0056)}
+REF_SHOES  = {'label': 'SH0ES (Riess 2022)', 'H0': (73.04, 1.04), 'Om': None}
+
 RNG = np.random.default_rng(42)
 
 

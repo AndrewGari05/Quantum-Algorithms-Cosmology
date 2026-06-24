@@ -124,6 +124,61 @@ C_CLASSICAL2 = '#17becf'  # teal   — Classical VI when shown ALONGSIDE
 C_QUANTUM   = '#d62728'   # red    — QMCMC (quantum MCMC family)
 C_QUANTUM2  = '#ff7f0e'   # orange — QVMC (quantum variational family)
 
+# --- literature reference styling (distinct from the data curves) ------------
+C_PLANCK = '#2ca02c'      # green  — Planck 2018 reference
+C_SHOES  = '#9467bd'      # purple — SH0ES / Riess 2022 reference
+LS_PLANCK = (0, (6, 2))   # long dash (Line2D form, for axvline/axhline)
+LS_SHOES  = (0, (1, 1))   # dotted
+
+
+def _ref_specs(param_name: str):
+    """[(label, value, sigma, color, ls)] refs for a parameter. H0: Planck+SH0ES;
+    Om: Planck only; others: none."""
+    out = []
+    key = 'H0' if param_name.upper() in ('H0', 'H_0') else (
+          'Om' if param_name.lower() in ('om', 'omega_m', 'omegam') else None)
+    if key is None:
+        return out
+    for ref, col, ls in ((core.REF_PLANCK, C_PLANCK, LS_PLANCK),
+                         (core.REF_SHOES, C_SHOES, LS_SHOES)):
+        v = ref.get(key)
+        if v is not None:
+            out.append((ref['label'], v[0], v[1], col, ls))
+    return out
+
+
+def _draw_ref_lines(ax, param_name: str, axis: str = 'x', band: bool = True):
+    """Draw Planck/SH0ES reference line(s) (+/-1 sigma band) for a parameter."""
+    for label, val, sig, col, ls in _ref_specs(param_name):
+        if axis == 'x':
+            ax.axvline(val, color=col, ls=ls, lw=1.8, label=label, zorder=5)
+            if band and sig:
+                ax.axvspan(val - sig, val + sig, color=col, alpha=0.12, zorder=0)
+        else:
+            ax.axhline(val, color=col, ls=ls, lw=1.8, label=label, zorder=5)
+            if band and sig:
+                ax.axhspan(val - sig, val + sig, color=col, alpha=0.12, zorder=0)
+
+
+def _overplot_refs_corner(fig, model):
+    """Overplot Planck (green long-dash) and SH0ES (purple dotted) on a corner
+    fig; SH0ES skips Om via None. Returns legend handles."""
+    handles = []
+    for ref, col, ls in ((core.REF_PLANCK, C_PLANCK, 'dashed'),
+                         (core.REF_SHOES, C_SHOES, 'dotted')):
+        vec, any_val = [], False
+        for pname in model.param_names:
+            key = 'H0' if pname.upper() in ('H0', 'H_0') else (
+                  'Om' if pname.lower() in ('om','omega_m','omegam') else None)
+            v = ref.get(key) if key else None
+            vec.append(v[0] if v is not None else None)
+            any_val = any_val or (v is not None)
+        if any_val:
+            corner.overplot_lines(fig, vec, color=col, ls=ls, lw=1.8)
+            handles.append(Line2D([0], [0], color=col, ls=ls, lw=1.8,
+                                  label=ref['label']))
+    return handles
+
 
 def _save_fig(fig, png_path, close=True):
     """Save a figure as PNG+PDF, creating the output directory if needed.
@@ -1314,21 +1369,29 @@ def plot_corner_overlay(flat_c: np.ndarray, flat_q: np.ndarray, model,
     # 'color' key on the first call), so sharing one dict between both
     # calls would silently draw BOTH diagonal histograms in the classical
     # color. A fresh kwargs dict per call keeps each overlay's color.
-    def _kw():
+    def _kw(ls='solid'):
         return dict(labels=model.param_latex, bins=35, range=rng_,
                     plot_datapoints=False, plot_density=False, smooth=1.0,
                     levels=(0.393, 0.865),    # 1σ and 2σ for 2D Gaussians
-                    hist_kwargs=dict(density=True, lw=2.0))
+                    contour_kwargs=dict(linestyles=ls, linewidths=2.0),
+                    hist_kwargs=dict(density=True, lw=2.0, ls=ls))
 
+    # Classical solid, quantum dashed: when a FAITHFUL quantum rung reproduces
+    # the classical posterior the contours coincide, so dashing the quantum one
+    # keeps it visible on top of the classical instead of hidden underneath.
     fig = corner.corner(flat_c, color=C_CLASSICAL, weights=weights_c,
-                        truths=model.fiducial, truth_color='k', **_kw())
-    corner.corner(flat_q, color=q_color, weights=weights_q, fig=fig, **_kw())
+                        truths=model.fiducial, truth_color='k', **_kw('solid'))
+    corner.corner(flat_q, color=q_color, weights=weights_q, fig=fig,
+                  **_kw('dashed'))
+    ref_handles = _overplot_refs_corner(fig, model)
 
     handles = [Line2D([0], [0], color=C_CLASSICAL, lw=2.6, label=labels[0]),
-               Line2D([0], [0], color=q_color, lw=2.6, label=labels[1]),
+               Line2D([0], [0], color=q_color, lw=2.6, ls='dashed',
+                      label=labels[1]),
                Line2D([0], [0], color='k', ls='--', lw=1.4,
-                      label='Fiducial (Planck)')]
-    fig.legend(handles=handles, loc='upper right', fontsize=11,
+                      label='Fiducial (Planck prior)')]
+    handles.extend(ref_handles)
+    fig.legend(handles=handles, loc='upper right', fontsize=10,
                bbox_to_anchor=(0.98, 0.92))
     fig.suptitle(title, fontsize=13, fontweight='bold', y=1.02)
 
@@ -1366,24 +1429,33 @@ def plot_corner_multi(datasets, colors, labels, model, outdir: str, tag: str,
         rng_.append((lo - pad, hi + pad))
 
     # corner.py mutates hist_kwargs in place (writes 'color'); every call
-    # needs a FRESH dict or later histograms inherit the first color.
-    def _kw():
+    # needs a FRESH dict. Distinct NAMED linestyles per rung so near-identical
+    # rungs (a faithful quantum rung on top of its classical neighbour) stay
+    # distinguishable; contour collections require named styles (not tuples).
+    ls_cycle = ['solid', 'dashed', 'dashdot', 'dotted', (0, (3, 1, 1, 1))]
+
+    def _kw(ls):
         return dict(labels=model.param_latex, bins=35, range=rng_,
                     plot_datapoints=False, plot_density=False, smooth=1.0,
                     levels=(0.393, 0.865),
-                    hist_kwargs=dict(density=True, lw=1.8))
+                    contour_kwargs=dict(linestyles=ls, linewidths=1.9),
+                    hist_kwargs=dict(density=True, lw=1.8, ls=ls))
 
     fig = None
-    for data, col, w in zip(datasets, colors, weights_list):
-        fig = corner.corner(data, color=col, weights=w, fig=fig, **_kw())
+    for k, (data, col, w) in enumerate(zip(datasets, colors, weights_list)):
+        fig = corner.corner(data, color=col, weights=w, fig=fig,
+                            **_kw(ls_cycle[k % len(ls_cycle)]))
     corner.overplot_lines(fig, model.fiducial, color='k', ls='--', lw=1.2)
+    ref_handles = _overplot_refs_corner(fig, model)
 
-    handles = [Line2D([0], [0], color=c, lw=2.4, label=l)
-               for c, l in zip(colors, labels)]
+    handles = [Line2D([0], [0], color=c, lw=2.4,
+                      ls=ls_cycle[k % len(ls_cycle)], label=l)
+               for k, (c, l) in enumerate(zip(colors, labels))]
     handles.append(Line2D([0], [0], color='k', ls='--', lw=1.2,
-                          label='Fiducial (Planck)'))
-    fig.legend(handles=handles, loc='upper right', fontsize=10,
-               bbox_to_anchor=(0.99, 0.93))
+                          label='Fiducial (Planck prior)'))
+    handles.extend(ref_handles)
+    fig.legend(handles=handles, loc='upper right', fontsize=9,
+               bbox_to_anchor=(0.99, 0.94))
     fig.suptitle(title, fontsize=13, fontweight='bold', y=1.02)
     f = os.path.join(outdir, f'corner_{tag}.png')
     _save_fig(fig, f)
@@ -1419,6 +1491,7 @@ def plot_marginals_overlay(res_q: dict, res_c: dict, post: Posterior,
                 color=C_QUANTUM, alpha=0.5,
                 label=f'QMCMC ({qpct:.0f}%)')
         ax.axvline(model.fiducial[p], color='k', ls='--', lw=1.3)
+        _draw_ref_lines(ax, model.param_names[p], axis='x', band=False)
         ax.set_xlabel(model.param_latex[p])
         if p == 0:
             ax.set_ylabel('MCMC family\ndensity')
@@ -1436,6 +1509,7 @@ def plot_marginals_overlay(res_q: dict, res_c: dict, post: Posterior,
                 color=C_QUANTUM2, alpha=0.5,
                 label=f'QVMC ({qpct:.0f}%)')
         ax.axvline(model.fiducial[p], color='k', ls='--', lw=1.3)
+        _draw_ref_lines(ax, model.param_names[p], axis='x', band=False)
         ax.set_xlabel(model.param_latex[p])
         if p == 0:
             ax.set_ylabel('Variational family\ndensity')
@@ -1822,6 +1896,8 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
                f'{pname} vs quantumness',
                err=(lambda r, i=i: r['std'][i]),
                fid=model.fiducial[i])
+        _draw_ref_lines(flat_axes[i], pname, axis='y', band=True)
+        flat_axes[i].legend(fontsize=7)
 
     # Fixed diagnostic panels after the parameter panels.
     j = npar
