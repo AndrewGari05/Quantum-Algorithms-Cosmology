@@ -465,7 +465,8 @@ class QuantumProposalEngine:
         batch: Size of the pre-generated block.
     """
 
-    def __init__(self, n_phys: int, n_layers: int = 3, batch: int = 256):
+    def __init__(self, n_phys: int, n_layers: int = 3, batch: int = 256,
+                 n_calib: int = 1024):
         self.d = n_phys
         self.n_qubits = max(2, n_phys)
         self.qc = build_proposal_circuit(self.n_qubits, n_layers)
@@ -475,6 +476,37 @@ class QuantumProposalEngine:
         self._qc_t = transpile(self.qc, self.sim)
         self.batch = batch
         self._queue: List[np.ndarray] = []
+        # [M4 FIX] Calibrate the normalization ONCE, at construction, from a
+        # dedicated calibration block, and then apply the FIXED constants to
+        # every production block. The previous code normalized each block by
+        # its OWN empirical mean/std, which (a) made the displacements within
+        # a block dependent (they summed to ~0, correlation −1/(B−1)) and
+        # (b) let the effective proposal scale fluctuate ~4% per 256-block —
+        # both formally at odds with the i.i.d. symmetric-proposal assumption
+        # of Metropolis-Hastings. With fixed constants the proposals are
+        # i.i.d. draws from one distribution, still zero-mean and unit-std.
+        raw = self._raw_block(max(n_calib, batch))
+        self._mu = raw.mean(axis=0)
+        sigma = raw.std(axis=0)
+        sigma[sigma < 1e-8] = 1.0
+        self._sigma = sigma
+
+    def _raw_block(self, n: int) -> np.ndarray:
+        """Generate `n` RAW (uncalibrated) displacements in a single job."""
+        circs = []
+        for _ in range(n):
+            phi = RNG.uniform(0, 2 * np.pi, self.n_phi)
+            b = self._qc_t.assign_parameters(phi)
+            b.save_statevector()
+            circs.append(b)
+        res = self.sim.run(circs).result()
+        raw = np.empty((n, self.d))
+        for k in range(n):
+            sv = np.asarray(res.get_statevector(k))
+            re, im = np.real(sv), np.imag(sv)
+            f = np.where(im >= 0, 1.0, -1.0)
+            raw[k] = re[:self.d] * f[:self.d]
+        return raw
 
     def _refill(self):
         """Fill the queue with `batch` displacements in a single job.
@@ -483,33 +515,19 @@ class QuantumProposalEngine:
         so symmetric-proposal Metropolis stays valid) but its per-dimension
         std is ~0.35, i.e. ~3× SMALLER than the classical N(0,1) proposal
         the step scale was tuned for. That mismatch pushed the acceptance
-        rate up to ~0.80 (too high → tiny moves → slow mixing). We now
-        normalize each block to UNIT std per dimension, making the quantum
-        displacement a drop-in replacement for the classical Gaussian and
-        bringing the acceptance back into the healthy 0.2–0.5 band.
+        rate up to ~0.80 (too high → tiny moves → slow mixing). Blocks are
+        therefore standardized to zero mean / UNIT std per dimension — using
+        the FIXED calibration constants estimated once at construction
+        ([M4], see __init__) — making the quantum displacement a drop-in
+        replacement for the classical Gaussian (acceptance back in the
+        healthy 0.2–0.5 band) while keeping the draws i.i.d.
         """
-        circs = []
-        for _ in range(self.batch):
-            phi = RNG.uniform(0, 2 * np.pi, self.n_phi)
-            b = self._qc_t.assign_parameters(phi)
-            b.save_statevector()
-            circs.append(b)
-        res = self.sim.run(circs).result()
-        raw = np.empty((self.batch, self.d))
-        for k in range(self.batch):
-            sv = np.asarray(res.get_statevector(k))
-            re, im = np.real(sv), np.imag(sv)
-            f = np.where(im >= 0, 1.0, -1.0)
-            raw[k] = re[:self.d] * f[:self.d]
-        # Normalize to unit std per dimension (zero-mean is preserved).
-        std = raw.std(axis=0)
-        std[std < 1e-8] = 1.0
-        raw = (raw - raw.mean(axis=0)) / std
+        raw = (self._raw_block(self.batch) - self._mu) / self._sigma
         for k in range(self.batch):
             self._queue.append(raw[k].copy())
 
     def next(self) -> np.ndarray:
-        """Next unit quantum displacement ∈ [-1, 1]^d."""
+        """Next quantum displacement (calibrated to zero mean, unit std)."""
         if not self._queue:
             self._refill()
         return self._queue.pop()
@@ -528,8 +546,13 @@ def hadamard_accept_log(lp_cur: float, lp_prop: float) -> float:
     state amplitude rather than compared to a uniform in NumPy. This is
     deliberate: the goal is to show the quantum method *replicates* the
     classical one, so the quantum acceptance must reproduce the classical
-    result exactly (given the same proposal and random stream, the QMCMC
-    chain is then identical with the acceptance switch on or off). In other
+    result (given the same proposal and random stream, the QMCMC chain is
+    then identical with the acceptance switch on or off — [M5] up to two
+    negligible edge effects: the A ∈ [1e-12, 1] clip means moves with
+    Δ ≲ −27.6 retain a ~1e-12 acceptance instead of e^Δ, and the
+    arccos/cos² round-trip carries ~1e-16 float error; both are far below
+    any statistical resolution but preclude a literal bit-for-bit identity
+    claim in the extreme-rejection tail). In other
     words, the `acceptance` component is a faithful quantum reproduction,
     not a different sampler — that equivalence IS the result.
 
@@ -636,7 +659,8 @@ class QMCMCModular:
         n_burn: Burn-in steps (discarded).
         n_layers: Layers of the proposal circuit.
         rhat_every: How often (in steps) to record R̂ (convergence curves).
-        stop_on_convergence: Stop if R̂−1 < 0.05.
+        stop_on_convergence: Stop when rank-normalized split-R-hat falls
+            below cosmo_core.RHAT_THRESHOLD (1.01, Vehtari 2021). [H1]
     """
 
     def __init__(self, post: Posterior, config: dict, n_chains: int = 6,
@@ -772,9 +796,15 @@ class QMCMCModular:
             chains[:, step] = theta
 
             if (step + 1) % self.rhat_every == 0 and step > 50:
-                rhat = gelman_rubin_max(chains[:, :step + 1, :])
+                # [H1 FIX] Convergence is now tracked with the project's own
+                # standard: rank-normalized split-R-hat (Vehtari 2021) against
+                # RHAT_THRESHOLD = 1.01 from cosmo_core — previously this loop
+                # used the legacy whole-chain Gelman-Rubin at an effective
+                # 1.05, contradicting the documented S2/S4 criterion.
+                rhat = core.split_rhat(chains[:, :step + 1, :])
                 rhat_hist.append((step + 1, rhat))
-                if self.stop_on_convergence and rhat - 1 < 0.05:
+                if (self.stop_on_convergence and np.isfinite(rhat)
+                        and rhat < core.RHAT_THRESHOLD):
                     converged, n_done = True, step + 1
                     break
 
@@ -961,9 +991,24 @@ class QVMCModular:
 
         [OPT] Parameter-shift needs 2·n_φ evaluations per iteration;
         grouping them into one call removes the per-job Aer overhead
-        (~84 jobs/iter → 1 job/iter). The KL is renormalized over the
-        support P > eps, guaranteeing KL ≥ 0 (fix from the previous
-        version).
+        (~84 jobs/iter → 1 job/iter).
+
+        [H3 FIX — leakage-aware KL, unified with the QPU pipeline] The
+        previous definition masked the sum to the target support (P > eps)
+        and RENORMALIZED Q over the mask, which made probability mass that
+        Q leaks OUTSIDE the target support invisible to both the reported
+        KL and the training objective (a Q with 90% leaked mass reported
+        KL ~ 0). The KL is now computed against the SMOOTHED target
+        P_s = (P + eps)/Σ(P + eps) over the FULL support:
+
+            KL = Σ_i Q_i · log(max(Q_i, eps) / P_s,i)   (Σ Q_i = 1 exactly,
+                                                         it is a statevector)
+
+        Leaked mass now contributes ~ q·log(q/eps) > 0, so the objective
+        penalizes it, KL ≥ 0 up to the eps clip, and — crucially — this is
+        the SAME functional the hardware pipeline uses
+        (`qpu_cosmo_samplers.kl_from_counts`), making simulator and QPU KL
+        values directly comparable (goal B3, definition level).
         """
         phis = np.atleast_2d(phis)
         circs = []
@@ -972,15 +1017,14 @@ class QVMCModular:
             b.save_statevector()
             circs.append(b)
         res = self.sim.run(circs).result()
-        mask = P_target > eps
-        Pm = np.clip(P_target[mask], eps, None)
-        Pm = Pm / Pm.sum()
+        P_s = (P_target + eps)
+        P_s = P_s / P_s.sum()
+        log_Ps = np.log(P_s)
         kls, Qs = [], []
         for k in range(len(phis)):
             Q = np.abs(np.asarray(res.get_statevector(k)))**2
-            Qm = np.clip(Q[mask], eps, None)
-            Qm = Qm / Qm.sum()
-            kls.append(float(np.sum(Qm * np.log(Qm / Pm))))
+            kls.append(float(np.sum(Q * (np.log(np.clip(Q, eps, None))
+                                         - log_Ps))))
             if return_q:
                 Qs.append(Q)
         if return_q:
@@ -1050,15 +1094,39 @@ class QVMCModular:
                 if kl0 < best_kl:                       # (3) track the best
                     best_kl, best_phi = kl0, phi.copy()
                 _sanity('QVMC.train', 'quantum',
-                        'parameter-shift gradient + lr-decay SGD '
-                        '(Aer statevector)')
+                        'EXACT parameter-shift gradient (shift on the '
+                        'probabilities + chain rule) + lr-decay SGD')
                 # [OPT] 2*n_phi shifted circuits in a SINGLE job
                 shifts = np.repeat(phi[None, :], 2 * n_p, axis=0)
                 for j in range(n_p):
                     shifts[2 * j, j] += np.pi / 2
                     shifts[2 * j + 1, j] -= np.pi / 2
-                kl_s = self._kl_batch(shifts, qc_t, P_target)
-                grad = (kl_s[0::2] - kl_s[1::2]) / 2.0
+                # [H5 FIX — exact gradient at identical circuit cost] The old
+                # code applied the ±π/2 rule to the KL ITSELF:
+                #     grad_j = [KL(φ+π/2·e_j) − KL(φ−π/2·e_j)] / 2 ,
+                # which is exact only for costs that are single-frequency
+                # trigonometric in each angle. KL is NONLINEAR in the state
+                # (the Q·log Q term has higher harmonics), so that was a
+                # biased macroscopic central difference, not parameter-shift.
+                # Each PROBABILITY, however, IS an observable expectation,
+                # Q_i(φ) = <ψ(φ)|Π_i|ψ(φ)>, generated by RY/RZ gates (eigen-
+                # values ±1/2), so the shift rule is EXACT on Q_i:
+                #     ∂Q_i/∂φ_j = [Q_i(φ+π/2·e_j) − Q_i(φ−π/2·e_j)] / 2 .
+                # Chain rule on KL = Σ_i Q_i·log(max(Q_i,eps)/P_s,i):
+                #     ∂KL/∂φ_j = Σ_i [log(max(Q_i,eps)/P_s,i) + 1]·∂Q_i/∂φ_j
+                # and the +1 cancels exactly because Σ_i ∂Q_i/∂φ_j = 0
+                # (Σ Q_i = 1 identically). Same 2·n_φ circuits per iteration,
+                # now yielding the exact gradient (verified against small-h
+                # central differences; see tests).
+                _, Qs_s = self._kl_batch(shifts, qc_t, P_target,
+                                         return_q=True)
+                Qmat = np.asarray(Qs_s)                       # (2n_p, n_states)
+                dQ = (Qmat[0::2] - Qmat[1::2]) / 2.0          # (n_p, n_states)
+                eps_g = 1e-12
+                P_s = (P_target + eps_g)
+                P_s = P_s / P_s.sum()
+                w = np.log(np.clip(Qs[0], eps_g, None)) - np.log(P_s)
+                grad = dQ @ w                                 # (n_p,)
                 # (1) clip the gradient norm so the step cannot blow up
                 gnorm = float(np.linalg.norm(grad))
                 if gnorm > grad_cap:
@@ -1087,6 +1155,15 @@ class QVMCModular:
                 pbar.close()
             phi_opt = res.x
 
+        # [M2 FIX] Report the KL of the phi actually RETURNED. `phi_opt` is
+        # the best-so-far iterate (quantum) or COBYLA's minimizer estimate,
+        # which need not coincide with the last recorded iteration — the
+        # reported `kl_final` (read from history[-1] downstream) could be
+        # worse than the distribution actually sampled. One extra evaluation
+        # closes it.
+        kl_fin, Q_fin = self._kl_batch(phi_opt, qc_t, P_target, return_q=True)
+        record(len(history), float(kl_fin[0]), Q_fin[0])
+
         if logger:
             logger.info(f"[{tag}] training done: KL={history[-1]['kl']:.6f} "
                         f"in {time.time()-t0:.1f}s ({len(history)} iters)")
@@ -1102,6 +1179,13 @@ class QVMCModular:
             _sanity('QVMC.sample', 'quantum',
                     f'measured shots on Aer (n_shots={self.n_shots})')
             bound_t = transpile(bound, self.sim)     # [OPT] once, not per chain
+            # [M3 — documented policy] The simulator seeds are FIXED
+            # (1000 + 137·chain) and deliberately independent of the run
+            # seed: every rung of the ladder then sees IDENTICAL shot noise
+            # (common random numbers), so rung-to-rung differences reflect
+            # the component substitution, not sampling luck. Trade-off:
+            # repeating a run with a different --seed does NOT re-draw the
+            # shot noise; vary n_shots or these base seeds to probe it.
             for c in range(n_chains):
                 counts = self.sim.run(bound_t, shots=self.n_shots,
                                       seed_simulator=1000 + c * 137
@@ -1152,13 +1236,27 @@ def run_config(post: Posterior, config: dict, n_steps_mcmc: int = 300,
                n_chains_qvmc: int = 3, nqpp: int = 3, n_shots: int = 2000,
                n_burn: Optional[int] = None, logger=None,
                log_every: int = 500, verbose: bool = True,
-               stop_on_convergence: bool = True) -> dict:
+               stop_on_convergence: bool = False,
+               seed: Optional[int] = None) -> dict:
     """Run QMCMC + QVMC with one configuration and compute ALL estimators:
     χ², reduced χ², AIC, BIC, ESS, acceptance, R̂, KL.
 
     Fair-comparison note: `n_steps_mcmc` and `max_iter_qvmc` apply equally
     to the classical and quantum variants of each method (same code path
     with switched components).
+
+    [H2 FIX] `stop_on_convergence` now defaults to False: early stopping can
+    end a quantum run and its classical baseline at different chain lengths
+    (they converge at different steps), breaking the "[BASE] identical
+    parameters" guarantee. Enable it only for exploratory single runs, never
+    inside a comparison.
+
+    [M1 FIX] If `seed` is given, the global RNG is re-seeded immediately
+    before EACH sampler (`seed` for QMCMC, `seed+1` for QVMC). Without this,
+    the QVMC pre-fit and initial phi0 consumed whatever RNG state the
+    preceding QMCMC left behind — which differs between a quantum config and
+    its classical baseline — so the two VI runs did not actually share their
+    initialization despite the same-seed claim.
     """
     q_pct = compute_quantumness(config)
     label = config.get('label', f"{q_pct:.0f}% — {quantumness_label(q_pct)}")
@@ -1176,11 +1274,15 @@ def run_config(post: Posterior, config: dict, n_steps_mcmc: int = 300,
         f"| dataset {post.dataset} | prior {post.prior_type} ===")
 
     t0 = time.time()
+    if seed is not None:
+        _reseed(seed)                       # [M1] QMCMC stream
     mcmc = QMCMCModular(post, config, n_chains=n_chains_mcmc, n_burn=n_burn,
                         stop_on_convergence=stop_on_convergence)
     m = mcmc.run(n_steps=n_steps_mcmc, logger=logger, log_every=log_every,
                  progress=(logger is None), tag=mcmc_tag)
 
+    if seed is not None:
+        _reseed(seed + 1)                   # [M1] QVMC stream, QMCMC-independent
     qvmc = QVMCModular(post, config, n_qubits_per_param=nqpp, n_shots=n_shots)
     q = qvmc.run(max_iter=max_iter_qvmc, n_chains=n_chains_qvmc,
                  logger=logger, log_every=log_every, progress=(logger is None),
@@ -1247,6 +1349,16 @@ def run_comparison(post: Posterior, config: dict, seed: int = 42,
     """
     q_pct = compute_quantumness(config)
     say = logger.info if logger else print
+
+    # [H2 FIX] A comparison is only meaningful on equal-length runs: force
+    # early stopping OFF for both sides (the quantum run and its baseline
+    # would otherwise converge — and stop — at different steps).
+    kwargs['stop_on_convergence'] = False
+    # [M1 FIX] Forward the seed so run_config re-seeds before EACH sampler:
+    # the QVMC of the baseline and of the quantum run then share phi0 and
+    # the grid pre-fit exactly, instead of inheriting divergent QMCMC
+    # streams.
+    kwargs.setdefault('seed', seed)
 
     if q_pct == 0:
         _reseed(seed)
@@ -1330,8 +1442,9 @@ def plot_rhat_overlay(res_q: dict, res_c: dict, outdir: str, tag: str):
             steps, rhats = zip(*hist)
             ax.semilogy(steps, np.array(rhats) - 1, 'o-', color=col,
                         lw=2.0, ms=4, alpha=0.95, label=lab)
-    ax.axhline(0.05, color='k', ls='--', lw=1.2,
-               label=r'threshold $\hat R-1=0.05$')
+    # [H1 FIX] threshold line matches the project standard (split-R-hat 1.01)
+    ax.axhline(core.RHAT_THRESHOLD - 1.0, color='k', ls='--', lw=1.2,
+               label=rf'threshold $\hat R-1={core.RHAT_THRESHOLD-1.0:g}$')
     ax.set_xlabel('Sampling steps')
     ax.set_ylabel(r'$\hat{R}_{\max} - 1$')
     ax.set_title('MCMC convergence — Classical MCMC vs QMCMC\n'
@@ -1803,7 +1916,8 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
         lw = 2.8 if r['pct'] == 0 else 1.9
         ax.semilogy(s, np.array(rh) - 1, 'o-', color=col, lw=lw, ms=4,
                     label=f"{r['pct']:.0f}%")
-    ax.axhline(0.05, color='k', ls='--', lw=1.2, label=r'$\hat R-1=0.05$')
+    ax.axhline(core.RHAT_THRESHOLD - 1.0, color='k', ls='--', lw=1.2,
+               label=rf'$\hat R-1={core.RHAT_THRESHOLD-1.0:g}$')  # [H1]
     ax.set_xlabel('Sampling steps'); ax.set_ylabel(r'$\hat{R}_{\max}-1$')
     ax.set_title(f'QMCMC convergence along the quantumness ladder\n'
                  f'(total steps = {steps})')

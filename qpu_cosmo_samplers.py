@@ -653,6 +653,20 @@ class QPUProposalEngine:
         self.n_phi = qc.num_parameters
         self.isa = conn.transpile_isa(qc)   # [OPT] ISA transpiled once
         self._queue: List[np.ndarray] = []
+        # [H4 FIX] Calibration constants for the displacement scale, filled
+        # from the FIRST hardware block (see _refill). The raw per-qubit
+        # <Z_q> concentrates near 0 (random-state expectation + shot noise
+        # with only `shots_per_proposal` shots), giving a per-dimension std
+        # of ~0.05–0.12 — an order of magnitude below the unit-std the
+        # `step_frac` scale is tuned for, and below what the SIMULATOR
+        # engine deliberately calibrates to (its acceptance-rate fix).
+        # Uncalibrated, the QPU chain would run at acceptance ~1 with tiny
+        # moves, and QMCMC-QPU would not be comparable to the simulator.
+        # We therefore standardize to zero mean / unit std with constants
+        # estimated ONCE from the first block (fixed thereafter, so the
+        # draws stay i.i.d. — same policy as the simulator engine [M4]).
+        self._mu: Optional[np.ndarray] = None
+        self._sigma: Optional[np.ndarray] = None
 
     def _counts_to_shift(self, counts: Dict[str, int]) -> np.ndarray:
         """Per-qubit <Z_q> from counts -> displacement in [-1, 1]^d."""
@@ -667,11 +681,26 @@ class QPUProposalEngine:
         return z[:self.d].copy()
 
     def _refill(self):
-        """Fill the queue: one job -> `block` displacements."""
+        """Fill the queue: one job -> `block` calibrated displacements.
+
+        [H4 FIX] The first block doubles as the calibration block: its
+        empirical mean/std become the FIXED constants applied to itself and
+        to every later block (zero mean, unit std per dimension). NOTE for
+        the first real-hardware run (PHASE2 checklist): verify the resulting
+        acceptance lands in the healthy 0.2–0.5 band and that the calibrated
+        std is stable across blocks (readout drift would show up here).
+        """
         phis = RNG.uniform(0, 2 * np.pi, size=(self.block, self.n_phi))
         all_counts = self.conn.run_pub(self.isa, phis, shots=self.shots)
-        for cnt in all_counts:
-            self._queue.append(self._counts_to_shift(cnt))
+        raw = np.array([self._counts_to_shift(cnt) for cnt in all_counts])
+        if self._sigma is None:                    # first block calibrates
+            self._mu = raw.mean(axis=0)
+            sigma = raw.std(axis=0)
+            sigma[sigma < 1e-8] = 1.0
+            self._sigma = sigma
+        raw = (raw - self._mu) / self._sigma
+        for k in range(len(raw)):
+            self._queue.append(raw[k].copy())
 
     def next(self) -> np.ndarray:
         """Next displacement; refills in blocks when the queue is empty."""
@@ -743,7 +772,10 @@ class MCMC_QPU:
                 chains[c, s] = cur[c]
 
             if (s + 1) % self.rhat_every == 0 and s > 20:
-                r = gelman_rubin_max(chains[:, max(0, s // 2):s + 1, :])
+                # [H1 FIX] project-standard rank-normalized split-R-hat
+                # (Vehtari 2021) on the second-half window, replacing the
+                # legacy whole-chain Gelman-Rubin.
+                r = core.split_rhat(chains[:, max(0, s // 2):s + 1, :])
                 rhat_hist.append((s + 1, r))
 
             if (s + 1) % self.log_every == 0:
@@ -927,8 +959,8 @@ def plot_rhat_quantum(rh: List[Tuple[int, float]], outdir: str, tag: str,
         ax.semilogy([p[0] for p in rh], [max(p[1] - 1.0, 1e-6) for p in rh],
                     color=C_QUANTUM, lw=2.2, marker='o', ms=4,
                     label='QMCMC-QPU (hardware)')
-    ax.axhline(0.05, color='gray', ls='--', lw=1,
-               label=r'$\hat{R} = 1.05$ threshold')
+    ax.axhline(core.RHAT_THRESHOLD - 1.0, color='gray', ls='--', lw=1,
+               label=rf'$\hat{{R}} = {core.RHAT_THRESHOLD:g}$ threshold')  # [H1]
     ax.set_xlabel('MCMC step')
     ax.set_ylabel(r'$\hat{R}_{\max} - 1$')
     ax.set_title(f'QMCMC-QPU convergence\n'

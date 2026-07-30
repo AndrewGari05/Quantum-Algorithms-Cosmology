@@ -243,7 +243,7 @@ def diagnose_gui_backend() -> str:
 #    * mutation (35): parametrized RY rotations rotate each gene-qubit toward
 #      |0⟩/|1⟩, i.e. a coherent, amplitude-level mutation; it is the operator
 #      most often run on hardware, hence the largest weight.
-#    * crossover (40): entangling CX between paired parents' gene-qubits plus
+#    * crossover (40): [describes the PRE-C1-FIX operator] entangling CX plus
 #      a controlled interference layer mixes parental information through
 #      genuine entanglement — the most "quantum" of the three.
 #
@@ -274,7 +274,8 @@ QGA_COMPONENTS: Dict[str, dict] = {
     'q_mutation':  {'kind': ALGORITHMIC,
                     'name': 'Quantum mutation (parametrized RY rotations)'},
     'q_crossover': {'kind': ALGORITHMIC,
-                    'name': 'Quantum crossover (entanglement + interference)'},
+                    'name': 'Quantum crossover (partial-SWAP interference, '
+                            'consensus-preserving)'},
 }
 
 #: Legacy hand-picked weights (no measurable definition), kept only so
@@ -680,10 +681,15 @@ class CGA(GeneticEvolver):
 #                    `mutation_scale`; a qubit initialized to |b⟩ is rotated so
 #                    that measuring it flips with probability sin²(φ/2). This is
 #                    a coherent, amplitude-level bit-flip mutation.
-#    * q_crossover : load two parents in two n_bits registers, apply CX between
-#                    homologous gene-qubits (entanglement) plus a controlled-RY
-#                    interference layer, then measure register A as the child —
-#                    parental information is mixed through real entanglement.
+#    * q_crossover : load two parents in two n_bits registers, apply a partial
+#                    SWAP (SWAP^α, α = 1/2) between homologous gene-qubits and
+#                    measure register A as the child. Consensus bits (a = b)
+#                    pass through UNCHANGED; disagreeing bits are inherited
+#                    from either parent with probability cos²(πα/2) via genuine
+#                    two-qubit interference — a quantum-sampled per-bit uniform
+#                    crossover. [C1 FIX: the earlier CX(B→A)+CRY layer produced
+#                    child ≈ a XOR b, mapping (1,1)→0 with prob 0.85 and
+#                    destroying consensus bits in converged populations.]
 #
 #  All circuits are TRANSPILED ONCE at construction (handover lesson: per-step
 #  transpilation was the main QMCMC bottleneck). Operators are evaluated in
@@ -696,6 +702,7 @@ _QISKIT_OK = True
 try:
     from qiskit import QuantumCircuit, transpile
     from qiskit.circuit import ParameterVector
+    from qiskit.circuit.library import UnitaryGate
     from qiskit_aer import AerSimulator
 except Exception:                                       # pragma: no cover
     _QISKIT_OK = False
@@ -720,7 +727,7 @@ class QGA(GeneticEvolver):
 
     def __init__(self, post: Posterior, ga: GAConfig, config: dict,
                  n_bits: int = 6, rng: Optional[np.random.Generator] = None,
-                 shots: int = 1):
+                 shots: int = 1, crossover_alpha: float = 0.5):
         super().__init__(post, ga, rng)
         if not _QISKIT_OK:
             raise RuntimeError(
@@ -730,11 +737,27 @@ class QGA(GeneticEvolver):
         self.quantumness = compute_qga_quantumness(self.config)
         self.n_bits = int(n_bits)
         self.shots = int(shots)
+        # [C1 FIX] Partial-swap exponent of the quantum crossover: with SWAP^α
+        # a disagreeing bit is inherited from parent A with prob cos²(πα/2)
+        # (α = 0.5 → uniform 50/50; α → 0 keeps A; α → 1 takes B). Consensus
+        # bits are ALWAYS preserved regardless of α.
+        self.crossover_alpha = float(np.clip(crossover_alpha, 0.0, 1.0))
         self._levels = 2 ** self.n_bits                  # grid points per axis
         self.sim = make_simulator('statevector', prefer_gpu=USE_GPU)
+        # [M3 FIX] Aer measurement seeds are now DERIVED from the run seed
+        # (GAConfig.seed) plus a per-call counter. Previously the quantum
+        # operators ran with Aer's own random seed, so QGA runs were NOT
+        # reproducible across executions even with a fixed ga.seed — the
+        # classical parts repeated, the quantum measurements did not.
+        self._aer_call = 0
 
         # ── pre-build & transpile the per-operator circuit templates ONCE ────
         self._build_circuits()
+
+    def _sim_seed(self) -> int:
+        """Deterministic per-call simulator seed: f(ga.seed, call counter)."""
+        self._aer_call += 1
+        return (int(self.ga.seed) * 100003 + self._aer_call) % (2**31 - 1)
 
     # ── fixed-point encode/decode between θ and integer gene grids ───────────
     def _encode(self, pop: np.ndarray) -> np.ndarray:
@@ -798,25 +821,50 @@ class QGA(GeneticEvolver):
         self._phi_m = phi_m
 
         # (c) Quantum crossover template (2·nb qubits). Parent bits are loaded
-        #     by per-qubit prep angles (RY(π)|0⟩ = |1⟩, RY(0)|0⟩ = |0⟩), then
-        #     the fixed entangling+interference layer mixes B into A. The prep
-        #     angles (2·nb of them) plus the nb interference angles are all
-        #     ParameterVector entries, so each parent pair is just a binding on
-        #     the ONE transpiled template.
+        #     by per-qubit prep angles (RY(π)|0⟩ = |1⟩, RY(0)|0⟩ = |0⟩), then a
+        #     per-qubit PARTIAL SWAP (SWAP^α) mixes the homologous gene-qubits
+        #     of the two registers. Measuring register A yields the child.
+        #
+        #     [C1 FIX — consensus-preserving crossover] The previous layer was
+        #     CX(B→A) + CRY(φ, B→A), whose measured child bit was ≈ a XOR b:
+        #     verified truth table P(child=1) = {(0,0)→0, (0,1)→0.85,
+        #     (1,0)→1, (1,1)→0.146}. Mapping (1,1)→0 destroys exactly the
+        #     consensus bits a converged population agrees on — the opposite of
+        #     what a crossover must do. SWAP^α acts as identity on the |aa⟩
+        #     subspace and rotates only within span{|01⟩, |10⟩}, so the truth
+        #     table becomes:
+        #         (0,0) → 0 always,   (1,1) → 1 always   (consensus preserved)
+        #         (a≠b) → child = a with prob cos²(πα/2), = b otherwise,
+        #     with genuine two-qubit interference on the disagreeing bits
+        #     (the SWAP^α amplitudes (1±e^{iπα})/2 are complex — this is not a
+        #     classical coin flip on amplitudes). α = 1/2 gives the quantum
+        #     analogue of a per-bit UNIFORM crossover (50/50 inheritance);
+        #     α → 0 keeps parent A, α → 1 swaps in parent B. The operator
+        #     remains an ALGORITHMIC substitution: the classical baseline is a
+        #     real-valued blend crossover, this is a bitwise quantum-sampled
+        #     uniform crossover.
+        #
+        #     The fixed SWAP^α unitary lives inside the ONE transpiled
+        #     template; parent pairs are still pure parameter bindings on the
+        #     prep angles (transpile-once pattern [A1] unchanged).
         prep_a = ParameterVector('pa', nb)
         prep_b = ParameterVector('pb', nb)
-        phi_c = ParameterVector('c', nb)
+        alpha = self.crossover_alpha
+        e = np.exp(1j * np.pi * alpha)
+        sqrt_swap = np.array([[1, 0, 0, 0],
+                              [0, (1 + e) / 2, (1 - e) / 2, 0],
+                              [0, (1 - e) / 2, (1 + e) / 2, 0],
+                              [0, 0, 0, 1]], dtype=complex)
+        pswap = UnitaryGate(sqrt_swap, label=f'SWAP^{alpha:g}')
         qc_cx = QuantumCircuit(2 * nb)
         for q in range(nb):
             qc_cx.ry(prep_a[q], q)                 # load parent A bit on qubit q
             qc_cx.ry(prep_b[q], nb + q)            # load parent B bit
         for q in range(nb):
-            qc_cx.cx(nb + q, q)                    # entangle B into A
-        for q in range(nb):
-            qc_cx.cry(phi_c[q], nb + q, q)         # controlled interference
+            qc_cx.append(pswap, [q, nb + q])       # partial swap A[q] <-> B[q]
         qc_cx.measure_all()
         self._qc_cx_t = transpile(qc_cx, self.sim)       # transpiled ONCE
-        self._prep_a, self._prep_b, self._phi_c = prep_a, prep_b, phi_c
+        self._prep_a, self._prep_b = prep_a, prep_b
 
     # ── operator 1: quantum initialization ──────────────────────────────────
     def do_init(self) -> np.ndarray:
@@ -827,7 +875,8 @@ class QGA(GeneticEvolver):
         nb, P = self.n_bits, self.ga.pop_size
         # One shot per individual gives P independent measurement bitstrings.
         circ = self._qc_init
-        res = self.sim.run([circ], shots=P, memory=True).result()
+        res = self.sim.run([circ], shots=P, memory=True,
+                           seed_simulator=self._sim_seed()).result()  # [M3]
         mem = res.get_memory(0)                # list of P bitstrings
         # Qiskit bitstrings are little-endian over the full register; parse
         # each into d genes of nb bits.
@@ -853,21 +902,45 @@ class QGA(GeneticEvolver):
         genes = self._encode(pop)              # (P, d)
         P = len(pop)
 
-        # Per-qubit flip probability tied to the same `mutation_scale` used
-        # classically, so the two mutations are comparable in strength.
-        p_flip = float(np.clip(self.ga.mutation_scale, 1e-3, 0.5))
+        # [H6 FIX — same gating, first-moment-calibrated strength] The old
+        # code (a) rotated EVERY gene of EVERY individual, ignoring
+        # `mutation_rate` (the classical operator mutates a gene with prob
+        # mutation_rate only), and (b) set p_flip = mutation_scale directly,
+        # so the expected displacement grew with n_bits and an MSB flip
+        # jumped half the box — the docstring's "comparable in strength" did
+        # not hold, and the mutation rung of the ladder changed operator AND
+        # effective intensity at once.
+        #
+        # Now: (a) genes are gated by `mutation_rate` with the SAME shared
+        # classical rng stream the CGA uses (only gated genes run circuits —
+        # also ~5x fewer circuits per generation at rate 0.2); (b) p_flip is
+        # calibrated so the FIRST MOMENT matches the classical Gaussian
+        # kick: for independent per-bit flips with prob p, E|Δθ| ≈
+        # p·width·(1 − 2^{−nb}), while the classical operator gives
+        # E|Δθ| = σ·√(2/π) with σ = mutation_scale·width. Hence
+        #     p_flip = mutation_scale·√(2/π) / (1 − 2^{−nb}).
+        # The DISTRIBUTION still differs (bit flips are heavy-tailed — that
+        # is the ALGORITHMIC treatment being tested); only the mean absolute
+        # step is matched so the rung isolates the operator, not its gain.
+        mask = self.rng.uniform(0, 1, size=(P, self.d)) < self.ga.mutation_rate
+        if not np.any(mask):
+            return self._clip(pop.copy())
+        p_flip = self.ga.mutation_scale * np.sqrt(2.0 / np.pi)
+        p_flip = float(np.clip(p_flip / (1.0 - 2.0**(-nb)), 1e-3, 0.5))
 
-        # [A1] Build the (B, nb) angle-binding array. For each (individual,
-        # gene) the nb angles encode the gene bits with flip probability
-        # p_flip: a bit b maps to RY angle 2·arcsin(√(b·(1−p)+(1−b)·p)). No
-        # X gates, no per-call transpilation — we bind on the ONE pre-
-        # transpiled template and run all bindings in a single Aer job.
-        gene_flat = genes.reshape(-1)                       # (P*d,)
-        bits = self._int_to_bits(gene_flat, nb)             # (P*d, nb), MSB-first
+        # [A1] Build the (B, nb) angle-binding array for the GATED genes
+        # only. For each (individual, gene) the nb angles encode the gene
+        # bits with flip probability p_flip: a bit b maps to RY angle
+        # 2·arcsin(√(b·(1−p)+(1−b)·p)). No X gates, no per-call
+        # transpilation — we bind on the ONE pre-transpiled template and run
+        # all bindings in a single Aer job.
+        sel = np.argwhere(mask)                             # (B, 2) -> (i, j)
+        gene_flat = genes[sel[:, 0], sel[:, 1]]             # (B,)
+        bits = self._int_to_bits(gene_flat, nb)             # (B, nb), MSB-first
         # qubit q holds bit (nb-1-q) under the MSB-first/qubit-index convention
-        bits_q = bits[:, ::-1]                              # (P*d, nb) per qubit
+        bits_q = bits[:, ::-1]                              # (B, nb) per qubit
         P1 = bits_q * (1.0 - p_flip) + (1 - bits_q) * p_flip
-        angles = 2.0 * np.arcsin(np.sqrt(P1))               # (P*d, nb)
+        angles = 2.0 * np.arcsin(np.sqrt(P1))               # (B, nb)
 
         tmpl = self._qc_mut_t
         param_order = list(self._phi_m)
@@ -875,11 +948,12 @@ class QGA(GeneticEvolver):
                         {param_order[q]: float(angles[k, q])
                          for q in range(nb)})
                     for k in range(angles.shape[0])]
-        res = self.sim.run(circuits, shots=1, memory=True).result()
+        res = self.sim.run(circuits, shots=1, memory=True,
+                           seed_simulator=self._sim_seed()).result()  # [M3]
 
         new_genes = genes.copy()
         for k in range(gene_flat.shape[0]):
-            i, j = divmod(k, self.d)
+            i, j = sel[k]                                          # [H6] gated
             bs = res.get_memory(k)[0].replace(' ', '')
             mb = np.array([int(c) for c in bs[::-1]], dtype=int)   # qubit order
             new_genes[i, j] = self._bits_to_int(mb[::-1])          # MSB first
@@ -896,9 +970,11 @@ class QGA(GeneticEvolver):
         P = len(a)
         do = self.rng.uniform(0, 1, size=P) < self.ga.crossover_rate
 
-        # Interference amplitude per qubit (fixed, moderate): π/4 gives a
-        # balanced controlled mixing without fully swapping the registers.
-        phi_val = np.pi / 4.0
+        # [C1 FIX] The per-qubit mixing is the fixed SWAP^α unitary baked into
+        # the transpiled template (see _build_circuits): consensus bits pass
+        # through unchanged, disagreeing bits are inherited from A/B with
+        # probability cos²(πα/2) / sin²(πα/2) via genuine two-qubit
+        # interference. No per-pair interference angle is needed anymore.
 
         # [A1] Parent bits are loaded by PREP ANGLES (RY(π)→|1⟩, RY(0)→|0⟩)
         # bound on the ONE pre-transpiled template, instead of structural X
@@ -907,7 +983,7 @@ class QGA(GeneticEvolver):
         idx_pairs = [(i, j) for i in range(P) if do[i] for j in range(self.d)]
         child = a.copy()                                # default: parent A
         if idx_pairs:
-            pa, pb, pc = self._prep_a, self._prep_b, self._phi_c
+            pa, pb = self._prep_a, self._prep_b
             tmpl = self._qc_cx_t
             circuits = []
             for (i, j) in idx_pairs:
@@ -917,9 +993,9 @@ class QGA(GeneticEvolver):
                 for q in range(nb):
                     binding[pa[q]] = float(np.pi) if bits_a[q] == 1 else 0.0
                     binding[pb[q]] = float(np.pi) if bits_b[q] == 1 else 0.0
-                    binding[pc[q]] = phi_val
                 circuits.append(tmpl.assign_parameters(binding))
-            res = self.sim.run(circuits, shots=1, memory=True).result()
+            res = self.sim.run(circuits, shots=1, memory=True,
+                               seed_simulator=self._sim_seed()).result()  # [M3]
             new_genes = ga_.copy()
             for k, (i, j) in enumerate(idx_pairs):
                 bs = res.get_memory(k)[0].replace(' ', '')
