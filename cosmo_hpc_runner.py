@@ -105,12 +105,59 @@ MODEL_DIM: Dict[str, int] = {
 }
 ALL_MODELS = list(MODEL_DIM)
 
-# Worst-case memory of the statevector + likelihood auxiliary arrays. Uses
-# EXACTLY the same constant as the validation in cosmo_modular_quantum.py
-# (_validate_args: 2**total_q * 1660 * 8), to avoid having two different magic
-# numbers. The 1660 floats/state are the auxiliary arrays the likelihood builds
-# over the grid; x8 bytes (float64).
-BYTES_PER_STATE = 1660 * 8
+# --- Per-state memory cost: DIFFERENT for the two pipelines -----------------
+#
+# [FIX] These used to be a single constant applied to both pipelines, which
+# over-estimated the QGA by ~830x and made the clamp needlessly lower n_bits
+# for 4-parameter models (e.g. CPL was silently dropped from n_bits 6 to 4,
+# i.e. from a 64-level grid per axis to 16, to "save" memory that was never
+# going to be used).
+#
+# SAMPLERS (cosmo_modular_quantum.py — QVMC/VI):
+#   The grid is 2^(nqpp*d) states AND the likelihood builds auxiliary arrays
+#   of shape (n_states, N_data) over it. Uses EXACTLY the same constant as
+#   the validation in cosmo_modular_quantum.py (_validate_args:
+#   2**total_q * 1660 * 8), to avoid having two different magic numbers. The
+#   1660 floats/state are those auxiliary arrays; x8 bytes (float64).
+#   (This also covers the QVMC training batch, which materializes 2*n_phi
+#   statevectors at 16 B/state — smaller than the auxiliary arrays at every
+#   nqpp the cap allows, so this constant stays the binding one.)
+BYTES_PER_STATE_SAMPLERS = 1660 * 8
+#
+# GENETIC (cosmo_genetic_optimizers.py — QGA):
+#   The QGA never evaluates the likelihood over the grid: fitness is computed
+#   on the POPULATION (pop_size x d), not on 2^(n_bits*d) points. The only
+#   d-dependent circuit is the quantum initialization (d*n_bits qubits in
+#   superposition, measured); mutation uses n_bits qubits and crossover
+#   2*n_bits, both independent of d. So the cost is one plain statevector:
+#   one complex128 amplitude per state = 16 bytes.
+#   Verified by measurement (peak RSS high-water mark, clean subprocess,
+#   H^n + measure_all on the Aer statevector method):
+#       n=20 -> 17.5 MB measured vs 16.8 MB theoretical
+#       n=22 -> 65.6 MB measured vs 67.1 MB theoretical
+#       n=24 -> 257.8 MB measured vs 268.4 MB theoretical
+#   i.e. it converges to 16 B/state from below.
+BYTES_PER_STATE_GENETIC = 16
+#
+# Fixed per-process cost (Python interpreter + numpy/scipy/qiskit/matplotlib
+# imports + the module-level data load), which the estimate previously ignored
+# entirely. With J processes in flight this is J*250 MB of real RAM that the
+# aggregate budget must account for — on a 10-way split that is 2.5 GB.
+# Calibrated end-to-end against real child runs (peak RSS of the process tree
+# minus the statevector term):
+#     genetic/lcdm, 12q: 260 MB peak - 0.1 MB statevector -> ~260 MB baseline
+#     genetic/cpl,  24q: 510 MB peak - 268 MB statevector -> ~242 MB baseline
+PROCESS_BASELINE_MB = 250.0
+
+# Kind -> per-state cost, so callers can stay declarative.
+BYTES_PER_STATE_BY_KIND = {
+    'nqpp': BYTES_PER_STATE_SAMPLERS,     # samplers tasks
+    'n_bits': BYTES_PER_STATE_GENETIC,    # genetic tasks
+}
+
+# Backwards-compatible alias (any external script importing the old name keeps
+# the samplers semantics it used to get).
+BYTES_PER_STATE = BYTES_PER_STATE_SAMPLERS
 
 
 @dataclass
@@ -147,27 +194,49 @@ class Task:
 # 1.  BUILDING THE TASK LIST
 # =============================================================================
 
-def estimate_qubits_and_mem(total_q: int) -> float:
-    """Estimated peak RAM (MB) for a grid of 2^total_q states (worst case)."""
-    return (2 ** total_q) * BYTES_PER_STATE / 1e6
+def estimate_qubits_and_mem(total_q: int, kind: str = 'nqpp') -> float:
+    """Estimated peak RAM (MB) of a task whose circuit/grid has 2^total_q
+    states, plus the fixed per-process interpreter cost.
+
+    `kind` selects the per-state cost: 'nqpp' (samplers — grid + likelihood
+    auxiliaries) or 'n_bits' (genetic — one plain statevector). See the
+    BYTES_PER_STATE_* comments: using the samplers constant for the QGA
+    over-estimated it by ~830x.
+    """
+    per_state = BYTES_PER_STATE_BY_KIND.get(kind, BYTES_PER_STATE_SAMPLERS)
+    return (2 ** total_q) * per_state / 1e6 + PROCESS_BASELINE_MB
 
 
-def qubits_fitting_in(mem_mb: float) -> int:
-    """Largest number of qubits whose grid (2^q states) fits in mem_mb."""
-    if mem_mb <= 0:
+def qubits_fitting_in(mem_mb: float, kind: str = 'nqpp') -> int:
+    """Largest number of qubits whose 2^q states fit in mem_mb, for the given
+    pipeline `kind` (the per-process baseline is reserved first)."""
+    usable = mem_mb - PROCESS_BASELINE_MB
+    if usable <= 0:
         return 0
-    cap_states = mem_mb * 1e6 / BYTES_PER_STATE
+    per_state = BYTES_PER_STATE_BY_KIND.get(kind, BYTES_PER_STATE_SAMPLERS)
+    cap_states = usable * 1e6 / per_state
     q = 0
     while 2 ** (q + 1) <= cap_states:
         q += 1
     return q
 
 
-def qubit_ceiling(max_qubits: int, mem_ceiling_mb: float) -> int:
-    """EFFECTIVE per-task qubit ceiling: the most restrictive of the
-    --max-qubits cap (enforced by the scripts) and what fits in the per-task
-    RAM."""
-    return min(max_qubits, qubits_fitting_in(mem_ceiling_mb))
+def qubit_ceiling(max_qubits: Optional[int], mem_ceiling_mb: float,
+                  kind: str = 'nqpp') -> int:
+    """EFFECTIVE per-task qubit ceiling for the given pipeline `kind`.
+
+    [AUTO] `max_qubits=None` (the default — see build_parser) means "no user
+    cap": the ceiling is derived PURELY from the RAM this node actually has,
+    auto-detected via psutil. Pass an explicit --max-qubits[-genetic] only to
+    be MORE conservative than what your RAM allows (e.g. a shared node where
+    you want to leave headroom, or you want a faster/coarser run on purpose).
+    You can never exceed what fits in RAM this way — it stays the ultimate
+    backstop regardless of what you pass.
+    """
+    ram_ceiling = qubits_fitting_in(mem_ceiling_mb, kind)
+    if max_qubits is None:
+        return ram_ceiling
+    return min(max_qubits, ram_ceiling)
 
 
 def grid_values_for_model(single: int, sweep: Optional[List[int]], d: int,
@@ -216,7 +285,8 @@ def grid_values_for_model(single: int, sweep: Optional[List[int]], d: int,
 
 
 def build_tasks(args, master_dir: str, q_ceiling: int,
-                notices: List[str]) -> List[Task]:
+                notices: List[str], q_ceiling_genetic: Optional[int] = None
+                ) -> List[Task]:
     """One task per (script x model x grid value), with per-model clamping.
 
     When a sweep is requested (--nqpp-sweep / --nbits-sweep) one task is
@@ -260,19 +330,29 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
                         '--nqpp', str(nqpp),
                         '--chains', str(args.chains),
                         '--shots', str(args.shots),
-                        '--max-qubits', str(args.max_qubits),
+                        # [AUTO] pass the ACTUAL computed ceiling, not the
+                        # raw --max-qubits (which may be unset): correct
+                        # whether the cap came from RAM-auto-detection or
+                        # from an explicit user override.
+                        '--max-qubits', str(q_ceiling),
                         '--outdir', outdir] + common_data
                 tasks.append(Task(
                     name=name, script='cosmo_modular_quantum.py',
                     argv=argv, model=m, total_qubits=total_q,
-                    est_mem_mb=estimate_qubits_and_mem(total_q),
+                    est_mem_mb=estimate_qubits_and_mem(total_q, 'nqpp'),
                     outdir=outdir, grid_value=nqpp, grid_kind='nqpp'))
 
         # ---- Genetic tasks (CGA + QGA), one per n_bits value ----
         if not args.only_samplers:
+            # [FIX] The genetic pipeline has its OWN ceiling: the QGA does
+            # not build the 2^(n*d) likelihood grid the samplers do, so it is
+            # bounded by a plain statevector (16 B/state), not by the
+            # samplers' auxiliary arrays (13.3 kB/state).
+            eff_genetic_ceiling = (q_ceiling if q_ceiling_genetic is None
+                                   else q_ceiling_genetic)
             for nbits in grid_values_for_model(
-                    args.n_bits, args.nbits_sweep, d, q_ceiling, strict,
-                    notices, 'n_bits', m):
+                    args.n_bits, args.nbits_sweep, d, eff_genetic_ceiling,
+                    strict, notices, 'n_bits', m):
                 total_q = nbits * d
                 tag = (f"nb{nbits}"
                        if (sweeping_nbits or nbits != args.n_bits) else "")
@@ -283,12 +363,15 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
                         '--generations', str(args.generations),
                         '--population-size', str(args.population_size),
                         '--n-bits', str(nbits),
-                        '--max-qubits', str(args.max_qubits),
+                        # [AUTO] pass the ACTUAL computed ceiling (RAM-auto
+                        # or user override) so the child's own validation
+                        # agrees with the plan built here.
+                        '--max-qubits', str(eff_genetic_ceiling),
                         '--outdir', outdir] + common_data
                 tasks.append(Task(
                     name=name, script='cosmo_genetic_optimizers.py',
                     argv=argv, model=m, total_qubits=total_q,
-                    est_mem_mb=estimate_qubits_and_mem(total_q),
+                    est_mem_mb=estimate_qubits_and_mem(total_q, 'n_bits'),
                     outdir=outdir, grid_value=nbits, grid_kind='n_bits'))
 
     return tasks
@@ -345,7 +428,8 @@ def proc_tree_rss_mb(pid: int) -> float:
 
 def run_pool(tasks: List[Task], max_parallel: int, threads_per_worker: int,
              mem_budget_mb: float, max_qubits: int, project_dir: str,
-             poll: float = 0.5) -> None:
+             poll: float = 0.5, max_qubits_genetic: Optional[int] = None
+             ) -> None:
     """Run the tasks with at most `max_parallel` in flight, honoring an
     aggregate RAM budget, and sample each tree's peak RSS."""
     pending = list(tasks)
@@ -367,9 +451,17 @@ def run_pool(tasks: List[Task], max_parallel: int, threads_per_worker: int,
             t = pending[i]
 
             # Qubit cap: do not launch what the script itself would reject.
-            if t.total_qubits > max_qubits:
+            # [FIX] Per-pipeline cap: the genetic tasks are bounded by their
+            # own (higher) cap, since a QGA circuit costs 16 B/state, not the
+            # samplers' 13.3 kB/state. `is not None` (not truthy) so a
+            # degenerate 0-qubit genetic ceiling on a near-zero-RAM node
+            # doesn't silently fall back to the samplers cap.
+            cap = (max_qubits_genetic
+                   if (t.grid_kind == 'n_bits' and max_qubits_genetic is not None)
+                   else max_qubits)
+            if t.total_qubits > cap:
                 print(f"  [SKIP] {t.name}: {t.total_qubits} qubits "
-                      f"(> --max-qubits {max_qubits}). "
+                      f"(> cap {cap}). "
                       f"Lower n_bits/nqpp for {t.model} or raise the cap "
                       f"(mind the RAM).")
                 t.rc = -2
@@ -895,8 +987,22 @@ def build_parser() -> argparse.ArgumentParser:
                         'value). The QGA analogue of --nqpp-sweep.')
 
     # --- shared ---
-    p.add_argument('--max-qubits', type=int, default=18,
-                   help='Per-task qubit cap (same as the scripts)')
+    p.add_argument('--max-qubits', type=int, default=None, metavar='N',
+                   help='[AUTO by default] Per-task qubit cap for the '
+                        'SAMPLERS pipeline (nqpp*d). Left unset, the cap is '
+                        'derived PURELY from the RAM this node actually has '
+                        '(auto-detected) at 13.3 kB/state — you never have '
+                        'to set this to use your own RAM. Pass a number only '
+                        'to be MORE conservative than your RAM allows.')
+    p.add_argument('--max-qubits-genetic', type=int, default=None,
+                   metavar='N',
+                   help='[AUTO by default] Per-task qubit cap for the '
+                        'GENETIC pipeline (n_bits*d, the width of the '
+                        'quantum-init circuit). Left unset, derived from '
+                        'detected RAM at 16 B/state (a plain statevector — '
+                        'the QGA never builds the samplers grid, so it '
+                        'affords many more qubits at the same RAM). Pass a '
+                        'number only to be more conservative.')
     p.add_argument('--max-task-gb', type=float, default=None,
                    help='Max RAM per task for the clamp (default: the aggregate '
                         'budget). Together with --max-qubits it sets the '
@@ -970,11 +1076,17 @@ def main() -> int:
     # or, if not given, the aggregate budget as a single-task cap).
     task_mem_ceiling = (args.max_task_gb * 1024 if args.max_task_gb
                         else mem_budget_mb)
-    q_ceiling = qubit_ceiling(args.max_qubits, task_mem_ceiling)
+    q_ceiling = qubit_ceiling(args.max_qubits, task_mem_ceiling, 'nqpp')
+    # [FIX] The genetic pipeline gets its own ceiling from its own per-state
+    # cost; sharing the samplers' ceiling used to clamp n_bits for 4-parameter
+    # models (CPL 6 -> 4) to save memory that was never going to be used.
+    q_ceiling_genetic = qubit_ceiling(args.max_qubits_genetic,
+                                      task_mem_ceiling, 'n_bits')
 
     # --- build tasks (with per-model clamp) ---
     clamp_notices: List[str] = []
-    tasks = build_tasks(args, master_dir, q_ceiling, clamp_notices)
+    tasks = build_tasks(args, master_dir, q_ceiling, clamp_notices,
+                        q_ceiling_genetic=q_ceiling_genetic)
     n_tasks = len(tasks) or 1
 
     # --- split the cores: J*T ~= total_cores, without oversubscribing ---
@@ -996,10 +1108,24 @@ def main() -> int:
     print(f"Node: {args.total_cores} cores | "
           f"RAM budget: {mem_budget_mb/1024:.0f} GB | "
           f"psutil={'yes' if _PSUTIL else 'no (limited measurement)'}")
-    print(f"Grid ceiling: {q_ceiling} qubits/task "
-          f"(min of --max-qubits {args.max_qubits} and "
-          f"{qubits_fitting_in(task_mem_ceiling)}q that fit in "
-          f"{task_mem_ceiling/1024:.0f} GB)")
+    # [AUTO] Report WHY each ceiling is what it is: derived purely from
+    # detected RAM (the default, no flag needed), or lowered by an explicit
+    # user override.
+    src_s = (f"user override --max-qubits={args.max_qubits}"
+             if args.max_qubits is not None else
+             "auto, derived from detected RAM (no --max-qubits set)")
+    print(f"Grid ceiling (samplers): {q_ceiling} qubits/task  [{src_s}]\n"
+          f"    ({task_mem_ceiling/1024:.0f} GB available -> "
+          f"{qubits_fitting_in(task_mem_ceiling, 'nqpp')}q fit at "
+          f"{BYTES_PER_STATE_SAMPLERS/1024:.1f} kB/state)")
+    if not args.only_samplers:
+        src_g = (f"user override --max-qubits-genetic={args.max_qubits_genetic}"
+                 if args.max_qubits_genetic is not None else
+                 "auto, derived from detected RAM (no --max-qubits-genetic set)")
+        print(f"Grid ceiling (genetic):  {q_ceiling_genetic} qubits/task  [{src_g}]\n"
+              f"    ({task_mem_ceiling/1024:.0f} GB available -> "
+              f"{qubits_fitting_in(task_mem_ceiling, 'n_bits')}q fit at "
+              f"{BYTES_PER_STATE_GENETIC} B/state)")
     print(f"Split: J={J} processes x T={T} threads = {J*T} cores "
           f"(of {args.total_cores})")
     print(f"Master folder: {master_dir}")
@@ -1012,8 +1138,10 @@ def main() -> int:
         print(f"\n--- DRY RUN: {len(tasks)} commands ---")
         for t in tasks:
             cmd = [sys.executable, os.path.join(project_dir, t.script)] + t.argv
-            flag = ("  (SKIP: exceeds max-qubits)"
-                    if t.total_qubits > args.max_qubits else "")
+            _cap = (q_ceiling_genetic if t.grid_kind == 'n_bits'
+                    else q_ceiling)
+            flag = (f"  (SKIP: exceeds the {_cap}q cap)"
+                    if t.total_qubits > _cap else "")
             print(f"\n# {t.name}  ({t.grid_kind}={t.grid_value}, "
                   f"~{t.total_qubits}q, ~{t.est_mem_mb:.0f} MB){flag}\n"
                   f"OMP_NUM_THREADS={T} {shlex.join(cmd)}")
@@ -1021,8 +1149,11 @@ def main() -> int:
 
     t_wall0 = time.time()
     run_pool(tasks, max_parallel=J, threads_per_worker=T,
-             mem_budget_mb=mem_budget_mb, max_qubits=args.max_qubits,
-             project_dir=project_dir)
+             mem_budget_mb=mem_budget_mb,
+             # [FIX] pass the COMPUTED ceilings (always concrete ints), not
+             # the raw CLI args (which default to None = auto).
+             max_qubits=q_ceiling, project_dir=project_dir,
+             max_qubits_genetic=q_ceiling_genetic)
     report(tasks, master_dir, t_wall0)
 
     # --- convergence plots at the end of ALL the runs ---

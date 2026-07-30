@@ -1614,10 +1614,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help='QGA qubits per parameter (grid = 2^n_bits; default 6)')
     p.add_argument('--shots', type=int, default=1,
                    help='Aer shots per circuit for the QGA (default: 1)')
-    p.add_argument('--max-qubits', type=int, default=18, metavar='N',
-                   help='Memory safety cap on total QGA qubits (n_bits*d). '
-                        'Default 18 (laptop-safe). Raise on a supercomputer '
-                        'with more RAM (each +1 qubit ~4x memory).')
+    p.add_argument('--max-qubits', type=int, default=26, metavar='N',
+                   help='Memory safety cap on total QGA qubits (n_bits*d), '
+                        'i.e. the width of the quantum-initialization '
+                        'circuit. Default 26 (~1.1 GB, laptop-safe). Each +1 '
+                        'qubit DOUBLES the statevector (16 B/state): '
+                        '24q~=0.3GB, 26q~=1.1GB, 28q~=4.3GB, 30q~=17GB. '
+                        '[FIX] The old default of 18 came from applying the '
+                        'SAMPLERS memory model (grid + likelihood auxiliary '
+                        'arrays, 13.3 kB/state) to the QGA, which never '
+                        'evaluates the likelihood over the grid — it '
+                        'over-estimated QGA memory by ~830x and needlessly '
+                        'clamped n_bits for 4-parameter models.')
 
     # run control
     p.add_argument('--outdir', type=str, default='results',
@@ -1846,11 +1854,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                       else [args.model]))
             max_d = max(MODELS[m].n_params for m in sweep)
             if nb * max_d > max_q:
+                # 16 B/state: the quantum-init circuit is a plain statevector
+                # (the QGA scores fitness on the POPULATION, not on the grid).
+                approx_gb = 2 ** (nb * max_d) * 16 / 1e9
                 errs.append(
                     f"--n-bits {nb} with a {max_d}-parameter model needs a "
-                    f"2^{nb * max_d}-state grid, above the --max-qubits "
-                    f"{max_q} cap. Lower n_bits to <= {max_q // max_d} or "
-                    f"raise --max-qubits if your machine has the RAM.")
+                    f"{nb * max_d}-qubit initialization circuit "
+                    f"(2^{nb * max_d} states ~ {approx_gb:.2f} GB), above "
+                    f"the --max-qubits {max_q} cap. Lower n_bits to "
+                    f"<= {max_q // max_d} or raise --max-qubits if your "
+                    f"machine has the RAM.")
         if errs:
             sys.stderr.write("Argument error(s):\n  " + "\n  ".join(errs)
                              + "\n")

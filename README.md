@@ -227,9 +227,15 @@ python cosmo_genetic_optimizers.py --self-test
 
 # Part 2 — Technical reference
 
-## Architecture (shared core + 4 executables + profiler)
+## Architecture (shared core + 4 executables + orchestrator + profiler)
 
 ```
+                      cosmo_hpc_runner.py
+                  (parallel orchestrator: one model
+                   per process, core partitioning,
+                   RAM budget, convergence plots)
+                            │ launches
+                            ▼
             cosmo_core.py   ← PHYSICS + DATA + STATISTICS + Aer device factory
         ┌────────┼────────┐         (shared by everything)
         │        │        │
@@ -453,6 +459,82 @@ python cosmo_genetic_optimizers.py --methods qga --qga-config \
 python cosmo_genetic_optimizers.py --self-test
 ```
 
+### `cosmo_hpc_runner.py` — parallel orchestrator for a compute node
+
+The launcher you actually use on a cluster. It runs the **two simulator
+pipelines in parallel** — `cosmo_modular_quantum.py` (QMCMC + QVMC ladders)
+and `cosmo_genetic_optimizers.py` (CGA + QGA) — **one model per process**,
+without modifying a line of either script: it just invokes their existing,
+tested CLI (`--sweep-all --sweep-models <model>`). It auto-detects the node's
+cores and RAM, so nothing is hard-wired to a particular machine.
+
+**What it solves.** Four things that bite on a shared node:
+
+1. **Real parallelism.** Python's GIL serializes the MCMC and GA loops, so
+   threads buy nothing; separate processes give separate GILs plus crash
+   isolation (one model blowing up doesn't take the batch with it).
+2. **Oversubscription.** The heavy math (NumPy/BLAS, Aer) is already
+   multi-threaded in C++. Launch *W* processes that each grab all 80 cores and
+   you get W×80 threads fighting over 80 cores — slower than serial. The runner
+   fixes `OMP_NUM_THREADS` & friends in each child's environment **before** the
+   interpreter starts (they're read at NumPy/Qiskit import time, which is why
+   this can't be done from threads), enforcing J processes × T threads ≈ cores.
+3. **RAM.** It estimates each task's peak memory, refuses to admit more
+   concurrent tasks than the budget allows, and **clamps the grid per model**:
+   if a 4-parameter model would exceed the ceiling, only that model's `nqpp` /
+   `n_bits` is lowered, while the light models keep the requested value
+   (`--strict-qubits` skips instead of clamping).
+4. **Measurement.** It samples peak RSS of each process *tree*, prefers the
+   figure `cosmo_profiling` measured inside the child when available, and
+   writes `master_profile.csv` / `.json` plus a summary table. On failure it
+   tails the child's log so you see the traceback without hunting for it.
+
+It also generates the **convergence-vs-grid figures** at the end of a sweep
+(`convergence_<model>.png`, `cost_<model>.png`): each parameter ±σ vs `nqpp`,
+with Planck / SH0ES reference lines, and wall time + peak RAM vs `nqpp`.
+Methods that don't use the grid (MCMC/QMCMC) are detected automatically and
+drawn as a single horizontal line rather than a fake curve.
+
+```bash
+# Whole node, auto-detected, both pipelines, all models:
+python cosmo_hpc_runner.py --dataset CC+BAO+Pantheon+ \
+    --steps 15000 --qvmc-iter 3000 --nqpp 3 \
+    --generations 120 --population-size 200 --n-bits 6 \
+    --threads-per-worker 8
+
+# See the plan (and every command it would run) without running anything:
+python cosmo_hpc_runner.py --dry-run
+
+# Grid-convergence study: one task per nqpp in {2..5}, samplers only
+python cosmo_hpc_runner.py --nqpp-sweep 2 5 --only-samplers --models lcdm wcdm
+
+# The QGA analogue: sweep the genetic grid size
+python cosmo_hpc_runner.py --nbits-sweep 3 6 --only-genetic --models lcdm
+
+# Regenerate the convergence figures of a finished run, without recomputing:
+python cosmo_hpc_runner.py --plot-only results/hpc_<timestamp>/
+```
+
+Useful flags: `--only-samplers` / `--only-genetic`, `--models`, `--max-parallel`,
+`--threads-per-worker`, `--mem-budget-gb`, `--max-task-gb`, `--strict-qubits`,
+`--gpu`, `--no-profile`, `--no-plots`.
+
+> **RAM, cores and the per-task qubit ceiling are all auto-detected — you
+> never have to set a memory-related flag to use your own machine.** The node's
+> cores (`os.cpu_count()`) and total RAM (`psutil`) are read at startup, and
+> the per-task qubit cap for EACH pipeline is derived straight from that: how
+> many qubits fit is computed from the pipeline's own memory cost (samplers:
+> 13.3 kB/state, the likelihood auxiliary arrays; genetic: 16 B/state, a plain
+> statevector — the QGA never builds the samplers' grid). `--max-qubits` /
+> `--max-qubits-genetic` exist only as OPTIONAL overrides to be more
+> conservative than your RAM allows (a shared node, or a deliberately faster/
+> coarser run) — leave them unset and the ceiling is whatever your machine
+> actually has. The printed plan always says which case you're in:
+> `[auto, derived from detected RAM]` or `[user override --max-qubits=N]`.
+> (Fixed after an audit of this file — the two caps used to default to fixed
+> numbers regardless of the detected RAM, and shared the samplers' memory
+> model, needlessly clamping the QGA. See *Memory limits* below.)
+
 ### `qpu_cosmo_samplers.py` — real IBM Quantum hardware
 
 QPU-only, via `qiskit-ibm-runtime` (SamplerV2 + Batch/Session). **No
@@ -584,6 +666,36 @@ directly comparable to a new one** — regenerate before citing.
   the scale `step_frac` is tuned for, which on real hardware would have
   driven acceptance to ≈1 with barely-moving chains).
 
+### Orchestrator audit (`cosmo_hpc_runner.py`)
+
+Reviewed after the Fase 3 round. One real defect, fixed and verified:
+
+* **The QGA memory estimate used the samplers' formula.** Both the
+  orchestrator and `cosmo_genetic_optimizers.py`'s own `--max-qubits`
+  validation costed the QGA at 2^(n_bits·d) × 13.3 kB/state — the samplers
+  model, where the likelihood really does build `(n_states, N_data)` auxiliary
+  arrays over the grid. The QGA does no such thing (fitness is scored on the
+  population), so its true cost is one plain statevector at 16 B/state:
+  an **~830x over-estimate**. The visible consequence was the clamp lowering
+  CPL from `n_bits=6` to `4` — a 64-level grid per axis down to 16 — to protect
+  ~268 MB it thought were 223 GB. Nothing crashed and no result was wrong; the
+  cost was resolution and parallelism (each genetic task also reserved 3.5 GB
+  of phantom budget, admitting fewer concurrent tasks than the node could take).
+  Fixed with per-pipeline constants and a per-process baseline (~250 MB) the
+  estimate had been ignoring entirely. Verified end-to-end: CPL at 24 q now
+  runs, estimated 518 MB vs 510 MB measured.
+
+* **The qubit ceiling was a fixed number, not actually tied to the RAM the
+  code already detects.** A same-day follow-up: `psutil` was already reading
+  the node's RAM, but `--max-qubits` / `--max-qubits-genetic` were fixed
+  defaults (18 / 26) layered on top, so using your own detected RAM required
+  manually raising a flag. Both now default to `None` ("auto"): with nothing
+  set, the ceiling is derived purely from detected RAM per pipeline (~20 q
+  samplers / ~29 q genetic at a 14 GB budget); the flags remain as optional
+  overrides to be more conservative. The printed plan states which case
+  applies. Verified sane on both ends (14 GB laptop -> 20/29 q; ~106 GB HPC
+  node -> 22/~34 q — no runaway multi-day plan from leaving it on auto).
+
 ### Fase 2 audit (original hardening — kept for the record)
 
 * **Apparent "identical results across quantumness".** Not a routing bug:
@@ -706,9 +818,18 @@ simply do not appear in the menu.
   and in batch/HPC mode (any CLI argument) the live window is disabled by
   design.
 
-### Memory limits: how high can `nqpp` go?
+### Memory limits: how high can `nqpp` (and `n_bits`) go?
 
-The quantum methods (QVMC, QGA) discretize the posterior on a statevector
+> **The samplers and the QGA have DIFFERENT memory models** — an audit of
+> `cosmo_hpc_runner.py` found that the same formula was being applied to both,
+> over-estimating the QGA by ~830x and needlessly clamping `n_bits` for
+> 4-parameter models (CPL was silently dropped from a 64-level grid per axis to
+> 16 to "save" memory it was never going to use). The table below is the
+> **samplers** model (QVMC/VI); the QGA model follows it.
+
+#### Samplers (QVMC / classical VI): `nqpp`
+
+The variational methods discretize the posterior on a statevector
 grid of **2^(nqpp·d)** states, where `d` is the number of model parameters.
 Both the time and the memory grow **exponentially** in `nqpp·d`: the grid
 itself, plus the auxiliary arrays the likelihood builds over it, roughly
@@ -747,6 +868,33 @@ To go above the default cap on a bigger machine, raise it explicitly:
 python cosmo_modular_quantum.py --benchmark --model cpl --nqpp 6 \
     --max-qubits 24 --dataset CC+BAO+Pantheon+ --gpu --profile
 ```
+
+#### Genetic (QGA): `n_bits`
+
+The QGA is **much cheaper** than the equivalent `nqpp`, because it never
+evaluates the likelihood over the grid: fitness is scored on the *population*
+(`pop_size × d`), not on 2^(n_bits·d) points. Only the quantum initialization
+is `d·n_bits` qubits wide; mutation uses `n_bits` and crossover `2·n_bits`,
+both independent of `d`. So the cost is one plain statevector — **16 bytes per
+state** (one complex128 amplitude), not the 13.3 kB/state of the samplers.
+
+Measured (peak RSS, Aer statevector, `H^n + measure_all`): 20 q → 17.5 MB ·
+22 q → 65.6 MB · 24 q → 258 MB, i.e. it converges to the 16 B/state theory.
+Add ~250 MB of fixed per-process cost (interpreter + numpy/qiskit/matplotlib).
+
+| Total qubits `n_bits·d` | 20 | 24 | 26 | 28 | 30 |
+|---|---|---|---|---|---|
+| Statevector | 17 MB | 268 MB | 1.1 GB | 4.3 GB | 17 GB |
+
+When run through the orchestrator, the cap is **auto-derived from your
+detected RAM** (see above) — no flag needed. At a typical 14 GB laptop budget
+this alone gives ~29 q (comfortably above CPL's `n_bits=6` = 24 q, so every
+model runs at the same resolution); on Nicte-Ha's ~106 GB it is ~34 q. Running
+`cosmo_genetic_optimizers.py` directly (not through the orchestrator) uses its
+own fixed default of **26 q** (≈1.1 GB), since a standalone script has no
+"aggregate node" to detect. `--max-qubits` (standalone) /
+`--max-qubits-genetic` (orchestrator) override either default if you want to
+be more conservative.
 
 **On real quantum hardware** (`qpu_cosmo_samplers.py`) this RAM limit does
 **not** apply — a QPU never materializes the statevector in memory, it holds
