@@ -5,6 +5,12 @@ real data (combined CC+BAO H(z) measurements, and Type Ia supernovae —
 Pantheon 2018 or Pantheon+ 2022) using **classical** and **quantum**
 sampling algorithms, and compares them head to head.
 
+**Status:** post-Fase-3 hardening (33 tests, all green). Convergence,
+divergence-tracking (KL), gradients, and reproducibility were audited and
+fixed this round — see [Diagnostics and correctness fixes](#diagnostics-and-correctness-fixes)
+for the full list, and re-run any figure generated before this round before
+citing it (the convergence flag and KL numbers changed definition).
+
 This README has two parts:
 
 * **Part 1 — Plain-language guide.** No physics or quantum background
@@ -77,6 +83,9 @@ Turning a dial up switches one more part to quantum. That's it. (The numbers
 are just even fractions: QMCMC has 2 parts, so its rungs are halves; QVMC
 has 3 parts, so its rungs are thirds.)
 
+The genetic optimizer (`cosmo_genetic_optimizers.py`) has its own **third
+dial**, also in thirds — see the technical section for details.
+
 ## The one thing that surprises everyone
 
 When you turn a dial up, **sometimes the answer changes and sometimes it
@@ -120,6 +129,15 @@ The menu asks three things:
 
 It then produces a set of **pictures** in the output folder.
 
+> **CLI mode prints less than you'd expect — on purpose.** With any
+> command-line argument, the script switches to batch mode: it prints only
+> where results are going, then sends every step of progress to a **log
+> file** in that folder (not the terminal), so it behaves well when
+> redirected on an HPC job. The terminal going quiet for a minute or two
+> **does not mean it stopped** — `tail -f results_.../*.log` to watch it
+> live, or just wait: it returns to the prompt when it's actually done, with
+> every figure and CSV already written.
+
 There is also a **global optimizer** that hunts for the single best-fit point
 (the MAP) using genetic algorithms — classical (CGA) and quantum (QGA) — with
 a live animation of the population converging:
@@ -154,6 +172,14 @@ python cosmo_genetic_optimizers.py --sweep-all --dataset CC+BAO+Pantheon+ \
 Restrict the sweep with `--sweep-models lcdm cpl` (and, for the genetic
 script, `--sweep-qga-levels 0 100`).
 
+**Before a long HPC launch**, pin the BLAS thread count *before* the
+process starts, or many parallel model-processes will oversubscribe the
+node's cores against each other:
+
+```bash
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+```
+
 ## How to read the pictures
 
 * **Corner plots** (`corner_ladder_*`) — estimated values and their
@@ -161,10 +187,15 @@ script, `--sweep-qga-levels 0 100`).
   the blobs sit on top of each other, the methods agree.** Dashed lines
   mark the reference ("Planck") values.
 * **Convergence curve** (`ladder_rhat_*`) — whether the wandering search
-  has "settled down." Lower is better; below the dashed line means
-  "settled."
+  has "settled down." Lower is better; below the dashed line (R̂−1 = 0.01)
+  means "settled." This threshold is strict on purpose — the whole project
+  compares posteriors to each other, and a half-cooked one invalidates the
+  comparison.
 * **Training curve** (`ladder_kl_*`) — the shape-fitting getting better
-  over time. Lower is a better fit.
+  over time. Lower is a better fit. Since the Fase-3 hardening, this number
+  can no longer look artificially good by ignoring probability the model
+  puts in the wrong place — a genuinely bad fit now genuinely shows a high
+  KL.
 * **Summary table** (`ladder_summary_*`) — the final numbers for every
   dial setting, side by side.
 
@@ -185,7 +216,11 @@ python cosmo_modular_quantum.py --sanity-check
 
 It prints a table of which parts ran on the quantum circuit (⚛) vs a
 normal computer (🖥), plus a self-test that the accept/reject rule behaves
-correctly.
+correctly. The genetic optimizer has the equivalent button:
+
+```bash
+python cosmo_genetic_optimizers.py --self-test
+```
 
 ---
 ---
@@ -234,9 +269,13 @@ Strict physics ↔ sampling separation:
   diagonal and full-covariance SNe likelihoods alike.
 * **Statistics** — integrated autocorrelation τ (FFT, O(N log N), with
   Sokal automatic windowing), ESS (chains via τ_max, and Kish weights),
-  classical Gelman-Rubin **and** rank-normalized split-R̂ (Vehtari et al.
-  2021) with the modern convergence threshold R̂ < 1.01, `fit_statistics`
-  (χ², χ²_red, AIC, BIC with Nelder-Mead refinement).
+  and **rank-normalized split-R̂** (Vehtari et al. 2021), `RHAT_THRESHOLD
+  = 1.01`. This is now the ACTIVE convergence criterion everywhere — it
+  drives early-stop, the `converged` flag in every CSV, and every R̂ figure
+  (previously the loops used a legacy Gelman-Rubin check at an effective
+  1.05 despite split-R̂ already being implemented here; that inconsistency
+  is fixed — see [Diagnostics](#diagnostics-and-correctness-fixes)).
+  `fit_statistics` gives χ², χ²_red, AIC, BIC with Nelder-Mead refinement.
 
 ### `cosmo_modular_quantum.py` — simulator with switchable ablation
 
@@ -303,11 +342,11 @@ classical neighbour — by design:
 
 | Ladder step | What changes | Kind | Outcome |
 |---|---|---|---|
-| QMCMC 0→50 % | proposal C→Q | algorithmic | **changes** (genuine quantum proposal) |
+| QMCMC 0→50 % | proposal C→Q | algorithmic | **changes** (genuine quantum proposal, calibrated to unit std) |
 | QMCMC 50→100 % | acceptance C→Q | faithful | **identical** — quantum Metropolis reproduces classical |
 | QVMC 0→33 % | sampling C→Q | faithful | ~identical (same trained state, only shot noise) |
-| QVMC 33→67 % | training C→Q | algorithmic | **changes strongly** (param-shift reaches a far lower KL) |
-| QVMC 67→100 % | normalization C→Q | faithful | ~identical (faithful renormalization) |
+| QVMC 33→67 % | training C→Q | algorithmic | **changes strongly** (exact parameter-shift reaches a lower KL) |
+| QVMC 67→100 % | normalization C→Q | faithful | ~identical (faithful renormalization — the circuit is illustrative; the norm applied is the classical sum) |
 
 ```bash
 # Interactive (menu)
@@ -324,6 +363,13 @@ python cosmo_modular_quantum.py --config \
 # Routing + correctness self-check
 python cosmo_modular_quantum.py --sanity-check
 ```
+
+**A note on `--preset N`.** The single-config presets (`--preset 0/20/45/70/90/100`)
+use legacy keys kept for CSV continuity — the number in the flag is **not**
+always the number reported in the output. `--preset 45` reports 40%,
+`--preset 70` reports 60%, `--preset 90` reports 80% (0 and 100 do match).
+If you want the flag and the report to agree, use `--config` or the
+per-method `--benchmark` ladders instead, where the keys are exact.
 
 ### `cosmo_genetic_optimizers.py` — global optimization (CGA / QGA)
 
@@ -345,17 +391,34 @@ a model (VC, …) needs zero changes here.
   | Operator | Kind | Quantum implementation |
   |---|---|---|
   | `q_init` | algorithmic | Hadamard layer → superposition → population sampled by measurement |
-  | `q_mutation` | algorithmic | parametrized RY rotation per gene-qubit (amplitude tied to `mutation_scale`) |
-  | `q_crossover` | algorithmic | CX entanglement between homologous parent qubits + controlled-RY interference |
+  | `q_mutation` | algorithmic | RY rotation per gene-qubit, **gated by `mutation_rate`** (only selected genes get a circuit — same rate the classical operator uses) with flip probability calibrated so the expected step size matches the classical Gaussian kick (`p_flip = mutation_scale·√(2/π)/(1−2⁻ⁿᵇ)`) |
+  | `q_crossover` | algorithmic | **partial SWAP** (SWAP^α, α=0.5 default) between homologous parent gene-qubits, measure register A. Identity on agreeing bits (**consensus is always preserved**); disagreeing bits inherit from either parent via genuine two-qubit interference |
 
   The ablation index is (#quantum operators)/3 · 100, so the QGA ladder is
   `0 → 33 → 67 → 100 %`. QGA with all operators OFF (0%) reproduces the CGA
-  **bit-for-bit** — the mandatory classical baseline (a faithful cell).
+  **bit-for-bit** — the mandatory classical baseline (a faithful cell),
+  verified by `--self-test`.
+
+  > **Fase 3 note — the crossover operator was rewritten.** The original
+  > `q_crossover` circuit (CX entanglement + controlled-RY interference)
+  > had a verified bug: it computed child ≈ parent_A XOR parent_B, so when
+  > both parents *agreed* on a bit the child lost it with ~85% probability
+  > — the opposite of what a crossover should do. Elitism masked the
+  > symptom (the best individual survived regardless), but the population's
+  > mean fitness suffered badly. The SWAP^α operator above replaces it and
+  > is covered by a dedicated regression test
+  > (`tests/test_qga_crossover.py`) asserting the truth table on the real
+  > transpiled circuit. **Any QGA result generated with `q_crossover=True`
+  > before this fix (rung 100%, or a custom config) should be
+  > re-run.**
+
   [A1] All operator circuits are PARAMETRIZED and transpiled **once** at
   `__init__`; each individual's gene bits enter only through bound rotation
   angles, so the per-generation hot loop binds parameters on the cached
-  transpiled template and never re-transpiles (the previous version
-  transpiled one fresh circuit per individual per generation).
+  transpiled template and never re-transpiles. Aer measurement seeds are
+  derived deterministically from the run's `--seed` (Fase 3): two QGA runs
+  with the same seed now reproduce bit-for-bit, including the quantum
+  operators (previously only the classical parts were reproducible).
 
 **Live GUI** (interactive mode only): a two-panel Matplotlib window —
 phase-space scatter (population colored by fitness, converging to the MAP in
@@ -392,7 +455,6 @@ python cosmo_genetic_optimizers.py --self-test
 
 ### `qpu_cosmo_samplers.py` — real IBM Quantum hardware
 
-
 QPU-only, via `qiskit-ibm-runtime` (SamplerV2 + Batch/Session). **No
 AerSimulator. Runs no classical method** — real QPU time is scarce, and
 classical baselines belong in the simulator pipeline. Hardware-driven
@@ -401,9 +463,9 @@ design differences:
 | Aspect | Simulator | Real QPU |
 |---|---|---|
 | Quantum information | exact statevector | measured counts (shots) |
-| Proposal displacement | Re(amplitudes), unit-std calibrated | ⟨Z_q⟩ = 1 − 2·P(q=1) |
-| QVMC gradient | parameter-shift | **SPSA (2 evals/iter, 1 job)** |
-| KL | exact over 2^n states | estimated on the observed support |
+| Proposal displacement | Re(amplitudes), unit-std calibrated from a fixed constant | ⟨Z_q⟩ = 1 − 2·P(q=1), **now also unit-std calibrated** from the first hardware block (Fase 3 — see Diagnostics) |
+| QVMC gradient | exact parameter-shift (shift applied to the circuit probabilities + chain rule) | **SPSA (2 evals/iter, 1 job)** |
+| KL | over the full 2^n grid, ε-smoothed target — same definition as the simulator | estimated on the observed support, ε-smoothed (same definition; biased low by unobserved support, declared) |
 | Acceptance | Metropolis via abs(amp0)^2 | Metropolis on CPU (sequential) |
 | Error suppression | — | Dynamical Decoupling XY4 + Pauli twirling |
 
@@ -417,7 +479,12 @@ python qpu_cosmo_samplers.py --model lcdm --method qvmc --iters 50 \
 ```
 
 `--max-jobs` aborts BEFORE connecting if the run would exceed the budget;
-`--dry-run` validates the whole workflow with synthetic counts.
+`--dry-run` validates the whole workflow with synthetic counts. **Status:**
+validated in dry-run; no real-hardware run has been executed yet. Before the
+first real run, confirm on the actual device that (a) the calibrated
+proposal displacement lands in the healthy 0.2–0.5 acceptance band and (b)
+the calibration is stable across blocks (readout drift would show up as
+acceptance drifting over the run).
 
 ## QPU time estimation
 
@@ -458,7 +525,66 @@ inter-iteration queue; keep `--iters ≤ 50` on the open plan.
 
 `--sanity-check` prints an acceptance regression test, the proposal
 statistics, and a per-preset engine map (Qiskit/Aer vs NumPy/SciPy) with a
-live routing trace. Audited issues:
+live routing trace.
+
+### Fase 3 hardening (convergence, KL, gradients, reproducibility)
+
+The most recent audit round (adversarial code review, all fixes verified
+with executed numerical checks, not just read) closed six specific gaps.
+**Any figure, CSV row, or convergence flag produced before this round is not
+directly comparable to a new one** — regenerate before citing.
+
+* **QGA crossover bug (the significant one).** See the operator table above
+  — `q_crossover` computed the XOR of the parents' bits, destroying
+  consensus. Fixed with a consensus-preserving partial-SWAP. Affects rung
+  100% and any custom config with `q_crossover=True`; re-run those.
+* **Convergence criterion wasn't wired up.** `split_rhat` /
+  `RHAT_THRESHOLD = 1.01` were implemented and tested but never called from
+  the sampling loops, which used a legacy Gelman-Rubin check at an
+  effective 1.05 instead. Now split-R̂ drives early-stop, the `converged`
+  flag, and every R̂ figure, in both the simulator and the QPU pipeline.
+  **CSVs with `converged=True` from before this fix used the looser
+  criterion — don't compare that flag across the change.**
+* **Comparisons could silently drift.** The forced classical baseline could
+  stop at a different chain length than its quantum counterpart (early-stop
+  triggering independently on each side), and the VI part of the
+  comparison could start from a different initial state on each side
+  (inherited RNG state from whatever the preceding sampler consumed).
+  Both are now fixed: comparisons force equal chain lengths, and every
+  sampler is explicitly re-seeded right before it starts, so a same-seed
+  comparison shares its VI initialization bit-for-bit.
+* **The KL objective could ignore leaked probability mass.** The training
+  target was previously masked and renormalized to the support where the
+  reference posterior is non-negligible — so a trained state that put most
+  of its probability *outside* that support could still report a KL near
+  zero. It's now computed against an ε-smoothed target over the *full*
+  support (matching the definition the QPU pipeline already used), so
+  leaked mass is penalized and the simulator and QPU KL values are directly
+  comparable.
+* **The QVMC training gradient was a biased finite difference, not exact
+  parameter-shift.** Parameter-shift is only exact on quantities that are
+  themselves circuit expectation values; applying it directly to the KL
+  (which is not one) had a measured ~10% relative error. It's now applied
+  to the circuit *probabilities* (where it is exact) with the KL gradient
+  assembled by the chain rule — same circuit cost, gradient exact to
+  numerical precision.
+* **Quantum mutation ignored `mutation_rate` and its strength wasn't
+  calibrated.** See the operator table — fixed by gating on the rate and
+  calibrating the flip probability to match the classical operator's
+  expected step size, so the mutation rung of the ladder isolates the
+  *operator*, not an uncontrolled change in intensity.
+* **Reproducibility gaps.** QGA's quantum operators now derive their Aer
+  seed from the run seed (previously irreproducible even with a fixed
+  `--seed`); the simulator's quantum-proposal engine calibrates its
+  zero-mean/unit-std normalization once from a dedicated block instead of
+  per-block (previously each block was normalized against itself, making
+  displacements within a block weakly correlated); the same fix was applied
+  to the QPU proposal engine, which previously had no calibration at all
+  (raw ⟨Z_q⟩ has std ≈ 0.05–0.12 on 128 shots — roughly 10× smaller than
+  the scale `step_frac` is tuned for, which on real hardware would have
+  driven acceptance to ≈1 with barely-moving chains).
+
+### Fase 2 audit (original hardening — kept for the record)
 
 * **Apparent "identical results across quantumness".** Not a routing bug:
   each sampler only reads its own components, the `sampling` toggle draws
@@ -467,7 +593,7 @@ live routing trace. Audited issues:
   is a faithful reproduction. The per-method ladders make the axis
   monotonic; the remaining coincidences are the *replication* result.
 
-* **Inverted quantum acceptance (the real convergence bug).** The old
+* **Inverted quantum acceptance (the original convergence bug).** The old
   Hadamard-test readout *decreased* with Δ = lp_prop − lp_cur (accepted
   worse moves), so quantum-acceptance chains drifted to the box edges
   (Ωm ≈ 0.37, H0 ≈ 77). It now encodes Metropolis min(1, e^Δ) as the |0⟩
@@ -477,7 +603,8 @@ live routing trace. Audited issues:
 * **Proposal calibration.** The quantum displacement is zero-mean but had
   std ≈ 0.35 (~3× smaller than the classical N(0,1)), pushing acceptance
   to ≈ 0.80 (slow mixing). Each block is normalized to unit std →
-  acceptance ≈ 0.5.
+  acceptance ≈ 0.5. (Fase 3 replaced the per-block normalization with a
+  once-off calibration — see above.)
 
 * **QVMC optimizer & the high-quantumness divergence.** Two distinct
   issues were untangled here. (1) The original "stalled-KL" symptom was the
@@ -493,10 +620,12 @@ live routing trace. Audited issues:
   nqpp), **(b) learning-rate decay scaled by the number of angles** (larger
   ansätze cool faster), and **(c) best-so-far selection** (the returned φ is
   the lowest-KL iterate ever seen, not the last — so even a wobbly tail
-  reports the true minimum). The creep-up is gone. Note that the absolute
-  KL floor depends on grid resolution (see adaptive grid below): with a
-  coarse grid both classical and quantum plateau at a higher KL, which is a
-  *resolution* limit, not an optimizer failure.
+  reports the true minimum). The creep-up is gone; re-verified after the
+  Fase 3 exact-gradient fix (which changes the effective step scale) with
+  zero KL upticks across 150 iterations on the reference model. Note that
+  the absolute KL floor depends on grid resolution (see adaptive grid
+  below): with a coarse grid both classical and quantum plateau at a higher
+  KL, which is a *resolution* limit, not an optimizer failure.
 
 * **QVMC adaptive grid (resolving a smooth posterior).** QVMC represents
   the posterior as a probability mass function on a discrete 2^nqpp grid.
@@ -528,7 +657,7 @@ on an HPC queue:
 * **Exponential-memory guard.** A too-large `nqpp` (e.g. nqpp=6 with CPL =
   2^24 states) would attempt a multi-GB/TB allocation and get OOM-killed.
   The `--max-qubits` cap (default 18) refuses it with the per-model limit;
-  raise the cap explicitly on a bigger machine (see *Memory limits* above).
+  raise the cap explicitly on a bigger machine (see *Memory limits* below).
 * **Corrupt data rows.** Data files with NaN/inf or non-positive sigma used
   to load silently and poison every χ². They are now dropped with a warning.
 * **Concurrent CSV writes.** Multiple SLURM array jobs appending to the same
@@ -599,6 +728,17 @@ depends on `d`. Worst-case auxiliary memory (combined dataset with ~1048 SNe):
 
 Approximate worst-case memory by total qubits: 12 q ≈ 54 MB · 16 q ≈ 0.9 GB ·
 18 q ≈ 3.5 GB · 20 q ≈ 14 GB · 22 q ≈ 56 GB · 24 q ≈ 224 GB.
+
+> **QVMC training pays an extra multiplier on top of the grid.** The above
+> is the cost of the target/state vector itself. When `training` is quantum
+> (the ladder's 67%/100% rungs), the gradient step batches **2·n_φ**
+> statevectors in one Aer job (n_φ = ansatz parameter count), so peak
+> memory during training is roughly `2·n_φ ×` the single-statevector cost
+> in the table above — for CPL (d=4) at `nqpp=6` this is already ~90 GB,
+> outside laptop and workstation range even though the *sampling*-only
+> cost at that resolution might look affordable. If a training rung OOMs
+> while sampling-only rungs at the same `nqpp` don't, this is why — lower
+> `nqpp` for that model rather than raising `--max-qubits` further.
 
 To go above the default cap on a bigger machine, raise it explicitly:
 
@@ -702,7 +842,8 @@ ladder + classical baseline; the QPU dispatches it quantum-only.
 * Spall (1998) — SPSA.
 * Gelman & Rubin (1992) — original R̂ diagnostic.
 * Vehtari, Gelman, Simpson, Carpenter & Bürkner (2021) — rank-normalized
-  split-R̂ and the 1.01 convergence threshold.
+  split-R̂ and the 1.01 convergence threshold (the active criterion since
+  the Fase 3 hardening).
 * Sokal (1996) — integrated autocorrelation time and automatic windowing.
 * Foreman-Mackey et al. (2013, 2016) — emcee autocorrelation, corner.py.
 
@@ -714,10 +855,17 @@ physics:
 * **Pinned environment.** `requirements.txt` is pinned to the verified
   working environment (Qiskit 2.4.2 / Aer 0.17.2 / numpy 1.26.4); CUDA extras
   live in `requirements-gpu.txt`.
-* **Tests + CI.** `tests/` holds a pure-NumPy correctness floor (physics,
-  statistics, the ablation framework, the QPU helpers) that runs without
-  Qiskit; `pytest` runs it, and `.github/workflows/tests.yml` runs it on every
-  push. Faithful (null) ablation cells are encoded as falsifiable tests.
+* **Tests + CI.** `tests/` holds 33 tests: a pure-NumPy correctness floor
+  (physics, statistics, the ablation framework, the QPU helpers) that runs
+  without Qiskit, plus dedicated Qiskit-Aer regression tests — added in the
+  Fase 3 round — that verify the QGA crossover truth table, the exact
+  training gradient, the KL leakage penalty, and the calibration/
+  reproducibility of both proposal engines on real circuits. The Qiskit-Aer
+  tests skip automatically if Qiskit/Aer are absent, so make sure the CI
+  environment installs them if you want CI to catch a regression on that
+  side too. `pytest` runs the full suite; `.github/workflows/tests.yml` runs
+  it on every push. Faithful (null) ablation cells are encoded as falsifiable
+  tests.
 * **Data provenance.** `data_manifest.py` records SHA256 checksums and the
   source of every dataset; run `python data_manifest.py --generate` after
   placing the data files, and `--verify` to check integrity. The data files
@@ -725,7 +873,10 @@ physics:
   listed in the manifest.
 * **License & citation.** `LICENSE` (MIT) and `CITATION.cff` (add your ORCID
   and the archived DOI once you mint a release on Zenodo).
-* **Determinism.** Runs are seeded (`--seed`, default 42). Note that
+* **Determinism.** Runs are seeded (`--seed`, default 42). QGA's quantum
+  operators and comparison-vs-baseline runs are now re-seeded explicitly at
+  the point each stochastic component starts (Fase 3), so a fixed seed
+  reproduces the quantum parts too, not just the classical ones. Note that
   float-reduction order under multi-threaded BLAS can make bit-for-bit
   identity across machines fragile; the "QGA(0%) == CGA" claim is verified at
   fixed thread count and is otherwise statistically (not bitwise) identical.
