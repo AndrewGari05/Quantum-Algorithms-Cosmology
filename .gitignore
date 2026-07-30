@@ -9,3 +9,6 @@ bridge.out
 bridge.toc
 data_checksums.json
 resultados/
+results_retune/
+cosmic_chronometers.txt
+pantheon_full_parameters.txt
