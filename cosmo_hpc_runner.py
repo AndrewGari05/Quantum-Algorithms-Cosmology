@@ -87,7 +87,9 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+
+import cosmo_noise as cnoise
 
 # psutil is a project dependency (cosmo_profiling). If missing, we degrade to
 # /proc so we do not break the process-tree memory measurement.
@@ -154,6 +156,27 @@ BYTES_PER_STATE_BY_KIND = {
     'nqpp': BYTES_PER_STATE_SAMPLERS,     # samplers tasks
     'n_bits': BYTES_PER_STATE_GENETIC,    # genetic tasks
 }
+#
+# NOISY (tercer modelo de memoria — segundo eje de ablacion):
+#   Simular con ruido exige matriz de densidad: 2^(2n) amplitudes complejas en
+#   vez de 2^n, es decir 16 * 4^n bytes. No SUSTITUYE a los dos modelos de
+#   arriba, se SUMA a ellos: la tarea de samplers sigue construyendo su grid de
+#   verosimilitud (1660 floats/estado) y ademas mantiene rho.
+#
+#   El termino de rho domina en cuanto n crece:
+#       n=10 ->  16.0 MB de rho   frente a  13.6 MB de grid
+#       n=12 -> 256.0 MB de rho   frente a  54.4 MB de grid
+#       n=13 ->   1.0 GB de rho   frente a 108.9 MB de grid
+#
+#   Pero el limitante REAL de este eje no es la memoria sino el TIEMPO, y por
+#   eso el techo (cosmo_noise.MAX_NOISY_QUBITS = 13) es una constante explicita
+#   y no un valor derivado de la RAM detectada como los otros dos. Medido con
+#   el ansatz real (3 capas, B=2 bindings, 4096 disparos, FakeBrisbane):
+#       n=10 ->   3.8 s/job      n=12 ->  34.4 s/job      n=13 -> 216.5 s/job
+#   A n=14 la matriz de densidad son 4.0 GB y ~14 min por job; una maquina con
+#   mas RAM no mueve ese limite, solo lo hace mas caro.
+BYTES_PER_STATE_NOISY_NOTE = (
+    "rho = 16 * 4^n bytes, sumado al modelo de la tarea; techo por TIEMPO")
 
 # Backwards-compatible alias (any external script importing the old name keeps
 # the samplers semantics it used to get).
@@ -171,6 +194,9 @@ class Task:
     outdir: str
     grid_value: int = 0             # EFFECTIVE nqpp (samplers) or n_bits (genetic)
     grid_kind: str = ""             # 'nqpp' | 'n_bits'
+    # [NOISE] Segunda dimension del eje de ablacion, tratada como una mas
+    # (igual que nqpp y n_bits): etiqueta canonica del peldano de ruido.
+    noise: str = "none"
     # Results (filled in at run time):
     pid: Optional[int] = None
     rc: Optional[int] = None
@@ -194,7 +220,8 @@ class Task:
 # 1.  BUILDING THE TASK LIST
 # =============================================================================
 
-def estimate_qubits_and_mem(total_q: int, kind: str = 'nqpp') -> float:
+def estimate_qubits_and_mem(total_q: int, kind: str = 'nqpp',
+                            noisy: bool = False) -> float:
     """Estimated peak RAM (MB) of a task whose circuit/grid has 2^total_q
     states, plus the fixed per-process interpreter cost.
 
@@ -202,9 +229,25 @@ def estimate_qubits_and_mem(total_q: int, kind: str = 'nqpp') -> float:
     auxiliaries) or 'n_bits' (genetic — one plain statevector). See the
     BYTES_PER_STATE_* comments: using the samplers constant for the QGA
     over-estimated it by ~830x.
+
+    Args:
+        total_q: total circuit/grid qubits (nqpp*d or n_bits*d).
+        kind: 'nqpp' | 'n_bits'.
+        noisy: si True, ANADE la matriz de densidad (16 * 4^total_q). Es un
+            tercer modelo aditivo, no un sustituto: la tarea de samplers sigue
+            necesitando su grid ademas de rho.
     """
     per_state = BYTES_PER_STATE_BY_KIND.get(kind, BYTES_PER_STATE_SAMPLERS)
-    return (2 ** total_q) * per_state / 1e6 + PROCESS_BASELINE_MB
+    mb = (2 ** total_q) * per_state / 1e6 + PROCESS_BASELINE_MB
+    if noisy:
+        # [REV] Con entrenamiento cuantico el coste no es rho suelta sino el
+        # lote de parameter-shift (2*n_phi matrices de densidad a la vez), que
+        # a 12 qubits son 42 GB frente a los 256 MB de una sola. El genetico
+        # no tiene ese lote.
+        factor = (cnoise.param_shift_batch_factor(total_q)
+                  if kind == 'nqpp' else 1)
+        mb += cnoise.noisy_density_bytes(total_q, factor) / 1e6
+    return mb
 
 
 def qubits_fitting_in(mem_mb: float, kind: str = 'nqpp') -> int:
@@ -222,7 +265,7 @@ def qubits_fitting_in(mem_mb: float, kind: str = 'nqpp') -> int:
 
 
 def qubit_ceiling(max_qubits: Optional[int], mem_ceiling_mb: float,
-                  kind: str = 'nqpp') -> int:
+                  kind: str = 'nqpp', noisy: bool = False) -> int:
     """EFFECTIVE per-task qubit ceiling for the given pipeline `kind`.
 
     [AUTO] `max_qubits=None` (the default — see build_parser) means "no user
@@ -232,11 +275,34 @@ def qubit_ceiling(max_qubits: Optional[int], mem_ceiling_mb: float,
     you want to leave headroom, or you want a faster/coarser run on purpose).
     You can never exceed what fits in RAM this way — it stays the ultimate
     backstop regardless of what you pass.
+
+    [NOISE] Con `noisy=True` se aplica ADEMAS el techo del eje de ruido, que
+    tambien se deriva de la RAM — igual que los otros dos, y a diferencia de
+    lo que hacia la primera version de este eje, que lo fijaba en 13 duro
+    argumentando un limite de tiempo. Era una mala generalizacion sacada de
+    una maquina pequena: en un nodo grande y sin prisa el limitante vuelve a
+    ser la memoria, y esa si se relaja.
+
+    Lo que manda con ruido no es rho suelta sino el LOTE de parameter-shift
+    del entrenamiento cuantico del QVMC (`2 * n_phi` matrices de densidad a la
+    vez). Como una tarea de samplers recorre la escalera entera, ese peldano
+    es el que fija su techo. El genetico no tiene ese lote y por eso recibe
+    `quantum_training=False`.
+
+    Args:
+        max_qubits: tope pedido por el usuario, o None.
+        mem_ceiling_mb: RAM disponible por tarea.
+        kind: 'nqpp' | 'n_bits'.
+        noisy: aplica el techo del eje de ruido.
     """
     ram_ceiling = qubits_fitting_in(mem_ceiling_mb, kind)
-    if max_qubits is None:
-        return ram_ceiling
-    return min(max_qubits, ram_ceiling)
+    ceiling = (ram_ceiling if max_qubits is None
+               else min(max_qubits, ram_ceiling))
+    if noisy:
+        ceiling = min(ceiling, cnoise.noisy_qubit_ceiling(
+            requested=None, mem_mb=mem_ceiling_mb,
+            quantum_training=(kind == 'nqpp')))
+    return ceiling
 
 
 def grid_values_for_model(single: int, sweep: Optional[List[int]], d: int,
@@ -285,15 +351,38 @@ def grid_values_for_model(single: int, sweep: Optional[List[int]], d: int,
 
 
 def build_tasks(args, master_dir: str, q_ceiling: int,
-                notices: List[str], q_ceiling_genetic: Optional[int] = None
+                notices: List[str], q_ceiling_genetic: Optional[int] = None,
+                noise_levels: Optional[List[str]] = None,
+                noisy_q_ceiling: Optional[int] = None,
+                noisy_q_ceiling_genetic: Optional[int] = None
                 ) -> List[Task]:
-    """One task per (script x model x grid value), with per-model clamping.
+    """One task per (script x model x grid value x NOISE LEVEL).
 
     When a sweep is requested (--nqpp-sweep / --nbits-sweep) one task is
     generated per value, to measure how the grid size affects the results. The
     grid value is trimmed per model according to `q_ceiling` (unless
     --strict-qubits), so a heavy model (CPL, d=4) is lowered on its own while
     the light ones (LCDM, d=2) stay at the target value.
+
+    [NOISE] El nivel de ruido es una dimension de tarea MAS, exactamente igual
+    que nqpp y n_bits: `--noise-sweep none,readout,full` genera la matriz
+    bidimensional (quantumness x ruido) en una sola invocacion. Cada peldano
+    ruidoso lleva su PROPIO techo de qubits y su propio modelo de memoria,
+    porque la matriz de densidad cambia ambos: el techo baja a 13 y el coste
+    de RAM gana un termino 16*4^n que domina al del grid.
+
+    Args:
+        args: namespace del parser del runner.
+        master_dir: carpeta maestra de la corrida.
+        q_ceiling: techo de qubits de samplers SIN ruido.
+        notices: lista donde acumular avisos de recorte.
+        q_ceiling_genetic: techo de qubits genetico SIN ruido.
+        noise_levels: peldanos a generar. None equivale a `['none']`.
+        noisy_q_ceiling: techo de samplers CON ruido.
+        noisy_q_ceiling_genetic: techo genetico CON ruido.
+
+    Returns:
+        Lista de tareas.
     """
     tasks: List[Task] = []
     models = args.models or ALL_MODELS
@@ -309,70 +398,134 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
     sweeping_nqpp = bool(args.nqpp_sweep)
     sweeping_nbits = bool(args.nbits_sweep)
 
-    for m in models:
-        d = MODEL_DIM[m]
+    levels = [cnoise.canonical_level(x) for x in (noise_levels or ['none'])]
+    sweeping_noise = len(levels) > 1
 
-        # ---- Samplers tasks (QMCMC + QVMC), one per nqpp value ----
-        if not args.only_genetic:
-            for nqpp in grid_values_for_model(
-                    args.nqpp, args.nqpp_sweep, d, q_ceiling, strict,
-                    notices, 'nqpp', m):
-                total_q = nqpp * d
-                # visible tag if sweeping or if the clamp changed the value
-                tag = (f"nqpp{nqpp}"
-                       if (sweeping_nqpp or nqpp != args.nqpp) else "")
-                name = f"samplers/{m}" + (f"/{tag}" if tag else "")
-                outdir = os.path.join(
-                    master_dir, f"samplers_{m}" + (f"_{tag}" if tag else ""))
-                argv = ['--sweep-all', '--sweep-models', m,
-                        '--steps', str(args.steps),
-                        '--qvmc-iter', str(args.qvmc_iter),
-                        '--nqpp', str(nqpp),
-                        '--chains', str(args.chains),
-                        '--shots', str(args.shots),
-                        # [AUTO] pass the ACTUAL computed ceiling, not the
-                        # raw --max-qubits (which may be unset): correct
-                        # whether the cap came from RAM-auto-detection or
-                        # from an explicit user override.
-                        '--max-qubits', str(q_ceiling),
-                        '--outdir', outdir] + common_data
-                tasks.append(Task(
-                    name=name, script='cosmo_modular_quantum.py',
-                    argv=argv, model=m, total_qubits=total_q,
-                    est_mem_mb=estimate_qubits_and_mem(total_q, 'nqpp'),
-                    outdir=outdir, grid_value=nqpp, grid_kind='nqpp'))
+    # [NOISE-CONTROL] La columna de control.
+    #
+    # El peldano ideal usa por defecto la ruta de amplitudes y cualquier
+    # peldano con ruido usa la ruta por conteos, porque Re(psi)*sign(Im(psi))
+    # no existe para un estado mezclado. Comparar la columna ideal contra las
+    # ruidosas mezcla entonces DOS efectos: el ruido y el cambio de operador
+    # de lectura.
+    #
+    # No es teorico. En la primera corrida del eje, leer 'none' -> 'readout'
+    # daba que el ruido de lectura ESTRECHA el posterior y MEJORA el mezclado
+    # (sigma 0.0208 -> 0.0176, ESS 101 -> 141). Con el control se ve que
+    # ideal-por-conteos y readout son identicas: el canal de lectura no toca
+    # la propuesta y todo el salto era el cambio de ruta.
+    #
+    # Por eso el control se anade SOLO — una barrida de ruido sin el produce
+    # una matriz que invita a conclusiones invertidas. `--no-noise-control`
+    # lo desactiva para quien lo quiera explicitamente.
+    route = getattr(args, 'proposal_route', 'auto')
+    plan: List[Tuple[str, str, str]] = [
+        (lvl, route, f"noise-{lvl}" if sweeping_noise else "") for lvl in levels]
+    want_control = (sweeping_noise
+                    and not getattr(args, 'no_noise_control', False)
+                    and 'none' in levels
+                    and route == 'auto'
+                    and not args.only_genetic)
+    if want_control:
+        plan.append(('none', 'counts', 'noise-none-counts'))
 
-        # ---- Genetic tasks (CGA + QGA), one per n_bits value ----
-        if not args.only_samplers:
-            # [FIX] The genetic pipeline has its OWN ceiling: the QGA does
-            # not build the 2^(n*d) likelihood grid the samplers do, so it is
-            # bounded by a plain statevector (16 B/state), not by the
-            # samplers' auxiliary arrays (13.3 kB/state).
-            eff_genetic_ceiling = (q_ceiling if q_ceiling_genetic is None
-                                   else q_ceiling_genetic)
-            for nbits in grid_values_for_model(
-                    args.n_bits, args.nbits_sweep, d, eff_genetic_ceiling,
-                    strict, notices, 'n_bits', m):
-                total_q = nbits * d
-                tag = (f"nb{nbits}"
-                       if (sweeping_nbits or nbits != args.n_bits) else "")
-                name = f"genetic/{m}" + (f"/{tag}" if tag else "")
-                outdir = os.path.join(
-                    master_dir, f"genetic_{m}" + (f"_{tag}" if tag else ""))
-                argv = ['--sweep-all', '--sweep-models', m,
-                        '--generations', str(args.generations),
-                        '--population-size', str(args.population_size),
-                        '--n-bits', str(nbits),
-                        # [AUTO] pass the ACTUAL computed ceiling (RAM-auto
-                        # or user override) so the child's own validation
-                        # agrees with the plan built here.
-                        '--max-qubits', str(eff_genetic_ceiling),
-                        '--outdir', outdir] + common_data
-                tasks.append(Task(
-                    name=name, script='cosmo_genetic_optimizers.py',
-                    argv=argv, model=m, total_qubits=total_q,
-                    est_mem_mb=estimate_qubits_and_mem(total_q, 'n_bits'),
-                    outdir=outdir, grid_value=nbits, grid_kind='n_bits'))
+    for noise, proposal_route, ntag in plan:
+        noisy = (noise != 'none')
+        # El control comparte el peldano 'none' pero es una columna propia:
+        # se etiqueta distinto para que no colisione en el CSV ni en disco.
+        noise_col = 'none-counts' if proposal_route == 'counts' and not noisy \
+            else noise
+        # [NOISE] Techos y modelo de memoria propios del peldano.
+        q_cap = (noisy_q_ceiling if noisy and noisy_q_ceiling is not None
+                 else q_ceiling)
+        g_cap_base = (q_ceiling if q_ceiling_genetic is None
+                      else q_ceiling_genetic)
+        g_cap = (noisy_q_ceiling_genetic
+                 if noisy and noisy_q_ceiling_genetic is not None
+                 else g_cap_base)
+        # El peldano solo entra en el nombre/carpeta cuando hay mas de uno, de
+        # modo que una corrida ideal produce EXACTAMENTE las mismas rutas de
+        # salida que antes de este eje y los CSV previos siguen alineando.
+        noise_argv = (['--noise', noise] if noisy or sweeping_noise else [])
+        route_argv = (['--proposal-route', proposal_route]
+                      if proposal_route != 'auto' else [])
+
+        for m in models:
+            d = MODEL_DIM[m]
+
+            # ---- Samplers tasks (QMCMC + QVMC), one per nqpp value ----
+            if not args.only_genetic:
+                for nqpp in grid_values_for_model(
+                        args.nqpp, args.nqpp_sweep, d, q_cap, strict,
+                        notices, 'nqpp', m):
+                    total_q = nqpp * d
+                    # visible tag if sweeping or if the clamp changed the value
+                    tag = (f"nqpp{nqpp}"
+                           if (sweeping_nqpp or nqpp != args.nqpp) else "")
+                    parts = [p for p in (tag, ntag) if p]
+                    suffix = ("/" + "/".join(parts)) if parts else ""
+                    dsuffix = ("_" + "_".join(parts)) if parts else ""
+                    name = f"samplers/{m}{suffix}"
+                    outdir = os.path.join(master_dir,
+                                          f"samplers_{m}{dsuffix}")
+                    argv = ['--sweep-all', '--sweep-models', m,
+                            '--steps', str(args.steps),
+                            '--qvmc-iter', str(args.qvmc_iter),
+                            '--nqpp', str(nqpp),
+                            '--chains', str(args.chains),
+                            '--shots', str(args.shots),
+                            # [AUTO] pass the ACTUAL computed ceiling, not the
+                            # raw --max-qubits (which may be unset): correct
+                            # whether the cap came from RAM-auto-detection or
+                            # from an explicit user override.
+                            '--max-qubits', str(q_cap),
+                            '--outdir', outdir] + common_data + noise_argv \
+                        + route_argv
+                    tasks.append(Task(
+                        name=name, script='cosmo_modular_quantum.py',
+                        argv=argv, model=m, total_qubits=total_q,
+                        est_mem_mb=estimate_qubits_and_mem(total_q, 'nqpp',
+                                                           noisy=noisy),
+                        outdir=outdir, grid_value=nqpp, grid_kind='nqpp',
+                        noise=noise_col))
+
+            # ---- Genetic tasks (CGA + QGA), one per n_bits value ----
+            # [NOISE-CONTROL] El control es una columna de la PROPUESTA del
+            # QMCMC; el QGA no tiene ruta de lectura conmutable, asi que
+            # duplicarlo aqui solo repetiria la columna ideal.
+            if not args.only_samplers and proposal_route == 'auto':
+                # [FIX] The genetic pipeline has its OWN ceiling: the QGA does
+                # not build the 2^(n*d) likelihood grid the samplers do, so it
+                # is bounded by a plain statevector (16 B/state), not by the
+                # samplers' auxiliary arrays (13.3 kB/state).
+                for nbits in grid_values_for_model(
+                        args.n_bits, args.nbits_sweep, d, g_cap,
+                        strict, notices, 'n_bits', m):
+                    total_q = nbits * d
+                    tag = (f"nb{nbits}"
+                           if (sweeping_nbits or nbits != args.n_bits) else "")
+                    parts = [p for p in (tag, ntag) if p]
+                    suffix = ("/" + "/".join(parts)) if parts else ""
+                    dsuffix = ("_" + "_".join(parts)) if parts else ""
+                    name = f"genetic/{m}{suffix}"
+                    outdir = os.path.join(master_dir,
+                                          f"genetic_{m}{dsuffix}")
+                    argv = ['--sweep-all', '--sweep-models', m,
+                            '--generations', str(args.generations),
+                            '--population-size', str(args.population_size),
+                            '--n-bits', str(nbits),
+                            # [AUTO] pass the ACTUAL computed ceiling (RAM-auto
+                            # or user override) so the child's own validation
+                            # agrees with the plan built here.
+                            '--max-qubits', str(g_cap),
+                            '--outdir', outdir] + common_data + noise_argv
+                    tasks.append(Task(
+                        name=name, script='cosmo_genetic_optimizers.py',
+                        argv=argv, model=m, total_qubits=total_q,
+                        est_mem_mb=estimate_qubits_and_mem(total_q, 'n_bits',
+                                                           noisy=noisy),
+                        outdir=outdir, grid_value=nbits, grid_kind='n_bits',
+                        noise=noise_col))
 
     return tasks
 
@@ -601,6 +754,10 @@ def report(tasks: List[Task], master_dir: str, t_wall0: float) -> None:
             'status': status, 'returncode': t.rc,
             'total_qubits': t.total_qubits,
             'grid_kind': t.grid_kind, 'grid_value': t.grid_value,
+            # [NOISE] Segunda coordenada del eje de ablacion. Se escribe
+            # SIEMPRE, tambien en corridas ideales ('none'), para que la
+            # matriz bidimensional se pueda pivotar sin casos especiales.
+            'noise': t.noise,
             'wall_s': round(t.wall_s, 1),
             'wall_min': round(t.wall_s / 60, 2),
             'peak_rss_mb': round(t.peak_rss_mb, 1),
@@ -780,6 +937,296 @@ def _method_styles(methods, plt):
         style[mth] = (base[i % len(base)], markers[i % len(markers)],
                       lss[(i // len(markers)) % len(lss)])
     return style
+
+
+NOISE_ORDER = ['none', 'none-counts', 'readout', 'full']
+
+
+def _infer_noise(path: str) -> str:
+    """Peldano de ruido de una tarea, deducido del nombre de su carpeta.
+
+    Las carpetas de tarea se llaman `<pipeline>_<modelo>[_<tag>]_noise-<nivel>`
+    cuando hay barrido de ruido, y sin el sufijo cuando no lo hay. Esa ausencia
+    significa 'none' — una corrida ideal conserva las rutas de siempre.
+
+    Args:
+        path: ruta del CSV de resultados.
+
+    Returns:
+        Etiqueta del peldano.
+    """
+    for part in path.split(os.sep):
+        if '_noise-' in part:
+            return part.split('_noise-')[-1]
+    return 'none'
+
+
+def _noise_sort_key(level: str):
+    """Orden del eje: los peldanos con nombre primero, backends al final."""
+    return (NOISE_ORDER.index(level) if level in NOISE_ORDER
+            else len(NOISE_ORDER), level)
+
+
+def _parse_noise_rows(csv_paths: List[str]) -> List[dict]:
+    """Aplana los CSV en registros {model, method, noise, param, mean, std, ...}.
+
+    A diferencia de `_parse_result_rows`, NO exige la columna `nqpp`: las
+    tareas geneticas no la tienen y aqui si interesan, porque el QGA es una de
+    las escaleras que el eje de ruido debe comparar.
+    """
+    import csv as _csv
+    out: List[dict] = []
+    for path in csv_paths:
+        noise = _infer_noise(path)
+        try:
+            with open(path, newline='') as fh:
+                reader = _csv.DictReader(fh)
+                cols = reader.fieldnames or []
+                generic = 'params' in cols and 'p1_mean' in cols
+                for row in reader:
+                    common = dict(
+                        model=row.get('model', '') or _infer_model(path),
+                        method=row.get('Method', '?'), noise=noise,
+                        chi2_red=_to_float(row.get('chi2_red', 'nan')),
+                        final_KL=_to_float(row.get('final_KL', 'nan')),
+                        ESS=_to_float(row.get('ESS', 'nan')))
+                    if generic:
+                        names = (row.get('params', '') or '').split('|')
+                        for i, pname in enumerate(names, 1):
+                            if pname:
+                                out.append(dict(
+                                    common, param=pname,
+                                    mean=_to_float(row.get(f'p{i}_mean', '')),
+                                    std=_to_float(row.get(f'p{i}_std', ''))))
+                    else:
+                        for col in cols:
+                            if col.endswith('_mean'):
+                                p = col[:-5]
+                                out.append(dict(
+                                    common, param=p,
+                                    mean=_to_float(row.get(col, '')),
+                                    std=_to_float(row.get(f'{p}_std', ''))))
+        except Exception:
+            continue
+    return [r for r in out if r['mean'] == r['mean']]      # descarta NaN
+
+
+def generate_noise_comparison_plots(master_dir: str,
+                                    outdir: Optional[str] = None
+                                    ) -> List[str]:
+    """Una figura por modelo comparando CADA rung con y sin ruido.
+
+    [PLOT-NOISE] Responde directamente a "quiero ver cada quantumness de cada
+    modelo con y sin ruido". El eje x es el peldano de ruido en orden, cada
+    linea es un rung de quantumness, y hay un panel por parametro mas uno de
+    calidad de ajuste. Asi la degradacion de un rung se lee como la pendiente
+    de su propia linea, y la comparacion entre rungs como la separacion entre
+    lineas — las dos preguntas del eje, en una sola imagen.
+
+    Se usa una linea por rung y no un panel por rung a proposito: lo que
+    interesa no es la forma de cada curva por separado sino si unos rungs
+    aguantan el ruido mejor que otros, y eso solo se ve superponiendolos.
+
+    La columna `none-counts`, cuando existe, se dibuja como parte del eje: es
+    el control que separa el efecto del ruido del efecto del cambio de
+    operador de lectura, y sin ella la pendiente entre `none` y `readout`
+    mezcla ambos.
+
+    Args:
+        master_dir: carpeta maestra de la corrida.
+        outdir: donde escribir (por defecto, la misma).
+
+    Returns:
+        Lista de rutas generadas.
+    """
+    try:
+        import numpy as np
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except Exception as e:                                  # pragma: no cover
+        print(f"  (sin graficas de ruido: no pude importar matplotlib: {e})")
+        return []
+
+    outdir = outdir or master_dir
+    records = _parse_noise_rows(_find_result_csvs(master_dir))
+    if not records:
+        print("  (sin graficas de ruido: no encontre filas legibles)")
+        return []
+
+    levels = sorted({r['noise'] for r in records}, key=_noise_sort_key)
+    if len(levels) < 2:
+        print(f"  (sin graficas de ruido: solo un peldano, '{levels[0]}')")
+        return []
+
+    # [PLOT-NOISE] Samplers y genetico van en figuras SEPARADAS, y no por
+    # estetica: sus sigmas no son la misma cantidad.
+    #
+    # Para MCMC/VI, sigma es la anchura del posterior — un intervalo de
+    # credibilidad — asi que "desplazamiento en unidades de sigma" responde
+    # "se movio mas de lo que el metodo sabe del parametro?".
+    #
+    # Para un genetico, sigma es la dispersion de una poblacion YA CONVERGIDA:
+    # una cantidad diminuta que solo mide cuanto se apretaron los individuos.
+    # Dividir por ella produce desplazamientos de 5 o 9 sigmas que no
+    # significan nada — se vieron en la primera corrida y parecian un efecto
+    # enorme del ruido cuando eran un denominador casi nulo. El genetico se
+    # dibuja por tanto en unidades ABSOLUTAS, que es lo que tiene sentido para
+    # un optimizador cuyo resultado es un punto.
+    def _is_genetic(method: str) -> bool:
+        m = (method or '').upper()
+        return m.startswith('CGA') or m.startswith('QGA')
+
+    made: List[str] = []
+    for model in sorted({r['model'] for r in records}):
+        for kind, keep, suffix in (
+                ('samplers', lambda m: not _is_genetic(m), ''),
+                ('genetic', _is_genetic, '_genetic')):
+            sub = [r for r in records if r['model'] == model
+                   and keep(r['method'])]
+            if sub:
+                pth = _one_noise_figure(model, sub, levels, outdir, suffix,
+                                        pull=(kind == 'samplers'),
+                                        np=np, plt=plt)
+                if pth:
+                    made.append(pth)
+                    print(f"  . {model} [{kind}]: {pth}")
+    return made
+
+
+def _one_noise_figure(model, rows, levels, outdir, suffix, pull, np, plt):
+    """Dibuja UNA figura de comparacion de ruido.
+
+    Args:
+        model: nombre del modelo.
+        rows: registros de un solo pipeline (samplers o genetico).
+        levels: peldanos de ruido, ya ordenados.
+        outdir: carpeta de salida.
+        suffix: sufijo del nombre de archivo ('' o '_genetic').
+        pull: True para dibujar el desplazamiento en unidades de sigma (solo
+            tiene sentido cuando sigma es la anchura de un posterior); False
+            para valores absolutos (genetico).
+        np, plt: modulos ya importados por el llamador.
+
+    Returns:
+        Ruta de la figura, o cadena vacia si no habia nada que dibujar.
+    """
+    if True:
+        params, seen = [], set()
+        for r in rows:
+            if r['param'] not in seen:
+                seen.add(r['param']); params.append(r['param'])
+        methods = sorted({r['method'] for r in rows})
+        if not params or not methods:
+            return ""
+
+        # Metrica de calidad: la KL si el modelo la produce (QVMC), si no chi2.
+        has_kl = any(r['final_KL'] == r['final_KL'] for r in rows)
+        metric, mlabel = (('final_KL', 'final KL (lower = better fit)')
+                          if has_kl else ('chi2_red', r'reduced $\chi^2$'))
+
+        npan = len(params) + 1
+        ncol = min(3, npan)
+        nrow = int(np.ceil(npan / ncol))
+        fig, axes = plt.subplots(nrow, ncol, figsize=(5.4 * ncol, 4.2 * nrow),
+                                 squeeze=False)
+        flat = [axes[i // ncol][i % ncol] for i in range(nrow * ncol)]
+        for ax in flat[npan:]:
+            ax.set_visible(False)
+
+        x = np.arange(len(levels))
+        # Color y marcador por metodo, fijos en todos los paneles: la identidad
+        # nunca depende solo del color.
+        cyc = ['#1f77b4', '#d62728', '#ff7f0e', '#2ca02c', '#9467bd',
+               '#17becf', '#8c564b', '#e377c2']
+        mks = ['o', 's', '^', 'D', 'v', 'P', 'X', '*']
+        style = {m: (cyc[i % len(cyc)], mks[i % len(mks)])
+                 for i, m in enumerate(methods)}
+
+        def series(method, key, sub=None):
+            ys, es = [], []
+            for lvl in levels:
+                sel = [r for r in rows if r['method'] == method
+                       and r['noise'] == lvl
+                       and (sub is None or r['param'] == sub)]
+                ys.append(sel[-1][key] if sel else float('nan'))
+                es.append(sel[-1].get('std', float('nan')) if sel
+                          else float('nan'))
+            return np.array(ys, float), np.array(es, float)
+
+        # [PLOT-NOISE] Los paneles de parametro muestran el DESPLAZAMIENTO en
+        # unidades de sigma respecto al peldano ideal, no el valor absoluto.
+        #
+        # Con el valor absoluto la barra de sigma del posterior (~0.016 en Om)
+        # es un orden de magnitud mayor que lo que el ruido mueve la media
+        # (~0.002), asi que todas las lineas se aplastan en una banda comun y
+        # la figura no distingue un rung de otro. La pregunta real no es
+        # "cuanto vale Om" — eso ya esta en los corner plots — sino "cuanto lo
+        # movio el ruido comparado con lo que el metodo sabe de el". Eso es
+        # exactamente (mean - mean_ideal) / sigma_ideal.
+        #
+        # La banda gris de +-1 sigma da la escala: una linea dentro de ella se
+        # movio menos que la propia incertidumbre del metodo, es decir, el
+        # ruido no la desplazo de forma detectable.
+        for j, p in enumerate(params):
+            ax = flat[j]
+            if pull:
+                ax.axhspan(-1, 1, color='0.85', alpha=0.55, zorder=0, lw=0)
+                ax.axhline(0, color='0.45', lw=1.0, ls=':', zorder=1)
+            for m in methods:
+                y, e = series(m, 'mean', sub=p)
+                if not np.any(np.isfinite(y)):
+                    continue
+                col, mk = style[m]
+                if pull:
+                    ref = y[0]
+                    sig = e[0] if (len(e) and np.isfinite(e[0]) and e[0] > 0) \
+                        else np.nanmax(e) if np.any(np.isfinite(e)) else np.nan
+                    if not np.isfinite(sig) or sig <= 0:
+                        continue
+                    y = (y - ref) / sig
+                ax.plot(x, y, color=col, marker=mk, ms=7, lw=2,
+                        alpha=0.9, zorder=3, label=m if j == 0 else None)
+            ax.set_ylabel(f'{p}:  shift from ideal  [$\\sigma$]' if pull
+                          else f'{p}  (MAP)', fontsize=10)
+            ax.set_xticks(x)
+            ax.set_xticklabels(levels, rotation=20, ha='right', fontsize=9)
+            ax.grid(True, axis='y', alpha=0.25, lw=0.6)
+            for s in ('top', 'right'):
+                ax.spines[s].set_visible(False)
+
+        ax = flat[len(params)]
+        for m in methods:
+            y, _ = series(m, metric)
+            if not np.any(np.isfinite(y)):
+                continue
+            col, mk = style[m]
+            ax.plot(x, y, color=col, marker=mk, ms=7, lw=2, alpha=0.9)
+        ax.set_ylabel(mlabel, fontsize=11)
+        ax.set_xticks(x)
+        ax.set_xticklabels(levels, rotation=20, ha='right', fontsize=9)
+        ax.grid(True, alpha=0.25, lw=0.6)
+        for s in ('top', 'right'):
+            ax.spines[s].set_visible(False)
+
+        handles, labels = flat[0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc='lower center',
+                   ncol=min(len(labels), 4), fontsize=9, frameon=False,
+                   bbox_to_anchor=(0.5, -0.02))
+        sub_t = ("parameters: shift from the ideal rung in units of its own "
+                 "sigma (grey band = +-1 sigma)" if pull else
+                 "genetic: absolute MAP — a GA's spread is convergence, not a "
+                 "credible interval, so sigma units would be meaningless")
+        fig.suptitle(
+            f"{model} — every quantumness rung, with and without noise\n"
+            f"{sub_t}   ·   right: fit quality",
+            fontsize=13, fontweight='bold')
+        fig.tight_layout(rect=(0, 0.06, 1, 0.90))
+        path = os.path.join(outdir, f"noise_comparison{suffix}_{model}.png")
+        fig.savefig(path, dpi=150, bbox_inches='tight')
+        fig.savefig(path.replace('.png', '.pdf'), bbox_inches='tight')
+        plt.close(fig)
+        return path
 
 
 def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
@@ -986,6 +1433,28 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Sweep n_bits from LO to HI (one genetic task per '
                         'value). The QGA analogue of --nqpp-sweep.')
 
+    # --- [NOISE] segundo eje de ablacion ---
+    cnoise.add_noise_cli(p)
+    p.add_argument('--proposal-route', type=str, default='auto',
+                   choices=('auto', 'amplitude', 'counts'),
+                   help="ruta de lectura del motor de propuesta, reenviada a "
+                        "las tareas de samplers. Por defecto 'auto'.")
+    p.add_argument('--no-noise-control', action='store_true',
+                   help="NO generar la columna de control ideal-por-conteos "
+                        "al barrer ruido. Por defecto se genera: sin ella, "
+                        "comparar el peldano ideal (que lee amplitudes) "
+                        "contra los ruidosos (que leen conteos) mezcla el "
+                        "efecto del ruido con el del cambio de operador de "
+                        "lectura, y en la primera corrida del eje eso "
+                        "invirtio tres conclusiones.")
+    p.add_argument('--noise-sweep', type=str, default=None, metavar='LISTA',
+                   help="peldanos de ruido separados por comas, p. ej. "
+                        "'none,readout,full' o 'none,FakeBrisbane'. Genera "
+                        "una tarea por peldano, igual que --nqpp-sweep genera "
+                        "una por valor de nqpp: juntos producen la matriz "
+                        "bidimensional quantumness x ruido. Sustituye a "
+                        "--noise cuando se da.")
+
     # --- shared ---
     p.add_argument('--max-qubits', type=int, default=None, metavar='N',
                    help='[AUTO by default] Per-task qubit cap for the '
@@ -1011,6 +1480,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Do not clamp: combinations exceeding the ceiling are '
                         'SKIPPED instead of having their grid lowered.')
     p.add_argument('--seed', type=int, default=42)
+    p.add_argument('--gpu-check', action='store_true',
+                   help='imprime por que la GPU esta o no disponible y sale, sin correr nada. Util en una HPC nueva: --gpu degrada a CPU cuando Aer no expone GPU, y sin este chequeo eso solo se nota por el tiempo de pared.')
     p.add_argument('--gpu', action='store_true',
                    help='Pass --gpu to each child (a single GPU is shared: mind '
                         'the concurrency)')
@@ -1071,6 +1542,11 @@ def main() -> int:
     else:
         mem_budget_mb = 125 * 1024 * 0.85
 
+    if getattr(args, 'gpu_check', False):
+        from cosmo_core import gpu_diagnosis
+        print(gpu_diagnosis())
+        return 0
+
     # --- EFFECTIVE per-task qubit ceiling (for the per-model clamp) ---
     # The most restrictive of --max-qubits and the per-task RAM (--max-task-gb,
     # or, if not given, the aggregate budget as a single-task cap).
@@ -1083,10 +1559,34 @@ def main() -> int:
     q_ceiling_genetic = qubit_ceiling(args.max_qubits_genetic,
                                       task_mem_ceiling, 'n_bits')
 
+    # [NOISE] Peldanos pedidos, y sus techos PROPIOS. Los techos ruidosos se
+    # calculan con el modelo de memoria de la matriz de densidad y ademas
+    # quedan acotados por MAX_NOISY_QUBITS, que es un limite de TIEMPO y no se
+    # relaja con mas RAM.
+    if args.noise_sweep:
+        noise_levels = [cnoise.canonical_level(s)
+                        for s in args.noise_sweep.split(',') if s.strip()]
+    else:
+        noise_levels = [cnoise.canonical_level(args.noise)]
+    # Validar temprano: un nombre de backend mal escrito debe fallar aqui, no
+    # a mitad de una campana de horas.
+    for lvl in noise_levels:
+        cnoise.NoiseSpec.from_level(lvl)
+    any_noisy = any(lvl != 'none' for lvl in noise_levels)
+
+    noisy_q_ceiling = qubit_ceiling(args.max_qubits, task_mem_ceiling,
+                                    'nqpp', noisy=True)
+    noisy_q_ceiling_genetic = qubit_ceiling(args.max_qubits_genetic,
+                                            task_mem_ceiling, 'n_bits',
+                                            noisy=True)
+
     # --- build tasks (with per-model clamp) ---
     clamp_notices: List[str] = []
     tasks = build_tasks(args, master_dir, q_ceiling, clamp_notices,
-                        q_ceiling_genetic=q_ceiling_genetic)
+                        q_ceiling_genetic=q_ceiling_genetic,
+                        noise_levels=noise_levels,
+                        noisy_q_ceiling=noisy_q_ceiling,
+                        noisy_q_ceiling_genetic=noisy_q_ceiling_genetic)
     n_tasks = len(tasks) or 1
 
     # --- split the cores: J*T ~= total_cores, without oversubscribing ---
@@ -1126,6 +1626,23 @@ def main() -> int:
               f"    ({task_mem_ceiling/1024:.0f} GB available -> "
               f"{qubits_fitting_in(task_mem_ceiling, 'n_bits')}q fit at "
               f"{BYTES_PER_STATE_GENETIC} B/state)")
+    # [NOISE] Reportar el eje y POR QUE su techo es distinto: no lo fija la
+    # RAM sino el tiempo de simulacion con matriz de densidad.
+    if any_noisy:
+        print(f"Eje de ruido: {', '.join(noise_levels)}")
+        f_s = cnoise.param_shift_batch_factor(max(noisy_q_ceiling, 1))
+        print(f"    techo con ruido (derivado de la RAM, no una constante):")
+        print(f"      samplers  {noisy_q_ceiling}q  -- lo fija el LOTE de "
+              f"parameter-shift del entrenamiento cuantico del QVMC "
+              f"({f_s}x rho = "
+              f"{cnoise.noisy_density_bytes(noisy_q_ceiling, f_s)/2**30:.0f} "
+              f"GB), no rho suelta "
+              f"({cnoise.noisy_density_bytes(noisy_q_ceiling)/2**30:.2f} GB)")
+        print(f"      genetico  {noisy_q_ceiling_genetic}q  -- una rho por "
+              f"operador, sin lote")
+        print(f"      QMCMC no aparece: su motor usa max(2,d) qubits (2-4) y "
+              f"la aceptacion 1, asi que nqpp no toca sus circuitos y el "
+              f"ruido le sale gratis a cualquier resolucion.")
     print(f"Split: J={J} processes x T={T} threads = {J*T} cores "
           f"(of {args.total_cores})")
     print(f"Master folder: {master_dir}")
@@ -1161,6 +1678,11 @@ def main() -> int:
         print("\nGenerating convergence plots...")
         generate_convergence_plots(
             master_dir, only_grid_methods=args.only_grid_methods)
+        # [PLOT-NOISE] Solo produce algo si hubo mas de un peldano; con una
+        # corrida ideal se salta sola y no ensucia la carpeta.
+        if any_noisy or len(noise_levels) > 1:
+            print("\nGenerating noise-comparison plots...")
+            generate_noise_comparison_plots(master_dir)
 
     return 0 if all(t.rc in (0, -2) for t in tasks) else 1
 

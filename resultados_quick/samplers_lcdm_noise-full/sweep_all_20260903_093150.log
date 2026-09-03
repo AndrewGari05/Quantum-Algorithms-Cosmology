@@ -1,0 +1,47 @@
+09:31:50 | INFO    | Log started: /home/andre/Cosmologia/Git_Hub/resultados_quick/samplers_lcdm_noise-full/sweep_all_20260903_093150.log
+09:31:50 | INFO    | Simulation device: CPU
+09:31:51 | INFO    | ======================================================================
+09:31:51 | INFO    | SWEEP-ALL — 1 model(s): lcdm
+09:31:51 | INFO    |   dataset=CC+BAO | prior=flat | steps=800 | qvmc_iter=30 | nqpp=3
+09:31:51 | INFO    |   master folder: /home/andre/Cosmologia/Git_Hub/resultados_quick/samplers_lcdm_noise-full/
+09:31:51 | INFO    | ======================================================================
+09:31:51 | INFO    | 
+09:31:51 | INFO    | [1/1] ===== MODEL: lcdm (Flat ΛCDM) =====
+09:31:51 | INFO    | PER-METHOD LADDERS — model Flat ΛCDM, dataset CC+BAO
+09:31:52 | INFO    | [C-MCMC] step    500/800 | acc=0.500 | R-hat-1=+0.2003 | mean: Om=0.2525  H0=71.1001
+09:31:52 | INFO    | [C-MCMC] done: 800 steps, acc=0.501, ESS=66, t=0.6s, converged=False
+09:31:52 | INFO    |   QMCMC   0.0%  mean=Om=0.2553  H0=70.8829  acc=0.501
+09:31:57 | INFO    | [QMCMC50] step    500/800 | acc=0.533 | R-hat-1=+0.1385 | mean: Om=0.2591  H0=70.6194
+09:31:58 | INFO    | [QMCMC50] done: 800 steps, acc=0.525, ESS=120, t=4.4s, converged=False
+09:31:58 | INFO    |   QMCMC  50.0%  mean=Om=0.2597  H0=70.6057  acc=0.525
+09:32:07 | INFO    | [QMCMC100] step    500/800 | acc=0.535 | R-hat-1=+0.1383 | mean: Om=0.2625  H0=70.4497
+09:32:10 | INFO    | [QMCMC100] done: 800 steps, acc=0.527, ESS=106, t=10.9s, converged=False
+09:32:10 | INFO    |   QMCMC 100.0%  mean=Om=0.2622  H0=70.4726  acc=0.527
+09:32:10 | INFO    |   Adaptive QVMC grid window (shared): Om∈[0.1800,0.3233], H0∈[66.2306,76.3180]
+09:32:10 | INFO    | [C-VI] iter     0/30 | KL=15.330899 | E[theta]: Om=0.2492  H0=71.5266
+09:32:11 | INFO    | [C-VI] iter    29/30 | KL=13.832130 | E[theta]: Om=0.2512  H0=71.4451
+09:32:11 | INFO    | [C-VI] training done: KL=12.756912 in 0.8s (45 iters)
+09:32:11 | INFO    |   QVMC    0.0%  mean=Om=0.2578  H0=71.1908  KL=12.7569
+09:32:11 | INFO    | [QVMC33] iter     0/30 | KL=15.330899 | E[theta]: Om=0.2492  H0=71.5266
+09:32:12 | INFO    | [QVMC33] iter    29/30 | KL=13.832130 | E[theta]: Om=0.2512  H0=71.4451
+09:32:12 | INFO    | [QVMC33] training done: KL=12.756912 in 0.7s (45 iters)
+09:32:12 | INFO    |   QVMC   33.3%  mean=Om=0.2583  H0=71.2593  KL=12.7569
+09:32:12 | INFO    | [QVMC67] iter     0/30 | KL=15.330899 | E[theta]: Om=0.2492  H0=71.5266
+09:32:30 | INFO    | [QVMC67] iter    29/30 | KL=10.972921 | E[theta]: Om=0.2609  H0=70.7348
+09:32:31 | INFO    | [QVMC67] training done: KL=10.972921 in 18.8s (31 iters)
+09:32:31 | INFO    |   QVMC   66.7%  mean=Om=0.2611  H0=70.7729  KL=10.9729
+09:32:31 | INFO    | [QVMC100] iter     0/30 | KL=15.330899 | E[theta]: Om=0.2492  H0=71.5266
+09:32:49 | INFO    | [QVMC100] iter    29/30 | KL=10.972921 | E[theta]: Om=0.2609  H0=70.7348
+09:32:50 | INFO    | [QVMC100] training done: KL=10.972921 in 18.7s (31 iters)
+09:32:50 | INFO    |   QVMC  100.0%  mean=Om=0.2611  H0=70.7729  KL=10.9729
+09:32:59 | INFO    | Ladder figures in /home/andre/Cosmologia/Git_Hub/resultados_quick/samplers_lcdm_noise-full/model_lcdm/: ladder_qmcmc_*, ladder_qvmc_*, ladder_rhat_qmcmc_*, ladder_kl_qvmc_*, ladder_1to1_*, ladder_summary_*, ladder_trends_*
+09:32:59 | INFO    | Benchmark results written to /home/andre/Cosmologia/Git_Hub/resultados_quick/samplers_lcdm_noise-full/model_lcdm/resultados_config.csv (+ cumulative resultados_config.csv)
+09:32:59 | INFO    | [1/1] lcdm: DONE -> /home/andre/Cosmologia/Git_Hub/resultados_quick/samplers_lcdm_noise-full/model_lcdm/
+09:32:59 | INFO    | 
+09:32:59 | INFO    | ======================================================================
+09:32:59 | INFO    | SWEEP-ALL finished in 1.1 min
+09:32:59 | INFO    |   lcdm     : ok
+09:32:59 | INFO    |   Combined table: /home/andre/Cosmologia/Git_Hub/resultados_quick/samplers_lcdm_noise-full/resultados_TODOS_los_modelos.csv
+09:32:59 | INFO    | ======================================================================
+09:32:59 | INFO    | [profile] sweep_cpu: wall=67.4s  peak_RSS=267MB  device=CPU
+09:32:59 | INFO    |   Resource-usage figure: /home/andre/Cosmologia/Git_Hub/resultados_quick/samplers_lcdm_noise-full/resource_usage_sweep_cpu.png

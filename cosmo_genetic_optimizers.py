@@ -92,6 +92,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
 
 # ── Physics & shared infrastructure: imported, never re-implemented ───────────
 import cosmo_core as core
+import cosmo_noise as cnoise
 from cosmo_core import (MODELS, Posterior, fit_statistics, fmt_theta,
                         ess_weights, gpu_available, make_run_dir,
                         make_simulator, resolve_device, setup_logger)
@@ -99,6 +100,54 @@ from cosmo_core import (MODELS, Posterior, fit_statistics, fmt_theta,
 # Module-level GPU preference, set by main() from --gpu or the menu. The QGA's
 # AerSimulator is built through make_simulator honoring this flag.
 USE_GPU = False
+
+# [ANIM] Formatos de la animacion del genetico, fijados por main() desde --anim.
+# Mismo patron que USE_GPU: un global que toda ruta de figuras consulta, para no
+# arrastrar el parametro por cinco firmas.
+#   ()            -> no animar
+#   ('gif',)      -> GIF (por defecto: no necesita ffmpeg y se pega en slides)
+#   ('gif','mp4') -> ambos
+ANIM_FORMATS: Sequence[str] = ('gif',)
+
+# =============================================================================
+#  [NOISE] Segundo eje de ablacion — nivel de ruido del modulo.
+# =============================================================================
+#
+#  El QGA es el metodo mas facil de llevar al eje de ruido, y no por casualidad:
+#  ya opera al 100% por MEDICION. Sus tres operadores cuanticos leen
+#  `result.get_memory(...)` — cadenas de bits medidas — y no tocan una sola
+#  amplitud. Por eso aqui no hay ninguna conversion de lectura que hacer: basta
+#  con entregarle a Aer el modelo de ruido y el propio simulador aplica el canal
+#  de compuertas y el de lectura donde corresponde.
+#
+#  Consecuencia para la interpretacion de la escalera: el error de lectura
+#  voltea bits medidos, que es casi indistinguible de mutacion adicional. Es la
+#  razon estructural por la que cabe esperar que el QGA sea el metodo mas
+#  robusto del eje — pero es una hipotesis a medir, no un resultado.
+NOISE: "cnoise.NoiseSpec" = cnoise.NoiseSpec.from_level('none')
+
+
+def set_noise(spec: "cnoise.NoiseSpec") -> None:
+    """Fija el peldano de ruido del modulo.
+
+    Debe llamarse ANTES de construir cualquier QGA: el simulador se crea en
+    `__init__` y los circuitos se transpilan una sola vez contra el.
+
+    Args:
+        spec: peldano del eje, de `cosmo_noise.NoiseSpec`.
+    """
+    global NOISE
+    NOISE = spec
+
+
+def _qga_sim():
+    """AerSimulator del peldano de ruido actual, para la ruta por medicion.
+
+    `counts_route=True` porque los circuitos del QGA MIDEN: Aer aplica el
+    canal de lectura por si mismo y no debe volver a aplicarse en cerrado.
+    """
+    return make_simulator(prefer_gpu=USE_GPU,
+                          **NOISE.simulator_kwargs(counts_route=True))
 
 # ── Color convention, defined LOCALLY so the genetic module and its live GUI
 #    never depend on importing the (heavier) sampler module. The values match
@@ -480,6 +529,9 @@ class GAResult:
         elapsed: wall-clock seconds.
         config: the quantum-component config (QGA) or {} (CGA).
         label: human-readable label used in legends and the CSV.
+        pop_history: [ANIM] poblacion completa por generacion, para animar la
+            convergencia. Vacia si se corrio con record_population=False.
+        fit_history: [ANIM] log-posterior por individuo y generacion.
     """
     method: str
     quantumness: float
@@ -493,6 +545,8 @@ class GAResult:
     elapsed: float
     config: dict = field(default_factory=dict)
     label: str = ''
+    pop_history: List[np.ndarray] = field(default_factory=list)
+    fit_history: List[np.ndarray] = field(default_factory=list)
 
 
 def _fitness_weights(fit: np.ndarray) -> np.ndarray:
@@ -538,6 +592,7 @@ class GeneticEvolver(GeneticBase):
 
     # ── the main evolutionary loop ───────────────────────────────────────────
     def evolve(self, live: bool = False, logger=None,
+               record_population: bool = True,
                log_every: int = 10, gui=None,
                outdir: Optional[str] = None) -> GAResult:
         """Run the genetic optimization.
@@ -566,6 +621,8 @@ class GeneticEvolver(GeneticBase):
         pop = self.do_init()
         fit = self.fitness(pop)
         history: List[dict] = []
+        pop_history: List[np.ndarray] = []
+        fit_history: List[np.ndarray] = []
 
         if live and gui is None:
             gui = LiveGA(self.model, self.method_name, self.quantumness)
@@ -596,6 +653,15 @@ class GeneticEvolver(GeneticBase):
             history.append(dict(gen=gen, best_chi2=best_chi2,
                                 mean_chi2=mean_chi2,
                                 theta_best=theta_best.tolist()))
+            # [ANIM] Instantanea de la poblacion para la animacion. Es lo unico
+            # que permite MOSTRAR la convergencia en vez de resumirla: el
+            # historial solo guardaba el mejor individuo, y con eso no se ve
+            # que la nube se contrae, que es la mitad del fenomeno.
+            # Coste: P*d floats por generacion (200x4x120 ~ 0.8 MB), asi que se
+            # graba siempre y se submuestrea al animar, no al grabar.
+            if record_population:
+                pop_history.append(pop.copy())
+                fit_history.append(fit.copy())
 
             # 5) live GUI (interactive) OR periodic logging (headless)
             if live and gui is not None:
@@ -639,7 +705,8 @@ class GeneticEvolver(GeneticBase):
             theta_map=theta_map, chi2_map=float(stats['chi2']), stats=stats,
             final_pop=pop, final_fit=fit, final_weights=weights,
             history=history, elapsed=elapsed, config=dict(self.config),
-            label=self._label())
+            label=self._label(),
+            pop_history=pop_history, fit_history=fit_history)
 
     def _label(self) -> str:
         """Legend/CSV label for this optimizer."""
@@ -743,7 +810,12 @@ class QGA(GeneticEvolver):
         # bits are ALWAYS preserved regardless of α.
         self.crossover_alpha = float(np.clip(crossover_alpha, 0.0, 1.0))
         self._levels = 2 ** self.n_bits                  # grid points per axis
-        self.sim = make_simulator('statevector', prefer_gpu=USE_GPU)
+        # [NOISE] Sin ruido esto es exactamente `make_simulator('statevector',
+        # prefer_gpu=USE_GPU)`, la construccion previa al eje. Con ruido pasa a
+        # matriz de densidad con el modelo completo; el QGA no necesita ningun
+        # otro cambio porque ya lee por medicion.
+        self.sim = _qga_sim()
+        self.noise_label = NOISE.label
         # [M3 FIX] Aer measurement seeds are now DERIVED from the run seed
         # (GAConfig.seed) plus a per-call counter. Previously the quantum
         # operators ran with Aer's own random seed, so QGA runs were NOT
@@ -1205,6 +1277,320 @@ def plot_population_corner(result: GAResult, model, outdir: str,
     return f
 
 
+def plot_genetic_convergence(results, model, outdir: str,
+                             tag: Optional[str] = None) -> str:
+    """Convergencia y estimacion final del genetico, para TODOS los rungs.
+
+    [PLOT-GA] Sustituye al corner plot de la poblacion final.
+
+    Por que se cambio: un algoritmo genetico CONVERGE a un punto. Con elitismo
+    y unas decenas de generaciones, la poblacion final se concentra en una o
+    dos celdas de la rejilla, asi que su corner plot es literalmente un punto
+    con unos pocos pixeles alrededor. Gasta una figura entera en no mostrar
+    nada, y sobre todo no muestra lo unico que distingue un rung de otro: COMO
+    llego ahi y DONDE aterrizo respecto a los demas.
+
+    Un corner plot responde "que forma tiene el posterior", que es la pregunta
+    correcta para MCMC/VI, donde la nube de muestras ES el resultado. El
+    resultado de un GA es un punto y una trayectoria, asi que la figura
+    correcta es otra:
+
+      Fila 1 — una traza por parametro: theta_best contra generacion, un color
+        por rung. Aqui se ve la velocidad de convergencia, si un rung se queda
+        atascado, y si dos rungs convergen al mismo sitio por caminos
+        distintos. Es la informacion que el corner destruye al mostrar solo el
+        estado final.
+
+      Fila 2 — un punto-y-bigote por parametro: MAP final con la dispersion de
+        la poblacion final como barra. Compara todos los rungs en un vistazo y
+        deja ver si las diferencias entre ellos son mayores o menores que la
+        dispersion interna de cada uno — que es justo lo que hay que saber
+        antes de afirmar que un rung difiere de otro.
+
+    La linea punteada marca el valor fiducial de referencia del modelo.
+
+    Args:
+        results: iterable de `GAResult` (CGA y los rungs del QGA).
+        model: `CosmoModel` activo.
+        outdir: carpeta de salida.
+        tag: sufijo del nombre de archivo.
+
+    Returns:
+        Ruta del PNG generado.
+    """
+    os.makedirs(outdir, exist_ok=True)
+    results = [r for r in results if getattr(r, 'history', None)]
+    if not results:
+        return ""
+    tag = tag or f"{model.name}_genetic_convergence"
+    d = model.n_params
+    names = model.param_names
+    latex = getattr(model, 'param_latex', names)
+
+    # Un color y un marcador por rung: la identidad no descansa solo en el
+    # color (requisito de accesibilidad y de impresion en blanco y negro).
+    palette = [C_GENETIC, C_GENETIC2, C_QUANTUM2, C_CLASSICAL2, C_QUANTUM]
+    markers = ['o', 's', '^', 'D', 'v']
+    styles = {}
+    for i, r in enumerate(sorted(results, key=lambda x: x.quantumness)):
+        styles[r.label] = (palette[i % len(palette)], markers[i % len(markers)])
+
+    fig, axes = plt.subplots(2, d, figsize=(4.6 * d, 8.2), squeeze=False)
+    order = sorted(results, key=lambda x: x.quantumness)
+
+    # ── fila 1: trayectoria de theta_best ────────────────────────────────
+    # [PLOT-GA] QGA(0%) reproduce al CGA bit a bit por diseno (es la celda
+    # faithful del genetico), asi que sus curvas se solapan EXACTAMENTE y la
+    # de abajo desaparece. Sin avisarlo parece una serie perdida, cuando en
+    # realidad es el resultado. Se detecta y se anota en la leyenda, y se
+    # dibuja con grosor decreciente para que la de abajo asome como halo.
+    def _traj(r):
+        return np.array([h['theta_best'] for h in r.history], float)
+
+    coincide = {}
+    for a in range(len(order)):
+        for b in range(a + 1, len(order)):
+            ta, tb = _traj(order[a]), _traj(order[b])
+            if ta.shape == tb.shape and np.allclose(ta, tb, atol=0, rtol=0):
+                coincide.setdefault(order[b].label, []).append(order[a].label)
+
+    def _label(r):
+        same = coincide.get(r.label)
+        return f"{r.label}  ≡ {same[0]}" if same else r.label
+
+    for j in range(d):
+        ax = axes[0][j]
+        for i, r in enumerate(order):
+            col, mk = styles[r.label]
+            gens = [h['gen'] for h in r.history]
+            vals = [h['theta_best'][j] for h in r.history]
+            ax.plot(gens, vals, '-', color=col,
+                    lw=max(1.4, 4.0 - 0.7 * i), label=_label(r) if j == 0 else None,
+                    marker=mk, markevery=max(1, len(gens) // 8), ms=5,
+                    alpha=0.95, zorder=2 + i)
+        fid = getattr(model, 'fiducial', None)
+        if fid is not None and j < len(fid):
+            ax.axhline(fid[j], ls=':', color='0.45', lw=1.2, zorder=0)
+        ax.set_xlabel('Generation', fontsize=11)
+        # param_latex ya viene con sus delimitadores $...$: envolverlo otra
+        # vez rompe el parser de mathtext.
+        ax.set_ylabel(latex[j] if j < len(latex) else names[j], fontsize=12)
+        ax.grid(True, alpha=0.25, lw=0.6)
+        for s in ('top', 'right'):
+            ax.spines[s].set_visible(False)
+        if j == 0:
+            ax.legend(fontsize=8, frameon=False)
+
+    # ── fila 2: MAP final +- dispersion de la poblacion ──────────────────
+    ypos = np.arange(len(order))
+    for j in range(d):
+        ax = axes[1][j]
+        for i, r in enumerate(order):
+            col, mk = styles[r.label]
+            finite = np.isfinite(r.final_fit)
+            pop = r.final_pop[finite]
+            spread = float(np.std(pop[:, j])) if len(pop) else 0.0
+            ax.errorbar(r.theta_map[j], ypos[i], xerr=spread, fmt=mk,
+                        color=col, ms=9, capsize=4, lw=2, mec='white', mew=1.2)
+        fid = getattr(model, 'fiducial', None)
+        if fid is not None and j < len(fid):
+            ax.axvline(fid[j], ls=':', color='0.45', lw=1.2, zorder=0)
+        ax.set_yticks(ypos)
+        ax.set_yticklabels([_label(r) for r in order] if j == 0 else [],
+                           fontsize=8)
+        ax.set_ylim(-0.6, len(order) - 0.4)
+        ax.invert_yaxis()
+        ax.set_xlabel(latex[j] if j < len(latex) else names[j], fontsize=12)
+        ax.grid(True, axis='x', alpha=0.25, lw=0.6)
+        for s in ('top', 'right', 'left'):
+            ax.spines[s].set_visible(False)
+
+    axes[0][0].set_title('', loc='left')
+    fig.suptitle(f'{model.label} — genetic convergence and final estimate\n'
+                 f'top: best individual per generation   ·   '
+                 f'bottom: final MAP ± population spread   ·   '
+                 f'dotted line: fiducial',
+                 fontsize=12, fontweight='bold')
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    path = os.path.join(outdir, f"genetic_convergence_{tag}.png")
+    fig.savefig(path, dpi=150, bbox_inches='tight')
+    fig.savefig(path.replace('.png', '.pdf'), bbox_inches='tight')
+    plt.close(fig)
+    return path
+
+
+def _coincidence_label(result, others) -> str:
+    """Etiqueta con una marca si otro rung produjo la MISMA trayectoria.
+
+    QGA(0%) reproduce al CGA bit a bit: es la celda faithful del genetico y su
+    identidad ES el resultado. Pero sus curvas se solapan exactamente y la de
+    abajo desaparece, con lo que una figura honesta parece tener una serie
+    perdida. Anotarlo convierte un artefacto visual confuso en la afirmacion
+    que el proyecto quiere hacer.
+
+    Args:
+        result: el `GAResult` a etiquetar.
+        others: los demas rungs de la misma figura.
+
+    Returns:
+        La etiqueta, con sufijo " ≡ <otro>" si coincide con uno anterior.
+    """
+    mine = np.array([h['theta_best'] for h in result.history], float)
+    for o in others:
+        if o is result or o.quantumness >= result.quantumness:
+            continue
+        theirs = np.array([h['theta_best'] for h in o.history], float)
+        if mine.shape == theirs.shape and np.array_equal(mine, theirs):
+            return f"{result.label}  ≡ {o.label}"
+    return result.label
+
+
+def animate_genetic_evolution(results, model, outdir: str,
+                              tag: Optional[str] = None,
+                              fps: int = 8, max_frames: int = 120,
+                              formats: Sequence[str] = ('gif',)) -> List[str]:
+    """Anima la evolucion de la poblacion, con TODOS los rungs a la vez.
+
+    [ANIM] Pensada para presentar. Un genetico se entiende mucho mejor viendo
+    la nube contraerse que leyendo la curva de chi2 ya terminada, y poner los
+    rungs uno al lado de otro en la MISMA animacion deja ver algo que ninguna
+    figura estatica muestra: que unos convergen antes que otros, y si alguno
+    se queda atascado en otro sitio.
+
+    Dos paneles:
+
+      Izquierda — espacio de fase de los dos primeros parametros. Cada rung es
+        un color; los puntos son la poblacion de esa generacion, con opacidad
+        proporcional a su fitness relativa, y el mejor individuo marcado con
+        una estrella. La nube contrayendose ES la convergencia.
+
+      Derecha — la curva de chi2 dibujandose en tiempo real, para poder decir
+        "aqui es donde se estanca" senalando el mismo instante en los dos
+        paneles.
+
+    Args:
+        results: iterable de `GAResult` CON `pop_history` (si esta vacio, el
+            rung se omite de la animacion en vez de romperla).
+        model: `CosmoModel` activo.
+        outdir: carpeta de salida.
+        tag: sufijo del nombre de archivo.
+        fps: cuadros por segundo.
+        max_frames: tope de cuadros; si hay mas generaciones se submuestrea de
+            forma uniforme, para que un run de 500 generaciones no produzca un
+            GIF de 60 MB.
+        formats: 'gif' y/o 'mp4'. El mp4 necesita ffmpeg; si falta, se avisa y
+            se sigue con el resto.
+
+    Returns:
+        Rutas generadas (vacia si no habia nada que animar).
+    """
+    import matplotlib.animation as manim
+
+    os.makedirs(outdir, exist_ok=True)
+    usable = [r for r in results if getattr(r, 'pop_history', None)]
+    if not usable:
+        return []
+    usable = sorted(usable, key=lambda r: r.quantumness)
+    tag = tag or model.name
+    d = model.n_params
+    if d < 2:
+        return []
+    latex = getattr(model, 'param_latex', model.param_names)
+
+    n_gen = min(len(r.pop_history) for r in usable)
+    step = max(1, int(np.ceil(n_gen / max_frames)))
+    frames = list(range(0, n_gen, step))
+    if frames[-1] != n_gen - 1:
+        frames.append(n_gen - 1)
+
+    palette = [C_GENETIC, C_GENETIC2, C_QUANTUM2, C_CLASSICAL2, C_QUANTUM]
+    style = {r.label: palette[i % len(palette)] for i, r in enumerate(usable)}
+    # QGA(0%) reproduce al CGA bit a bit, asi que sus nubes se solapan y la de
+    # abajo desaparece. Se anota para que no parezca una serie perdida.
+    lab = {r.label: _coincidence_label(r, usable) for r in usable}
+
+    fig, (axp, axc) = plt.subplots(1, 2, figsize=(13.5, 5.6),
+                                   gridspec_kw={'width_ratios': [1.15, 1]})
+
+    allpop = np.vstack([p for r in usable for p in r.pop_history])
+    lo0, hi0 = np.nanpercentile(allpop[:, 0], [0.5, 99.5])
+    lo1, hi1 = np.nanpercentile(allpop[:, 1], [0.5, 99.5])
+    pad0, pad1 = 0.08 * (hi0 - lo0 + 1e-9), 0.08 * (hi1 - lo1 + 1e-9)
+    axp.set_xlim(lo0 - pad0, hi0 + pad0)
+    axp.set_ylim(lo1 - pad1, hi1 + pad1)
+    axp.set_xlabel(latex[0] if len(latex) > 0 else model.param_names[0],
+                   fontsize=12)
+    axp.set_ylabel(latex[1] if len(latex) > 1 else model.param_names[1],
+                   fontsize=12)
+    fid = getattr(model, 'fiducial', None)
+    if fid is not None and len(fid) >= 2:
+        axp.plot(fid[0], fid[1], '+', color='0.35', ms=14, mew=2, zorder=1)
+    axp.grid(True, alpha=0.2, lw=0.6)
+    for s in ('top', 'right'):
+        axp.spines[s].set_visible(False)
+        axc.spines[s].set_visible(False)
+
+    all_chi = np.concatenate([[h['best_chi2'] for h in r.history]
+                              for r in usable])
+    all_chi = all_chi[np.isfinite(all_chi)]
+    axc.set_xlim(0, n_gen - 1)
+    if len(all_chi):
+        # Rango COMPLETO, no percentiles: recortar al 98% dejaba fuera el rung
+        # peor, que es justo el que hay que poder ver empeorar.
+        c_lo, c_hi = float(np.min(all_chi)), float(np.max(all_chi))
+        pad = 0.08 * (c_hi - c_lo + 1e-9)
+        axc.set_ylim(c_lo - pad, c_hi + pad)
+    axc.set_xlabel('Generation', fontsize=12)
+    axc.set_ylabel(r'best $\chi^2$', fontsize=12)
+    axc.grid(True, alpha=0.2, lw=0.6)
+
+    scats, bests, lines = {}, {}, {}
+    for r in usable:
+        col = style[r.label]
+        scats[r.label] = axp.scatter([], [], s=26, color=col, alpha=0.5,
+                                     edgecolors='none', label=lab[r.label],
+                                     zorder=3)
+        bests[r.label] = axp.plot([], [], '*', color=col, ms=18,
+                                  mec='white', mew=1.2, zorder=4)[0]
+        lines[r.label] = axc.plot([], [], '-', color=col, lw=2,
+                                  label=r.label)[0]
+    axp.legend(fontsize=8, frameon=False, loc='upper right')
+    title = fig.suptitle('', fontsize=13, fontweight='bold')
+
+    def draw(k):
+        g = frames[k]
+        for r in usable:
+            pop = r.pop_history[g]
+            scats[r.label].set_offsets(pop[:, :2])
+            tb = r.history[g]['theta_best']
+            bests[r.label].set_data([tb[0]], [tb[1]])
+            gens = [h['gen'] for h in r.history[:g + 1]]
+            chi = [h['best_chi2'] for h in r.history[:g + 1]]
+            lines[r.label].set_data(gens, chi)
+        title.set_text(f"{model.label} — genetic evolution   ·   "
+                       f"generation {g + 1}/{n_gen}")
+        return list(scats.values()) + list(bests.values()) + list(lines.values())
+
+    anim = manim.FuncAnimation(fig, draw, frames=len(frames),
+                               interval=1000 / max(fps, 1), blit=False)
+
+    made: List[str] = []
+    for fmt in formats:
+        path = os.path.join(outdir, f"genetic_evolution_{tag}.{fmt}")
+        try:
+            if fmt == 'gif':
+                anim.save(path, writer=manim.PillowWriter(fps=fps))
+            elif fmt == 'mp4':
+                anim.save(path, writer=manim.FFMpegWriter(fps=fps, bitrate=2400))
+            else:
+                continue
+            made.append(path)
+        except Exception as exc:                            # pragma: no cover
+            print(f"  (no pude guardar {fmt}: {type(exc).__name__}: {exc})")
+    plt.close(fig)
+    return made
+
+
 def plot_overlay_with_samplers(result: GAResult, sampler_sets: dict,
                                model, outdir: str,
                                tag: Optional[str] = None) -> str:
@@ -1427,16 +1813,31 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
                 f"(+ cumulative {cumulative_csv})")
 
         if make_plots:
-            f1 = plot_population_corner(res, model, outdir)
-            say(f"[{res.method}] population corner: {f1}")
+            # [PLOT-GA] El corner de la poblacion final ya NO se genera por
+            # defecto: un GA converge a un punto, asi que ese corner es un
+            # punto con unos pixeles alrededor y no distingue un rung de otro.
+            # Su sustituto (`plot_genetic_convergence`) se genera una sola vez
+            # con TODOS los rungs juntos, mas abajo, porque la comparacion
+            # entre rungs es justo lo que la figura debe mostrar.
             if sampler_overlay:
+                # El overlay SI se conserva: ahi el punto del genetico sobre el
+                # posterior de los samplers es informativo — dice si el MAP cae
+                # dentro de la nube o fuera.
                 f2 = plot_overlay_with_samplers(
                     res, sampler_overlay, model, outdir)
                 say(f"[{res.method}] all-in-one overlay: {f2}")
 
-    if make_plots and results:
+    if make_plots and len(results) > 1:
+        # Con un solo metodo no hay nada que comparar: en --sweep-all la figura
+        # conjunta la genera el llamador con todos los rungs acumulados.
         f3 = plot_fitness_curve(list(results.values()), outdir, model)
         say(f"Fitness convergence figure: {f3}")
+        f4 = plot_genetic_convergence(list(results.values()), model, outdir)
+        if f4:
+            say(f"Genetic convergence + final estimate: {f4}")
+        for a in animate_genetic_evolution(list(results.values()), model,
+                                           outdir, formats=ANIM_FORMATS):
+            say(f"Animation: {a}")
 
     return results
 
@@ -1642,6 +2043,23 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Do not append to resultados_config.csv')
     p.add_argument('--no-live', action='store_true',
                    help='Force-disable the live GUI even in interactive mode')
+    # [ANIM] La animacion se guarda SIEMPRE por defecto, tambien en modo batch:
+    # es material de presentacion y no cuesta casi nada (se submuestrea a 120
+    # cuadros como mucho). --anim none la desactiva.
+    p.add_argument('--anim', type=str, default='gif',
+                   choices=('gif', 'mp4', 'both', 'none'),
+                   help="animacion de la evolucion de la poblacion, con todos "
+                        "los rungs de quantumness superpuestos. Por defecto "
+                        "'gif' (no necesita ffmpeg y se inserta directo en "
+                        "diapositivas); 'mp4' pesa menos pero exige ffmpeg; "
+                        "'both' guarda los dos; 'none' no anima.")
+    p.add_argument('--anim-fps', type=int, default=8,
+                   help='cuadros por segundo de la animacion (por defecto 8)')
+    # [NOISE] Segundo eje de ablacion. `--noise none` (por defecto) reproduce
+    # bit a bit el comportamiento previo a este eje.
+    cnoise.add_noise_cli(p)
+    p.add_argument('--gpu-check', action='store_true',
+                   help='imprime por que la GPU esta o no disponible y sale, sin correr nada. Util en una HPC nueva: --gpu degrada a CPU cuando Aer no expone GPU, y sin este chequeo eso solo se nota por el tiempo de pared.')
     p.add_argument('--gpu', action='store_true',
                    help='Use the GPU for the QGA Aer simulation if available '
                         '(qiskit-aer-gpu + CUDA). Falls back to CPU otherwise. '
@@ -1772,27 +2190,45 @@ def run_genetic_sweep_all(models, qga_levels, methods, dataset, prior, ga,
         try:
             post = Posterior(MODELS[model_name], dataset, prior)
 
+            # [PLOT-GA] Los resultados de TODOS los rungs se acumulan para
+            # que la figura de convergencia los compare en una sola imagen.
+            # Generarla dentro de cada llamada produciria una figura por rung,
+            # cada una con una sola curva — que es justo lo que no sirve.
+            all_res: List[GAResult] = []
+
             # CGA once (no quantumness).
             if 'cga' in methods:
-                run_genetic(
+                all_res += list(run_genetic(
                     post=post, methods=['cga'], ga=ga,
                     qga_config=dict(QGA_PRESETS[0]), n_bits=n_bits,
                     dataset_label=dataset, prior_type=prior, outdir=model_dir,
                     live=False, logger=logger, log_every=log_every,
                     shots=shots, make_plots=not no_plot, write_csv=not no_csv,
-                    cumulative_csv=cumulative_master)
+                    cumulative_csv=cumulative_master).values())
 
             # QGA at each requested quantumness preset.
             if 'qga' in methods:
                 for pct in qga_levels:
-                    run_genetic(
+                    all_res += list(run_genetic(
                         post=post, methods=['qga'], ga=ga,
                         qga_config=dict(QGA_PRESETS[pct]), n_bits=n_bits,
                         dataset_label=dataset, prior_type=prior,
                         outdir=model_dir, live=False, logger=logger,
                         log_every=log_every, shots=shots,
                         make_plots=not no_plot, write_csv=not no_csv,
-                        cumulative_csv=cumulative_master)
+                        cumulative_csv=cumulative_master).values())
+
+            if not no_plot and len(all_res) > 1:
+                f = plot_genetic_convergence(all_res, post.model, model_dir)
+                if f:
+                    say(f"  escalera completa en una figura: {f}")
+                f = plot_fitness_curve(all_res, model_dir, post.model)
+                say(f"  fitness de todos los rungs: {f}")
+                # [ANIM] Todos los rungs en la MISMA animacion: es donde se ve
+                # cual converge antes y cual se queda atascado.
+                for a in animate_genetic_evolution(
+                        all_res, post.model, model_dir, formats=ANIM_FORMATS):
+                    say(f"  animacion: {a}")
             status[model_name] = 'ok'
             say(f"[{i}/{len(models)}] {model_name}: DONE -> {model_dir}/")
         except Exception as exc:
@@ -1823,6 +2259,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     """
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if getattr(args, 'gpu_check', False):
+        from cosmo_core import gpu_diagnosis
+        print(gpu_diagnosis())
+        return 0
 
     if getattr(args, 'self_test', False):
         return self_test()
@@ -1873,14 +2314,26 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # [GPU] Publish the device choice module-wide so the QGA's simulator uses
     # it. --gpu requests the GPU; with no GPU present we fall back to CPU.
-    global USE_GPU
+    global USE_GPU, ANIM_FORMATS
     USE_GPU = bool(getattr(args, 'gpu', False))
     do_profile = bool(getattr(args, 'profile', False))
+    ANIM_FORMATS = {'gif': ('gif',), 'mp4': ('mp4',),
+                    'both': ('gif', 'mp4'),
+                    'none': ()}[getattr(args, 'anim', 'gif')]
+
+    # [NOISE] Publicar el peldano ANTES de construir ningun QGA: el simulador
+    # nace en __init__ y los circuitos se transpilan una sola vez contra el.
+    _spec = cnoise.spec_from_args(args)
+    set_noise(_spec)
+    if not _spec.is_ideal:
+        print(f"[NOISE] peldano='{_spec.label}' | metodo=density_matrix | "
+              f"techo={cnoise.MAX_NOISY_QUBITS}q | "
+              f"el QGA ya lee por medicion: sin conversion de lectura")
 
     # ── SWEEP-ALL: CGA + QGA across all models in one master folder ──
     if getattr(args, 'sweep_all', False):
         set_headless_backend()
-        device = resolve_device(USE_GPU)
+        device = resolve_device(USE_GPU, warn=True)
         sweep_models = args.sweep_models or list(MODELS)
         qga_levels = args.sweep_qga_levels or list(QGA_PRESETS)
         methods = args.methods or ['cga', 'qga']
@@ -2011,7 +2464,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"({qga_config.get('label', '')})")
 
     # [GPU] Report the device actually used by the QGA (CGA is pure NumPy).
-    device = resolve_device(USE_GPU)
+    device = resolve_device(USE_GPU, warn=True)
     if 'qga' in methods:
         if USE_GPU and device == 'CPU':
             say("  ⚠  --gpu requested but no Aer GPU device is available "

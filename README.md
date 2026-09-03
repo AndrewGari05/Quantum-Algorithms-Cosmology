@@ -5,7 +5,9 @@ real data (combined CC+BAO H(z) measurements, and Type Ia supernovae —
 Pantheon 2018 or Pantheon+ 2022) using **classical** and **quantum**
 sampling algorithms, and compares them head to head.
 
-**Status:** post-Fase-3 hardening (33 tests, all green). Convergence,
+**Status:** post-Fase-4 (62 tests, all green). Fase 4 added the **noise axis** — a second, orthogonal ablation dimension, so results are now a 2-D matrix (quantumness x noise) instead of a ladder; see [The noise axis](#the-noise-axis-second-ablation-dimension). `--noise none` is the default and reproduces every previous result bit for bit.
+
+**Status (Fase 3):** hardening (33 tests, all green). Convergence,
 divergence-tracking (KL), gradients, and reproducibility were audited and
 fixed this round — see [Diagnostics and correctness fixes](#diagnostics-and-correctness-fixes)
 for the full list, and re-run any figure generated before this round before
@@ -86,6 +88,91 @@ has 3 parts, so its rungs are thirds.)
 The genetic optimizer (`cosmo_genetic_optimizers.py`) has its own **third
 dial**, also in thirds — see the technical section for details.
 
+## The second dial: how much noise
+
+Everything above assumes a **perfect** quantum computer. Real quantum
+hardware makes mistakes: gates are slightly off, and when you finally read a
+qubit you sometimes read the wrong value. Every result in this project up to
+this point was computed on a *noiseless* simulator — the ideal limit.
+
+So there is now a **second dial**, independent of the quantumness one:
+
+```
+                        noise  →
+                    none   readout   gates+readout   real device
+    quantumness 0%    ·        ·            ·             ·
+          |    33%    ·        ·            ·             ·
+          ↓    67%    ·        ·            ·             ·
+              100%    ·        ·            ·             ·
+```
+
+Turn it up and the answers get **worse**. That is the point, and it is not a
+failure: the interesting question is not *whether* the methods degrade but
+**at what rate** — which rung of the quantumness ladder survives noise, and
+which one breaks first.
+
+```bash
+# One noise level
+python cosmo_modular_quantum.py --benchmark --model lcdm --noise full
+
+# The whole 2-D matrix in one launch
+python cosmo_hpc_runner.py --models lcdm --noise-sweep none,readout,full
+```
+
+`--noise none` is the default and reproduces the previous, noiseless
+behaviour **bit for bit**, so nothing published before this change moves.
+
+### What each noise setting actually means
+
+There are several noise-related flags and they are easy to confuse. In plain
+language:
+
+**`--noise none`** — no noise at all. The perfect-computer limit. This is what
+every result before this feature used, and it is still the default: run the
+code exactly as you always did and nothing changes.
+
+**`--noise readout`** — *only* the mistake at the very end. The quantum
+computer does its work perfectly, but when you finally look at a qubit to see
+whether it says 0 or 1, sometimes you read the wrong one. Nothing else is
+wrong; only the answer you write down.
+
+**`--noise full`** — the above **plus** mistakes during the work itself. Each
+operation on the qubits nudges them slightly off where they should be, and
+those nudges pile up through the circuit. This is the realistic "everything
+is a bit wrong" setting.
+
+**`--noise FakeBrisbane`** (or any other device name) — instead of made-up
+error rates, use the **measured** ones from a real IBM machine. Every qubit on
+a real chip is a little different, so this is the least idealized option.
+
+Then three dials that only set *how much*, and only matter for the synthetic
+levels (a real device brings its own measured numbers):
+
+**`--noise-readout-p`** (default 0.03) — how often the final reading is wrong.
+0.03 means 3 times in 100. This is the big one on today's hardware.
+
+**`--noise-gate-p1`** (default 0.001) — how often a single-qubit operation goes
+wrong: 1 in 1000. These are the cheap, reliable operations.
+
+**`--noise-gate-p2`** (default 0.01) — how often a *two*-qubit operation goes
+wrong: 1 in 100. Ten times worse than single-qubit ones, which is why circuits
+are designed to use as few of them as possible.
+
+And one flag that is not about noise at all, but gets tangled with it:
+
+**`--proposal-route`** — *how* the QMCMC reads its answer out of the circuit.
+With no noise it can read the exact wave amplitudes (`amplitude`); with noise
+those stop existing and it has to count measurement outcomes instead
+(`counts`), which is also what real hardware does. Because those are two
+different ways of reading, comparing a noiseless run against a noisy one
+compares *two things at once*. That is why the HPC runner adds a
+**`none-counts`** column automatically: a noiseless run that reads by counting,
+so you can tell the effect of the noise apart from the effect of the change in
+reading. **Do not drop that column** — without it, in our first campaign the
+numbers appeared to say that readout noise *improves* the sampling, which is
+false.
+
+
 ## The one thing that surprises everyone
 
 When you turn a dial up, **sometimes the answer changes and sometimes it
@@ -138,6 +225,17 @@ It then produces a set of **pictures** in the output folder.
 > live, or just wait: it returns to the prompt when it's actually done, with
 > every figure and CSV already written.
 
+### The figures the noise axis adds
+
+* **`noise_comparison_<model>.png`** — the one to look at first. One line per
+  quantumness rung, x-axis running from no noise to the real device. The
+  parameter panels show the **shift away from the ideal run measured in that
+  method's own sigma**, with a grey ±1σ band: a line that stays inside the band
+  moved less than the method's own uncertainty, i.e. the noise did not
+  displace it detectably. The right-hand panel shows fit quality (KL, or χ²),
+  where the degradation actually shows up. Written automatically at the end of
+  any `--noise-sweep` run.
+
 There is also a **global optimizer** that hunts for the single best-fit point
 (the MAP) using genetic algorithms — classical (CGA) and quantum (QGA) — with
 a live animation of the population converging:
@@ -145,6 +243,31 @@ a live animation of the population converging:
 ```bash
 python cosmo_genetic_optimizers.py
 ```
+
+The genetic runs produce two things worth knowing about:
+
+* **`genetic_evolution_<model>.gif`** — an **animation** of the population
+  converging, with **every quantumness rung on the same axes**. The left panel
+  is the cloud of candidate universes shrinking onto the answer (stars = the
+  best individual so far); the right panel is the χ² curve drawing itself in
+  time with it, so you can point at the moment a rung gets stuck. Saved by
+  default on every run, batch included — it is made for showing, not for
+  debugging. `--anim mp4` (needs ffmpeg), `--anim both`, or `--anim none`.
+  Long runs are subsampled to at most 120 frames so the file stays small.
+
+* **`genetic_convergence_<model>.png`** — **this replaced the population corner
+  plot.** A genetic algorithm converges to a *point*, so a corner plot of its
+  final population is a dot with a few pixels around it: it spends a whole
+  figure showing nothing, and hides the only things that separate one rung
+  from another. The replacement shows the best individual per generation (top,
+  one trace per rung) and the final estimate ± population spread (bottom, all
+  rungs stacked so they compare at a glance). Where two rungs coincide exactly
+  — QGA at 0% reproduces the CGA bit for bit, by design — the legend marks it
+  with `≡` so an overlapping curve does not look like a missing one.
+
+Corner plots are still the right figure for MCMC/VI, where the cloud of
+samples *is* the result. They are the wrong figure for an optimizer whose
+result is one point.
 
 Every run now saves its pictures, log and results table into its own
 timestamped folder, `results/run_<date>_<model>/`, so different runs never
@@ -186,6 +309,18 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
   uncertainty. Each blob/contour is one method at one dial setting. **If
   the blobs sit on top of each other, the methods agree.** Dashed lines
   mark the reference ("Planck") values.
+
+  **The shaded bands are 1σ, 2σ and 3σ**, darkest in the middle. Read them
+  as "the true value is somewhere in here": the innermost band is where it
+  most likely is, the outermost is where it almost certainly is.
+
+  One number to be careful with: in a **two-parameter** panel those bands
+  hold **39.3%, 86.5% and 98.9%** of the probability — *not* 68/95/99.7%.
+  Those familiar numbers are for a single parameter (the histograms along
+  the diagonal). Contours drawn at 0.68/0.95 in a 2-D panel would be wider
+  than 1σ and 2σ and would make two methods look like they agree better
+  than they do. The code uses `1 - exp(-n²/2)`, which is the correct 2-D
+  value.
 * **Convergence curve** (`ladder_rhat_*`) — whether the wandering search
   has "settled down." Lower is better; below the dashed line (R̂−1 = 0.01)
   means "settled." This threshold is strict on purpose — the whole project
@@ -236,15 +371,24 @@ python cosmo_genetic_optimizers.py --self-test
                    RAM budget, convergence plots)
                             │ launches
                             ▼
-            cosmo_core.py   ← PHYSICS + DATA + STATISTICS + Aer device factory
-        ┌────────┼────────┐         (shared by everything)
+   cosmo_core.py  ← PHYSICS + DATA + STATISTICS + Aer device factory
+   cosmo_noise.py ← NOISE AXIS (levels, models, analytic readout, ceiling)
+        ┌────────┼────────┐         (both shared by everything)
         │        │        │
 cosmo_modular_  qpu_cosmo_  cosmo_genetic_      cosmo_profiling.py
 quantum.py      samplers.py optimizers.py       (RAM / VRAM / GPU-hours,
 (Aer simulator, (real IBM   (CGA/QGA global      used by the two simulators
  quantumness     Quantum HW, optimization for    via --profile)
  benchmark)      SamplerV2)  the MAP + live GUI)
+                     ▲
+        qpu_noisy_simulation.py — same pipeline, noisy local Aer
+        instead of IBM. Imports qpu_cosmo_samplers and swaps ONLY
+        the connection, so the hardware module stays untouched.
 ```
+
+The two axes are orthogonal: `cosmo_core` decides *what* is computed and
+`cosmo_noise` decides *under what noise*. Every quantum module — and the HPC
+runner — reads its noise level from that one module.
 
 All executable scripts share the SAME physics through `cosmo_core.py`, select
 CPU/GPU through its `make_simulator` factory, and write their outputs into a
@@ -549,7 +693,7 @@ design differences:
 | QVMC gradient | exact parameter-shift (shift applied to the circuit probabilities + chain rule) | **SPSA (2 evals/iter, 1 job)** |
 | KL | over the full 2^n grid, ε-smoothed target — same definition as the simulator | estimated on the observed support, ε-smoothed (same definition; biased low by unobserved support, declared) |
 | Acceptance | Metropolis via abs(amp0)^2 | Metropolis on CPU (sequential) |
-| Error suppression | — | Dynamical Decoupling XY4 + Pauli twirling |
+| Error suppression | — | Dynamical Decoupling XY4 + Pauli twirling (**inert on a simulated backend** — see [DD-INERTE](#qpu_noisy_simulationpy--noisy-twin-of-the-qpu-pipeline)) |
 
 ```bash
 # Plan without spending QPU time (no IBM account needed):
@@ -602,6 +746,195 @@ measured values, printing a projection at the end. With the defaults
 Practical notes: QMCMC scales much better (proposal batching amortizes the
 queue across 64 proposals); for QVMC, **Session** (paid plans) removes the
 inter-iteration queue; keep `--iters ≤ 50` on the open plan.
+
+<!-- eje-de-ruido-nisq -->
+
+## The noise axis (second ablation dimension)
+
+Until this section the framework had ONE axis, quantumness. It now has two,
+and results form a matrix rather than a ladder:
+
+```
+                        noise  →
+                    none   readout   full   <backend>
+    quantumness 0%    ·        ·        ·        ·
+          |    33%    ·        ·        ·        ·
+          ↓    67%    ·        ·        ·        ·
+              100%    ·        ·        ·        ·
+```
+
+`cosmo_noise.py` is the single source of truth for this axis, the way
+`cosmo_core.py` is for the physics. The four rungs:
+
+| Level | What it models |
+|---|---|
+| `none` | ideal limit — every result published before this change |
+| `readout` | symmetric, uniform measurement-flip error only |
+| `full` | depolarizing on 1- and 2-qubit gates **plus** readout |
+| `<backend>` | calibrated model of a real IBM device (`FakeBrisbane`, …) |
+
+Available as `--noise` on all three executables and on the HPC runner, which
+additionally takes `--noise-sweep none,readout,full` and treats the level as
+a task dimension exactly like `--nqpp-sweep`. Every result row carries a
+`noise` column, written even for ideal runs so the matrix pivots without
+special cases.
+
+### Why readout error travels separately from the NoiseModel
+
+Readout error is a **classical channel applied after measurement**: it does
+not touch the state. Aer only applies it when the circuit measures. But two
+of the simulator's three amplitude reads (`hadamard_accept_log_batch` and
+`_kl_batch`) are probabilities obtained from `rho` **without measuring**, so
+they are *blind* to it — the `readout` column of the matrix would come out
+identical to the ideal column. Not a loud failure: clean, plausible, wrong
+numbers.
+
+Measured: at p = 0.01, 0.03 and 0.05, `rho[0,0]` does not move a single
+digit.
+
+The fix is not to measure but to apply the channel in closed form. On n
+qubits readout error is a tensor product of 2x2 stochastic matrices, so it
+acts exactly on `diag(rho)`:
+
+```
+P_noisy = (tensor_q M_q) @ P_ideal
+```
+
+That gives the **complete noise axis, exact and free of shot noise**, at the
+cost of an O(n·2^n) contraction. It matters because the shot-based route
+cannot resolve the bias being measured: at a 1e-3 gate error the acceptance
+bias is ~1.4e-4, and separating that from sampling noise would take ~1e7
+shots *per acceptance evaluation*.
+
+`NoiseSpec.simulator_kwargs(counts_route=...)` decides which model goes to
+Aer, because getting it wrong either double-counts readout error or makes it
+vanish silently.
+
+### Density matrix, not shots
+
+Noisy simulation needs either a density matrix (`16·4^n` bytes) or shot
+trajectories (`shots·2^n` in time). Measured on the project's real ansatz
+(3 layers, B=2 bindings, 4096 shots, FakeBrisbane):
+
+| qubits | density matrix | trajectories | rho size |
+|---|---|---|---|
+| 6 | **1.66 s** | 5.31 s | 0.1 MB |
+| 10 | **3.77 s** | 22.4 s | 16 MB |
+| 12 | **34.4 s** | 101 s | 256 MB |
+| 13 | **216 s** | 333 s | 1.0 GB |
+
+The density matrix **wins on time everywhere it fits** (1.5x–15x), because it
+evolves once and then samples, while trajectories re-simulate the whole
+circuit per shot. The advantage is largest exactly where QMCMC operates (few
+qubits, many bindings: 4.2 s vs 52 s for a 64-proposal block).
+
+**Shots do not buy qubits.** Above ~14 qubits neither route is usable — one
+runs out of memory, the other out of time (CPL at nqpp=6 is ~114 h *per
+job*). Hence `MAX_NOISY_QUBITS = 13`, a **time** ceiling as much as a memory
+one, which is why it is an explicit constant and not derived from detected
+RAM like the other two ceilings. More RAM does not move it.
+
+| Model | d | nqpp=3 | nqpp=4 | nqpp=5 | nqpp=6 |
+|---|---|---|---|---|---|
+| LCDM, PEDE | 2 | 6 ok | 8 ok | 10 ok | 12 ok |
+| wCDM, GEDE | 3 | 9 ok | 12 ok | 15 no | 18 no |
+| CPL | 4 | 12 ok | 16 no | 20 no | 24 no |
+
+QMCMC is absent from that table because its proposal engine uses
+`n_qubits = max(2, d)` — 2 to 4 qubits, essentially free under any noise
+model, for every model and every nqpp.
+
+### The proposal changes operator under noise (and what that costs)
+
+`_raw_block` reads `Re(psi)·sign(Im(psi))`, which is phase-sensitive and
+therefore undefined for a mixed state. It is the ONLY one of the simulator's
+reads that noise genuinely breaks; the other two are probabilities and
+survive exactly as `rho[0,0]` and `diag(rho)`.
+
+Under noise the proposal must be read by measurement instead
+(`<Z_q> = 1 - 2·P(q=1)`, the same rule the QPU pipeline runs on hardware).
+That is a **different operator**, not a noisy version of the same one, so
+comparing the ideal column (amplitudes) against the noisy ones (counts)
+would confound two effects. `--proposal-route counts` is therefore available
+**in the ideal rung too**: the noise axis is measured inside one route, and
+the route change stays a separate, controlled comparison.
+
+### Results that came out of building this
+
+**The unit-std calibration absorbs 100% of uniform readout error.** With a
+symmetric flip probability p, `<Z_q>' = (1-2p)·<Z_q>` — a scalar rescaling —
+and the calibration divides it straight out. Verified to 8e-15 **even at
+p = 0.20**. Gate noise is not absorbed (0.109 for `full`). So in the proposal
+row, the `readout` column comes out **identical** to the ideal-counts column.
+That is a provable invariance, not a regression, and it is pinned by a
+regression test so it is never mistaken for one.
+
+**Readout error dominates the rejection tail of the acceptance.** An exact
+acceptance of A = 0.00248 becomes 0.0323 at p = 0.03: readout puts a floor of
+~p on the acceptance, so moves that should almost always be rejected are
+accepted **13x too often**. This is far larger than the gate-noise effect and
+runs against the intuition that noise degrades smoothly.
+
+**The gate-noise bias on the acceptance is linear and directional.**
+Depolarizing drives rho toward I/2, so the bias is `lambda·(1/2 - A)`: the
+acceptance is pulled **toward 1/2**, over-accepting bad moves and
+under-accepting good ones. Relative bias scales linearly with the gate error
+rate (2.60% at 1e-3, 25.98% at 1e-2).
+
+**The QVMC normalization component is immune to this axis by construction.**
+`quantum_amplitude_normalization` runs its circuit but discards the result —
+the returned value is the exact classical sum. The QVMC 100% rung therefore
+cannot degrade because of it, and any degradation seen between 67% and 100%
+comes from somewhere else.
+
+### `qpu_noisy_simulation.py` — noisy twin of the QPU pipeline
+
+Runs the hardware pipeline against a noisy local simulator instead of IBM.
+It does **not** copy `qpu_cosmo_samplers.py` — it imports it and replaces one
+piece, the connection. A copied file would diverge from the original at the
+first fix applied to one and not the other, silently.
+
+Its value is twofold: it is the **first end-to-end execution** of
+`qpu_cosmo_samplers.py` (previously validated only in `--dry-run`, i.e. with
+synthetic uniform counts that exercise shapes, not physics), and it gives the
+**shot-noise** version of the axis, whereas the `cosmo_modular_quantum` axis
+computes exact probabilities to isolate decoherence from sampling.
+
+```bash
+python qpu_noisy_simulation.py --model lcdm --method qmcmc --noise full
+python qpu_noisy_simulation.py --model wcdm --method qvmc --noise FakeBrisbane
+```
+
+> **[DD-INERTE] The error suppression is inert on a simulated backend.**
+> `QPUConnection` enables dynamical decoupling XY4 and Pauli twirling. On real
+> hardware those act. In qiskit-ibm-runtime's local testing mode they are
+> **discarded**, announced only by a `UserWarning` that is lost in a long run's
+> logs. So a simulated noisy run measures *noise without error suppression*
+> while hardware measures *noise with it* — not the same experiment. It is a
+> defensible reading (a **lower bound** on achievable hardware quality) but it
+> must be recorded, not inferred. `qpu_noisy_simulation.py` therefore avoids
+> `SamplerV2` entirely and states this in the run log.
+
+### Bugs this axis surfaced
+
+Three of them, all silent — they returned clean, plausible numbers.
+
+* **`[N1]`** — `AerSimulator(method='statevector', noise_model=...)` raises
+  nothing. It runs, reports `COMPLETED`, and returns the **noiseless**
+  result. An entire noisy campaign would have come back ideal with no signal
+  at all. `make_simulator` now rejects the pairing.
+* **`[B-RO]`** — an `add_all_qubit_readout_error` appears in `to_dict()`
+  **without** a `gate_qubits` key. Reading that absence as `[[0]]` degrades
+  the channel to a single qubit; the symptom matched exactly at n=1 and
+  diverged only as n and p grew.
+* **`[B-RECON]`** — rebuilding a readout-free model with
+  `NoiseModel.from_dict()` is **lossy** for calibrated backends: 6.2e-4 of
+  drift in rho against FakeBrisbane at 3 qubits, while synthetic rungs showed
+  0.0. The reconstruction was removed entirely (it was also using an API
+  deprecated since qiskit-aer 0.15).
+
+`noise_feasibility_probe.py` reproduces the measurements behind this section.
+
 
 ## Diagnostics and correctness fixes
 
@@ -861,6 +1194,8 @@ Approximate worst-case memory by total qubits: 12 q ≈ 54 MB · 16 q ≈ 0.9 GB
 > while sampling-only rungs at the same `nqpp` don't, this is why — lower
 > `nqpp` for that model rather than raising `--max-qubits` further.
 
+> **A noisy run has a third, much lower ceiling.** With `--noise` on, simulation switches to a density matrix: `16·4^n` bytes *added to* the grid cost above, not replacing it (1.0 GB of rho at 13 qubits, 4.0 GB at 14). The binding limit is TIME rather than memory — 216 s per job at 13 qubits, ~14 min at 14 — and the shot-trajectory alternative, which would fit in RAM, is slower still. `cosmo_noise.MAX_NOISY_QUBITS = 13` is therefore a hard constant that more RAM does not raise. The HPC runner applies it automatically and clamps heavy models per model, the same way the other two ceilings do.
+
 To go above the default cap on a bigger machine, raise it explicitly:
 
 ```bash
@@ -1003,7 +1338,7 @@ physics:
 * **Pinned environment.** `requirements.txt` is pinned to the verified
   working environment (Qiskit 2.4.2 / Aer 0.17.2 / numpy 1.26.4); CUDA extras
   live in `requirements-gpu.txt`.
-* **Tests + CI.** `tests/` holds 33 tests: a pure-NumPy correctness floor
+* **Tests + CI.** `tests/` holds 62 tests (33 through Fase 3, plus 29 added in Fase 4 for the noise axis — the analytic readout map against Aer counts, the `[N1]` guard, the ideal rung's bit-for-bit reproducibility, the proposal's readout invariance, and the runner's third memory model): a pure-NumPy correctness floor
   (physics, statistics, the ablation framework, the QPU helpers) that runs
   without Qiskit, plus dedicated Qiskit-Aer regression tests — added in the
   Fase 3 round — that verify the QGA crossover truth table, the exact

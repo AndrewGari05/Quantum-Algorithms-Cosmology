@@ -24,6 +24,12 @@ matplotlib==3.10.9
 # --- quantum stack (same generation; verified working together) ---
 qiskit==2.4.2
 qiskit-aer==0.17.2
+# [REQ] Necesario para el pipeline de hardware (qpu_cosmo_samplers.py), para su
+# gemelo ruidoso (qpu_noisy_simulation.py) y para los peldanos de ruido que usan
+# un backend calibrado (--noise FakeBrisbane). FALTABA: qpu_cosmo_samplers.py lo
+# importa desde siempre, asi que una instalacion limpia de este archivo no podia
+# ejecutar ese modulo.
+qiskit-ibm-runtime>=0.30
 
 # --- inference / plotting / progress (verified) ---
 corner==2.2.3
@@ -44,3 +50,7 @@ pytest>=8.0
 # hardware, not in --dry-run). Install a runtime that matches qiskit 2.4.x
 # BEFORE a real-hardware run; pin it from your own `pip freeze` at that time:
 # qiskit-ibm-runtime>=0.30,<0.40   # must be compatible with qiskit 2.4.x
+
+# [ANIM] Escritor de los GIF de evolucion del genetico. Viene como dependencia
+# de matplotlib, pero se declara porque ahora hay codigo que depende de el.
+pillow>=10.0

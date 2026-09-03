@@ -1,0 +1,56 @@
+09:31:50 | INFO    | Log started: /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/genetic_sweep_all_20260903_093150.log
+09:31:50 | INFO    | QGA simulation device: CPU
+09:31:51 | INFO    | ======================================================================
+09:31:51 | INFO    | GENETIC SWEEP-ALL — 1 model(s): lcdm
+09:31:51 | INFO    |   methods=['cga', 'qga'] | QGA levels=[0, 33, 67, 100] | dataset=CC+BAO | prior=flat
+09:31:51 | INFO    |   pop=60 gens=30 n_bits=4
+09:31:51 | INFO    |   master folder: /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/
+09:31:51 | INFO    | ======================================================================
+09:31:51 | INFO    | 
+09:31:51 | INFO    | [1/1] ===== MODEL: lcdm (Flat ΛCDM) =====
+09:31:51 | INFO    | [CGA] start | pop=60 gens=30 | model=Flat ΛCDM | quantumness=0%
+09:31:51 | INFO    | [CGA] gen    0/30 | best χ²=  28.038 | mean χ²=  49.565 | Om=0.2709  H0=69.8350
+09:31:51 | INFO    | [CGA] gen   10/30 | best χ²=  27.469 | mean χ²=  40.281 | Om=0.2576  H0=70.7288
+09:31:51 | INFO    | [CGA] gen   20/30 | best χ²=  27.469 | mean χ²=  34.833 | Om=0.2575  H0=70.7299
+09:31:51 | INFO    | [CGA] gen   29/30 | best χ²=  27.469 | mean χ²=  36.530 | Om=0.2575  H0=70.7297
+09:31:51 | INFO    | [CGA] done in 0.0s | MAP: Om=0.2574  H0=70.7344 | χ²=27.469  χ²_red=0.561  AIC=31.47  BIC=35.33
+09:31:52 | INFO    | [CGA] MAP appended to /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/model_lcdm/resultados_config.csv (+ cumulative /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/resultados_TODOS_los_modelos.csv)
+09:31:52 | INFO    | [QGA] start | pop=60 gens=30 | model=Flat ΛCDM | quantumness=0%
+09:31:52 | INFO    | [QGA] gen    0/30 | best χ²=  28.038 | mean χ²=  49.565 | Om=0.2709  H0=69.8350
+09:31:52 | INFO    | [QGA] gen   10/30 | best χ²=  27.469 | mean χ²=  40.281 | Om=0.2576  H0=70.7288
+09:31:52 | INFO    | [QGA] gen   20/30 | best χ²=  27.469 | mean χ²=  34.833 | Om=0.2575  H0=70.7299
+09:31:52 | INFO    | [QGA] gen   29/30 | best χ²=  27.469 | mean χ²=  36.530 | Om=0.2575  H0=70.7297
+09:31:52 | INFO    | [QGA] done in 0.0s | MAP: Om=0.2574  H0=70.7344 | χ²=27.469  χ²_red=0.561  AIC=31.47  BIC=35.33
+09:31:52 | INFO    | [QGA] MAP appended to /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/model_lcdm/resultados_config.csv (+ cumulative /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/resultados_TODOS_los_modelos.csv)
+09:31:52 | INFO    | [QGA] start | pop=60 gens=30 | model=Flat ΛCDM | quantumness=33%
+09:31:52 | INFO    | [QGA] gen    0/30 | best χ²=  28.088 | mean χ²= 102.912 | Om=0.2514  H0=70.7377
+09:31:52 | INFO    | [QGA] gen   10/30 | best χ²=  27.470 | mean χ²=  38.182 | Om=0.2569  H0=70.7683
+09:31:52 | INFO    | [QGA] gen   20/30 | best χ²=  27.470 | mean χ²=  46.662 | Om=0.2570  H0=70.7607
+09:31:52 | INFO    | [QGA] gen   29/30 | best χ²=  27.470 | mean χ²=  33.141 | Om=0.2570  H0=70.7606
+09:31:52 | INFO    | [QGA] done in 0.1s | MAP: Om=0.2574  H0=70.7344 | χ²=27.469  χ²_red=0.561  AIC=31.47  BIC=35.33
+09:31:52 | INFO    | [QGA] MAP appended to /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/model_lcdm/resultados_config.csv (+ cumulative /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/resultados_TODOS_los_modelos.csv)
+09:31:52 | INFO    | [QGA] start | pop=60 gens=30 | model=Flat ΛCDM | quantumness=67%
+09:31:52 | INFO    | [QGA] gen    0/30 | best χ²=  28.399 | mean χ²= 145.317 | Om=0.2700  H0=70.3125
+09:31:53 | INFO    | [QGA] gen   10/30 | best χ²=  28.399 | mean χ²=  51.656 | Om=0.2700  H0=70.3125
+09:31:53 | INFO    | [QGA] gen   20/30 | best χ²=  28.399 | mean χ²=  70.276 | Om=0.2700  H0=70.3125
+09:31:53 | INFO    | [QGA] gen   29/30 | best χ²=  28.399 | mean χ²=  80.952 | Om=0.2700  H0=70.3125
+09:31:53 | INFO    | [QGA] done in 0.5s | MAP: Om=0.2574  H0=70.7344 | χ²=27.469  χ²_red=0.561  AIC=31.47  BIC=35.33
+09:31:53 | INFO    | [QGA] MAP appended to /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/model_lcdm/resultados_config.csv (+ cumulative /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/resultados_TODOS_los_modelos.csv)
+09:31:53 | INFO    | [QGA] start | pop=60 gens=30 | model=Flat ΛCDM | quantumness=100%
+09:31:54 | INFO    | [QGA] gen    0/30 | best χ²=  28.399 | mean χ²= 203.301 | Om=0.2700  H0=70.3125
+09:32:00 | INFO    | [QGA] gen   10/30 | best χ²=  28.399 | mean χ²=  62.213 | Om=0.2700  H0=70.3125
+09:32:07 | INFO    | [QGA] gen   20/30 | best χ²=  28.399 | mean χ²=  81.493 | Om=0.2700  H0=70.3125
+09:32:13 | INFO    | [QGA] gen   29/30 | best χ²=  28.399 | mean χ²= 112.718 | Om=0.2700  H0=70.3125
+09:32:13 | INFO    | [QGA] done in 20.1s | MAP: Om=0.2574  H0=70.7344 | χ²=27.469  χ²_red=0.561  AIC=31.47  BIC=35.33
+09:32:13 | INFO    | [QGA] MAP appended to /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/model_lcdm/resultados_config.csv (+ cumulative /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/resultados_TODOS_los_modelos.csv)
+09:32:14 | INFO    |   escalera completa en una figura: /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/model_lcdm/genetic_convergence_lcdm_genetic_convergence.png
+09:32:15 | INFO    |   fitness de todos los rungs: /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/model_lcdm/fitness_lcdm_fitness.png
+09:32:22 | INFO    |   animacion: /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/model_lcdm/genetic_evolution_lcdm.gif
+09:32:22 | INFO    | [1/1] lcdm: DONE -> /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/model_lcdm/
+09:32:22 | INFO    | 
+09:32:22 | INFO    | ======================================================================
+09:32:22 | INFO    | GENETIC SWEEP-ALL finished in 0.5 min
+09:32:22 | INFO    |   lcdm     : ok
+09:32:22 | INFO    |   Combined table: /home/andre/Cosmologia/Git_Hub/resultados_quick/genetic_lcdm_noise-full/resultados_TODOS_los_modelos.csv
+09:32:22 | INFO    | ======================================================================
+09:32:22 | INFO    | [profile] genetic_sweep_cpu: wall=30.2s  peak_RSS=324MB  device=CPU

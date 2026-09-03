@@ -1177,15 +1177,104 @@ def gpu_available() -> bool:
     return _GPU_AVAILABLE
 
 
-def resolve_device(prefer_gpu: bool) -> str:
+def gpu_diagnosis() -> str:
+    """Explain, in one readable block, WHY the GPU is or is not usable.
+
+    [B-GPU] `--gpu` degrada a CPU en silencio cuando Aer no expone un
+    dispositivo GPU. Pedir GPU y recibir CPU sin aviso es el mismo tipo de
+    fallo silencioso que este proyecto persigue en otros sitios: la corrida
+    termina, los numeros salen bien, y solo el tiempo de pared delata que no
+    se uso el acelerador — y en una corrida de horas eso no se nota.
+
+    La causa mas frecuente NO es que falte CUDA ni cuQuantum, sino que la
+    rueda `qiskit-aer` de PyPI **se compila solo para CPU**. Instalar
+    `cuquantum-cu12` / `custatevec-cu12` al lado no la convierte en una
+    version con GPU: Aer tiene que estar CONSTRUIDA contra ellas, o hay que
+    instalar la rueda con soporte GPU que publica el propio proyecto Aer.
+
+    Esta funcion no adivina: reporta lo que de verdad hay (paquetes
+    instalados, dispositivos que Aer declara, si nvidia-smi ve una tarjeta) y
+    deja que quien lea saque la conclusion.
+
+    Returns:
+        Texto multilinea con el diagnostico.
+    """
+    lines = ["[GPU] diagnostico:"]
+
+    try:
+        from qiskit_aer import AerSimulator
+        import qiskit_aer
+        devices = tuple(AerSimulator().available_devices())
+        lines.append(f"  qiskit-aer {qiskit_aer.__version__} declara "
+                     f"dispositivos: {devices}")
+        has_gpu = 'GPU' in devices
+    except Exception as exc:
+        devices, has_gpu = (), False
+        lines.append(f"  no pude consultar qiskit-aer: "
+                     f"{type(exc).__name__}: {exc}")
+
+    try:
+        import importlib.metadata as md
+        installed = {d.metadata['Name'].lower()
+                     for d in md.distributions()
+                     if d.metadata.get('Name')}
+    except Exception:
+        installed = set()
+    aer_pkgs = sorted(p for p in installed if 'aer' in p)
+    cuq_pkgs = sorted(p for p in installed
+                      if p.startswith(('cuquantum', 'custatevec', 'cutensor',
+                                       'cuda-', 'nvidia-')))
+    lines.append(f"  paquetes Aer instalados: {aer_pkgs or 'ninguno'}")
+    lines.append(f"  paquetes CUDA/cuQuantum: "
+                 f"{cuq_pkgs[:6] or 'ninguno'}"
+                 + (f" (+{len(cuq_pkgs) - 6} mas)" if len(cuq_pkgs) > 6 else ""))
+
+    try:
+        import subprocess
+        out = subprocess.run(['nvidia-smi', '--query-gpu=name,memory.total',
+                              '--format=csv,noheader'],
+                             capture_output=True, text=True, timeout=10)
+        gpus = [l for l in out.stdout.strip().splitlines() if l.strip()]
+        lines.append(f"  nvidia-smi ve: {gpus or 'ninguna tarjeta'}")
+    except Exception:
+        gpus = []
+        lines.append("  nvidia-smi: no disponible en este nodo")
+
+    if has_gpu:
+        lines.append("  -> Aer PUEDE usar GPU. --gpu funcionara.")
+    else:
+        lines.append("  -> Aer NO expone GPU, asi que --gpu correra en CPU.")
+        if gpus and not any('gpu' in p for p in aer_pkgs):
+            lines.append(
+                "     Hay tarjeta pero el qiskit-aer instalado es la rueda de "
+                "CPU. Instalar cuQuantum al lado NO la habilita: hace falta un "
+                "qiskit-aer construido con soporte GPU (la rueda con GPU del "
+                "propio proyecto Aer, o compilarlo con AER_THRUST_BACKEND=CUDA)."
+                " Comprueba en la documentacion de qiskit-aer cual corresponde "
+                "a la version 0.17.x antes de instalar nada.")
+        elif not gpus:
+            lines.append("     Este nodo no parece tener GPU visible.")
+    return "\n".join(lines)
+
+
+def resolve_device(prefer_gpu: bool, warn: bool = False) -> str:
     """Return the device string ('GPU' or 'CPU') actually usable.
 
-    prefer_gpu=True downgrades to 'CPU' (with the caller free to warn) when no
-    GPU is present, so a run never crashes for asking for a GPU that isn't
-    there.
+    Args:
+        prefer_gpu: si True se intenta GPU.
+        warn: si True y hubo que degradar a CPU, imprime `gpu_diagnosis()`.
+            [B-GPU] Pedir GPU y recibir CPU sin decirlo convierte una corrida
+            de horas en CPU en algo que solo se detecta mirando el reloj.
+
+    Returns:
+        'GPU' o 'CPU'.
     """
     if prefer_gpu and gpu_available():
         return 'GPU'
+    if prefer_gpu and warn:
+        print("\n[GPU] AVISO: se pidio --gpu pero se correra en CPU.")
+        print(gpu_diagnosis())
+        print("")
     return 'CPU'
 
 
@@ -1200,7 +1289,8 @@ def make_simulator(method: str = 'statevector', prefer_gpu: bool = False,
             statevector across the GPU) only helps for LARGE circuits; for the
             many tiny circuits of QMCMC/QVMC/QGA it adds pure overhead, so it
             is enabled only when n_qubits is large (or unknown). [A4]
-        **kwargs: forwarded to AerSimulator (e.g. precision, blocking options).
+        **kwargs: forwarded to AerSimulator (e.g. precision, blocking options,
+            or `noise_model` for the NISQ ablation axis — see `cosmo_noise`).
 
     Returns:
         A configured AerSimulator. On GPU, batched-shots distribution is
@@ -1208,9 +1298,26 @@ def make_simulator(method: str = 'statevector', prefer_gpu: bool = False,
         blocking is enabled only for wide circuits, where it actually pays off.
         cuStateVec is requested when available (the project's cuQuantum
         backend); Aer ignores the flag if the build lacks cuStateVec.
+
+    Raises:
+        ValueError: if a `noise_model` is combined with `method='statevector'`.
+
+    [N1] Aer CANNOT apply a noise model with `method='statevector'`, and it
+    does not say so: the run completes, reports success, and silently returns
+    the NOISELESS result. That failure mode is invisible in every downstream
+    number — a whole noisy campaign would come back looking clean and
+    plausible — so the combination is rejected here rather than trusted.
+    Callers should obtain their kwargs from `cosmo_noise.NoiseSpec.
+    simulator_kwargs()`, which never produces this pairing.
     """
     from qiskit_aer import AerSimulator
     device = resolve_device(prefer_gpu)
+    if kwargs.get('noise_model') is not None and method == 'statevector':
+        raise ValueError(
+            "[N1] make_simulator: method='statevector' cannot apply a "
+            "noise_model — Aer would ignore it silently and return the ideal "
+            "result. Use method='density_matrix' (see cosmo_noise.NoiseSpec."
+            "simulator_kwargs) or drop the noise_model.")
     opts = dict(method=method, device=device)
     if device == 'GPU':
         # Batched shots distribute many circuits/shots across the GPU — always

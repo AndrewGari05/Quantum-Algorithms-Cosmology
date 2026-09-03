@@ -100,6 +100,7 @@ from qiskit.circuit import ParameterVector
 from qiskit_aer import AerSimulator
 
 import cosmo_core as core
+import cosmo_noise as cnoise
 from cosmo_core import (MODELS, Posterior, RNG, ess_chains, ess_weights,
                         fit_statistics, fmt_theta, gelman_rubin_max,
                         gpu_available, make_run_dir, make_simulator,
@@ -110,10 +111,104 @@ from cosmo_core import (MODELS, Posterior, RNG, ess_chains, ess_weights,
 # `_sim(...)` which reads it, so the CPU/GPU choice is consistent everywhere.
 USE_GPU = False
 
+# =============================================================================
+#  [NOISE] Segundo eje de ablacion — nivel de ruido del modulo.
+# =============================================================================
+#
+#  Mismo patron que USE_GPU: main() lo fija desde --noise y TODA ruta cuantica
+#  de este modulo lo consulta, de modo que el nivel de ruido es consistente en
+#  todo el proceso. El valor por defecto es el peldano ideal.
+#
+#  REGLA DE ORO de este eje: con NOISE.is_ideal, cada ruta debe ejecutar
+#  EXACTAMENTE el codigo previo al eje de ruido — no una version equivalente.
+#  Por eso las rutas ruidosas se anaden como ramas separadas en vez de
+#  unificarse: `save_probabilities` difiere de `|psi|^2` en 2.2e-16, suficiente
+#  para que la columna ideal dejara de ser reproducible bit a bit contra los
+#  resultados ya publicados.
+NOISE: "cnoise.NoiseSpec" = cnoise.NoiseSpec.from_level('none')
+
+#  Ruta de lectura del motor de propuesta: 'auto' | 'amplitude' | 'counts'.
+#
+#  La propuesta lee Re(psi)*sign(Im(psi)), que es sensible a fase relativa y
+#  por tanto NO sobrevive a un estado mezclado: es la unica de las lecturas del
+#  simulador ideal que el ruido rompe de verdad. Bajo ruido hay que leerla por
+#  conteos (<Z_q> por qubit), que es un OPERADOR DISTINTO, no una version
+#  ruidosa del mismo.
+#
+#  Comparar la columna ideal (amplitudes) contra las ruidosas (conteos)
+#  mezclaria entonces dos efectos: el ruido y el cambio de lectura. Para poder
+#  separarlos, 'counts' esta disponible TAMBIEN en el peldano ideal: asi el eje
+#  de ruido se mide DENTRO de una sola ruta y el cambio de ruta queda como una
+#  comparacion aparte y controlada.
+#
+#  'auto' (por defecto) elige amplitudes en el peldano ideal y conteos en
+#  cuanto hay ruido, que es lo unico posible.
+PROPOSAL_ROUTE: str = 'auto'
+
+
+def set_noise(spec: "cnoise.NoiseSpec", proposal_route: str = 'auto') -> None:
+    """Fija el nivel de ruido y la ruta de propuesta del modulo.
+
+    Invalida ademas las cachés de simuladores que dependen del nivel de ruido
+    (`_HAD`), porque conservarlas entre niveles haria que un cambio de peldano
+    siguiera usando el simulador del peldano anterior — un fallo silencioso
+    que devolveria resultados del nivel equivocado.
+
+    Args:
+        spec: peldano del eje, de `cosmo_noise.NoiseSpec`.
+        proposal_route: 'auto', 'amplitude' o 'counts'.
+    """
+    global NOISE, PROPOSAL_ROUTE
+    if proposal_route not in ('auto', 'amplitude', 'counts'):
+        raise ValueError(f"proposal_route invalida: {proposal_route!r}")
+    if proposal_route == 'amplitude' and not spec.is_ideal:
+        raise ValueError(
+            "[NOISE] proposal_route='amplitude' es imposible con ruido: "
+            "Re(psi)*sign(Im(psi)) no esta definido para un estado mezclado. "
+            "Usa 'counts' o 'auto'.")
+    NOISE = spec
+    PROPOSAL_ROUTE = proposal_route
+    _HAD.update({'sim': None, 'qc_t': None, 'par': None, 'noise': None})
+
 
 def _sim(method: str = 'statevector', **kwargs):
     """Project-wide AerSimulator factory honoring the module GPU preference."""
     return make_simulator(method=method, prefer_gpu=USE_GPU, **kwargs)
+
+
+def _noisy_sim(counts_route: bool, **kwargs):
+    """AerSimulator del peldano de ruido actual.
+
+    Args:
+        counts_route: True si el circuito MIDE (Aer aplica la lectura), False
+            si el resultado se lee del estado y la lectura se aplica luego con
+            `NOISE.apply_readout`.
+        **kwargs: extras para `make_simulator`.
+
+    Returns:
+        AerSimulator configurado para `NOISE`.
+    """
+    return make_simulator(prefer_gpu=USE_GPU,
+                          **NOISE.simulator_kwargs(counts_route), **kwargs)
+
+
+def _probs_from_result(res, k: int, n_qubits: int) -> np.ndarray:
+    """diag(rho) del circuito k, con el canal de lectura ya aplicado.
+
+    Centraliza el paso que, de omitirse, dejaria la columna `readout` del eje
+    identica a la ideal: el error de lectura es un canal clasico posterior a
+    la medicion y no aparece en `rho`, asi que hay que aplicarlo en cerrado.
+
+    Args:
+        res: `Result` de Aer de un circuito con `save_probabilities()`.
+        k: indice del circuito dentro del job.
+        n_qubits: ancho del registro.
+
+    Returns:
+        Vector de probabilidades de longitud `2**n_qubits`.
+    """
+    probs = np.asarray(res.data(k)['probabilities'], dtype=float)
+    return NOISE.apply_readout(probs, n_qubits)
 
 # ── Contrasting color convention used by EVERY overlay figure ────────────────
 #    (requirement 3: blue = classical, red/orange = quantum)
@@ -471,9 +566,22 @@ class QuantumProposalEngine:
         self.n_qubits = max(2, n_phys)
         self.qc = build_proposal_circuit(self.n_qubits, n_layers)
         self.n_phi = self.qc.num_parameters
-        self.sim = _sim('statevector')
+        # [NOISE] Ruta de lectura fijada UNA vez, en construccion: la
+        # calibracion (_mu, _sigma) se estima con la ruta activa y no seria
+        # valida si la ruta cambiara despues.
+        self.route = ('counts'
+                      if (PROPOSAL_ROUTE == 'counts' or not NOISE.is_ideal)
+                      else 'amplitude')
+        self.noise_label = NOISE.label
+        if self.route == 'amplitude':
+            self.qc_run = self.qc
+            self.sim = _sim('statevector')
+        else:
+            self.qc_run = self.qc.copy()
+            self.qc_run.save_probabilities()
+            self.sim = _noisy_sim(counts_route=False)
         # [OPT] transpile the template ONCE
-        self._qc_t = transpile(self.qc, self.sim)
+        self._qc_t = transpile(self.qc_run, self.sim)
         self.batch = batch
         self._queue: List[np.ndarray] = []
         # [M4 FIX] Calibrate the normalization ONCE, at construction, from a
@@ -492,7 +600,24 @@ class QuantumProposalEngine:
         self._sigma = sigma
 
     def _raw_block(self, n: int) -> np.ndarray:
-        """Generate `n` RAW (uncalibrated) displacements in a single job."""
+        """Generate `n` RAW (uncalibrated) displacements in a single job.
+
+        Despacha a la ruta fijada en construccion. Ver `PROPOSAL_ROUTE` para
+        por que las dos rutas son operadores distintos y no versiones ideal /
+        ruidosa del mismo.
+        """
+        if self.route == 'amplitude':
+            return self._raw_block_amplitude(n)
+        return self._raw_block_counts(n)
+
+    def _raw_block_amplitude(self, n: int) -> np.ndarray:
+        """Ruta original: Re(psi)*sign(Im(psi)) de las d primeras amplitudes.
+
+        Solo existe en el limite ideal — la fase relativa que lee esta
+        expresion no esta definida para un estado mezclado. Se conserva
+        literalmente para que el peldano ideal siga siendo reproducible bit a
+        bit contra los resultados ya publicados.
+        """
         circs = []
         for _ in range(n):
             phi = RNG.uniform(0, 2 * np.pi, self.n_phi)
@@ -506,6 +631,65 @@ class QuantumProposalEngine:
             re, im = np.real(sv), np.imag(sv)
             f = np.where(im >= 0, 1.0, -1.0)
             raw[k] = re[:self.d] * f[:self.d]
+        return raw
+
+    def _raw_block_counts(self, n: int) -> np.ndarray:
+        """Ruta por medicion: <Z_q> = 1 - 2*P(q=1) por qubit, en [-1, 1]^d.
+
+        Es EXACTAMENTE la regla de `qpu_cosmo_samplers.QPUProposalEngine.
+        _counts_to_shift`, que es lo que corre en hardware real. La regla se
+        replica aqui en vez de importarse porque `qpu_cosmo_samplers.py` se
+        mantiene intacto para las corridas de QPU; `test_noise_axis.py` fija
+        la equivalencia de ambas implementaciones sobre los mismos conteos,
+        de modo que no puedan divergir en silencio.
+
+        A diferencia del hardware, aqui P(q=1) se obtiene EXACTA de
+        `diag(rho)` (con el canal de lectura ya aplicado) en vez de estimarse
+        con disparos. Es deliberado: el eje mide degradacion por ruido, y
+        superponerle ruido de muestreo confundiria las dos cosas. La version
+        con disparos vive en el gemelo QPU.
+
+        [INVARIANCIA] Esta ruta es EXACTAMENTE invariante a un canal de
+        lectura UNIFORME, y conviene saberlo antes de leer la tabla de
+        resultados. Con probabilidad de volteo p simetrica e igual en todos
+        los qubits:
+
+            P'(q=1) = (1-p)P(q=1) + p(1-P(q=1))
+            => <Z_q>' = 1 - 2P'(q=1) = (1-2p) <Z_q>
+
+        es decir, un reescalado escalar. La calibracion a media cero y std
+        unitaria de `__init__` divide ese factor, asi que el desplazamiento
+        calibrado no cambia en absoluto. Verificado a 8e-15 (precision de
+        punto flotante) incluso con p = 0.20.
+
+        Consecuencia: en la fila de la propuesta, la columna `readout` sale
+        IDENTICA a la columna ideal-por-conteos. Eso NO es el bug [B-RO],
+        que producia el mismo sintoma: es una invariancia demostrable, y la
+        forma de distinguirlas es la prueba de arriba mas el hecho de que el
+        ruido de COMPUERTA si sobrevive (0.11 en `full`, 0.023 en
+        FakeBrisbane sobre desplazamientos de std 1).
+
+        Responde ademas a la pregunta abierta del diseno: la calibracion no
+        absorbe "parte" del efecto del ruido, absorbe el 100% del componente
+        de lectura uniforme y nada del de compuerta.
+        """
+        probs = np.empty((n, 2 ** self.n_qubits))
+        circs = []
+        for _ in range(n):
+            phi = RNG.uniform(0, 2 * np.pi, self.n_phi)
+            circs.append(self._qc_t.assign_parameters(phi))
+        res = self.sim.run(circs).result()
+        for k in range(n):
+            probs[k] = _probs_from_result(res, k, self.n_qubits)
+
+        # P(qubit q = 1): suma de las celdas cuyo bit q vale 1.
+        # Qiskit es little-endian, el bit q del indice i es (i >> q) & 1.
+        idx = np.arange(2 ** self.n_qubits)
+        raw = np.empty((n, self.d))
+        for q in range(self.d):
+            mask = ((idx >> q) & 1).astype(float)
+            p1 = probs @ mask
+            raw[:, q] = 1.0 - 2.0 * p1
         return raw
 
     def _refill(self):
@@ -534,7 +718,10 @@ class QuantumProposalEngine:
 
 
 # ── Quantum acceptance via a single-qubit amplitude encoding ─────────────────
-_HAD = {'sim': None, 'qc_t': None, 'par': None}
+# [NOISE] La clave 'noise' guarda la etiqueta del peldano con el que se
+# construyo la caché. Sin ella, cambiar de peldano dentro del mismo proceso
+# seguiria usando el simulador del peldano anterior sin decir nada.
+_HAD = {'sim': None, 'qc_t': None, 'par': None, 'noise': None}
 
 
 def hadamard_accept_log(lp_cur: float, lp_prop: float) -> float:
@@ -577,18 +764,31 @@ def hadamard_accept_log(lp_cur: float, lp_prop: float) -> float:
     # baseline so the quantum acceptance reproduces it exactly.
     A = min(1.0, float(np.exp(delta)))
     A = min(max(A, 1e-12), 1.0)
-    if _HAD['qc_t'] is None:
+    # [NOISE] Comparte la caché `_HAD` con la version por lotes, asi que debe
+    # construirla con el MISMO criterio: si una version cacheara un simulador
+    # ideal y la otra leyera esperando ruido (o al reves), el resultado seria
+    # del peldano equivocado sin ningun aviso.
+    if _HAD['qc_t'] is None or _HAD['noise'] != NOISE.label:
         par = ParameterVector('theta', 1)
         qc = QuantumCircuit(1)
         qc.ry(par[0], 0)
-        qc.save_statevector()
-        _HAD['sim'] = _sim('statevector')
+        if NOISE.is_ideal:
+            qc.save_statevector()
+            _HAD['sim'] = _sim('statevector')
+        else:
+            qc.save_probabilities()
+            _HAD['sim'] = _noisy_sim(counts_route=False)
         _HAD['qc_t'] = transpile(qc, _HAD['sim'])
         _HAD['par'] = par
+        _HAD['noise'] = NOISE.label
     theta = 2.0 * np.arccos(np.sqrt(A))
     bound = _HAD['qc_t'].assign_parameters({_HAD['par'][0]: theta})
-    sv = np.asarray(_HAD['sim'].run(bound).result().get_statevector())
-    prob_zero = float(np.abs(sv[0])**2)   # P(|0>) = A = min(1,e^Δ)
+    res = _HAD['sim'].run(bound).result()
+    if NOISE.is_ideal:
+        sv = np.asarray(res.get_statevector())
+        prob_zero = float(np.abs(sv[0])**2)   # P(|0>) = A = min(1,e^Δ)
+    else:
+        prob_zero = float(_probs_from_result(res, 0, 1)[0])
     return float(np.log(prob_zero + 1e-12))
 
 
@@ -620,21 +820,38 @@ def hadamard_accept_log_batch(lp_cur: np.ndarray,
     A = np.minimum(1.0, np.exp(delta))
     A = np.clip(A, 1e-12, 1.0)
     thetas = 2.0 * np.arccos(np.sqrt(A))           # RY angle per chain
-    if _HAD['qc_t'] is None:
+    if _HAD['qc_t'] is None or _HAD['noise'] != NOISE.label:
         par = ParameterVector('theta', 1)
         qc = QuantumCircuit(1)
         qc.ry(par[0], 0)
-        qc.save_statevector()
-        _HAD['sim'] = _sim('statevector')
+        if NOISE.is_ideal:
+            qc.save_statevector()
+            _HAD['sim'] = _sim('statevector')
+        else:
+            # [NOISE] Con ruido la amplitud deja de existir, pero P(|0>) no:
+            # es rho[0,0], que save_probabilities entrega directamente. El
+            # puente es EXACTO — rho[0,0] reproduce |psi_0|^2 con diferencia
+            # 0.0 en el limite sin ruido — asi que cualquier desviacion
+            # posterior es atribuible al ruido y no al cambio de lectura.
+            qc.save_probabilities()
+            _HAD['sim'] = _noisy_sim(counts_route=False)
         _HAD['qc_t'] = transpile(qc, _HAD['sim'])
         _HAD['par'] = par
+        _HAD['noise'] = NOISE.label
     circs = [_HAD['qc_t'].assign_parameters({_HAD['par'][0]: float(t)})
              for t in thetas]
     res = _HAD['sim'].run(circs).result()          # ONE job, all chains
     logs = np.empty(len(thetas))
-    for k in range(len(thetas)):
-        sv = np.asarray(res.get_statevector(k))
-        logs[k] = np.log(float(np.abs(sv[0]) ** 2) + 1e-12)
+    if NOISE.is_ideal:
+        # Ruta original, intacta: el peldano ideal debe seguir siendo
+        # reproducible bit a bit contra los resultados ya publicados.
+        for k in range(len(thetas)):
+            sv = np.asarray(res.get_statevector(k))
+            logs[k] = np.log(float(np.abs(sv[0]) ** 2) + 1e-12)
+    else:
+        for k in range(len(thetas)):
+            p0 = float(_probs_from_result(res, k, 1)[0])
+            logs[k] = np.log(p0 + 1e-12)
     out[finite] = logs
     return out
 
@@ -843,15 +1060,27 @@ def quantum_amplitude_normalization(P_unnorm: np.ndarray) -> np.ndarray:
     vs the classical O(1/√M); the final value is the same, so here the
     circuit is executed for pedagogical fidelity and the normalization
     uses the exact sum.
+
+    [NOISE] Consecuencia que hay que declarar al leer el eje de ruido: el
+    circuito se EJECUTA bajo el peldano activo, pero su resultado se descarta
+    y el valor devuelto es la suma exacta. Este componente es por tanto
+    INMUNE al eje de ruido por construccion — el peldano del 100% del QVMC no
+    puede degradarse por su culpa. Cualquier degradacion observada entre el
+    67% y el 100% viene de otro sitio, y atribuirla a la normalizacion seria
+    un error de lectura de la escalera.
     """
     n = max(1, min(4, int(np.log2(max(len(P_unnorm), 2)))))
-    sim = _sim('statevector')
     qc = QuantumCircuit(n + 1)
     qc.h(range(n + 1))
     norm = float(np.sum(P_unnorm))
     angle = 2 * np.arcsin(np.sqrt(np.clip(norm / len(P_unnorm), 0, 1)))
     qc.ry(angle, n)
-    qc.save_statevector()
+    if NOISE.is_ideal:
+        sim = _sim('statevector')
+        qc.save_statevector()
+    else:
+        sim = _noisy_sim(counts_route=False)
+        qc.save_probabilities()
     sim.run(transpile(qc, sim)).result()
     return P_unnorm / (norm + 1e-15)
 
@@ -923,7 +1152,12 @@ class QVMCModular:
             self.grid_window = list(self.model.sample_box)
         self.grids = [np.linspace(lo, hi, self.n_grid)
                       for lo, hi in self.grid_window]
-        self.sim = _sim('statevector')
+        # [NOISE] La KL lee |psi|^2, que es diag(rho): sobrevive intacta a un
+        # estado mezclado, asi que la conversion es exacta y no cambia de
+        # operador (a diferencia de la propuesta). Ver `_kl_batch`.
+        self.sim = (_sim('statevector') if NOISE.is_ideal
+                    else _noisy_sim(counts_route=False))
+        self.noise_label = NOISE.label
         # idx -> θ table (vectorized) used by decode, target and traces
         self.theta_table = self._build_theta_table()
 
@@ -1011,10 +1245,15 @@ class QVMCModular:
         values directly comparable (goal B3, definition level).
         """
         phis = np.atleast_2d(phis)
+        ideal = NOISE.is_ideal
         circs = []
         for ph in phis:
             b = qc_t.assign_parameters(ph)
-            b.save_statevector()
+            # [NOISE] En el peldano ideal se conserva la lectura original
+            # (save_statevector) porque save_probabilities difiere de |psi|^2
+            # en 2.2e-16 y la columna ideal debe seguir siendo reproducible
+            # bit a bit contra los resultados ya publicados.
+            b.save_statevector() if ideal else b.save_probabilities()
             circs.append(b)
         res = self.sim.run(circs).result()
         P_s = (P_target + eps)
@@ -1022,7 +1261,10 @@ class QVMCModular:
         log_Ps = np.log(P_s)
         kls, Qs = [], []
         for k in range(len(phis)):
-            Q = np.abs(np.asarray(res.get_statevector(k)))**2
+            if ideal:
+                Q = np.abs(np.asarray(res.get_statevector(k)))**2
+            else:
+                Q = _probs_from_result(res, k, self.n_qubits)
             kls.append(float(np.sum(Q * (np.log(np.clip(Q, eps, None))
                                          - log_Ps))))
             if return_q:
@@ -1197,9 +1439,18 @@ class QVMCModular:
             _sanity('QVMC.sample', 'classical',
                     'NumPy inverse-transform from |ψ|² (RNG.choice)')
             sv_qc = bound.remove_final_measurements(inplace=False)
-            sv_qc.save_statevector()
-            sv = self.sim.run(transpile(sv_qc, self.sim)).result().get_statevector()
-            probs = np.abs(np.asarray(sv))**2
+            if NOISE.is_ideal:
+                sv_qc.save_statevector()
+                sv = self.sim.run(transpile(sv_qc, self.sim)
+                                  ).result().get_statevector()
+                probs = np.abs(np.asarray(sv))**2
+            else:
+                # [NOISE] Sin amplitud, pero |psi|^2 = diag(rho) sigue siendo
+                # la misma cantidad; el canal de lectura se aplica en cerrado
+                # porque este circuito no mide.
+                sv_qc.save_probabilities()
+                res = self.sim.run(transpile(sv_qc, self.sim)).result()
+                probs = _probs_from_result(res, 0, self.n_qubits)
             probs /= probs.sum()
             for _ in range(n_chains):
                 idx = RNG.choice(self.n_states, size=self.n_shots, p=probs)
@@ -1513,6 +1764,32 @@ def plot_corner_overlay(flat_c: np.ndarray, flat_q: np.ndarray, model,
     return f
 
 
+def _sigma_fill_colors(color, n_levels: int = 3):
+    """Colores de las bandas de sigma: transparente fuera, opaco al centro.
+
+    corner.py rellena `n_levels + 1` bandas y la mas EXTERNA cubre el panel
+    entero. Su mapa por defecto la deja transparente, pero pasar un `alpha`
+    global en `contourf_kwargs` lo pisa y la banda externa acaba pintando todo
+    de un color plano que tapa los demas posteriores — que es exactamente lo
+    que hay que evitar en una figura de varios rungs superpuestos.
+
+    Por eso el mapa se construye aqui: la banda de fuera va a alpha 0 y las de
+    dentro suben en escalones suaves, lo bastante bajos para que dos o tres
+    posteriores se puedan superponer sin ocultarse.
+
+    Args:
+        color: color del rung.
+        n_levels: cuantos niveles de sigma se dibujan.
+
+    Returns:
+        Lista de RGBA, de la banda mas externa a la mas interna.
+    """
+    from matplotlib.colors import to_rgba
+    r, g, b, _ = to_rgba(color)
+    alphas = [0.0] + [0.10 + 0.11 * i for i in range(n_levels)]
+    return [(r, g, b, a) for a in alphas]
+
+
 def plot_corner_multi(datasets, colors, labels, model, outdir: str, tag: str,
                       title: str, weights_list=None):
     """Overlay N posteriors on ONE corner plot with a shared set of axes.
@@ -1547,17 +1824,35 @@ def plot_corner_multi(datasets, colors, labels, model, outdir: str, tag: str,
     # distinguishable; contour collections require named styles (not tuples).
     ls_cycle = ['solid', 'dashed', 'dashdot', 'dotted', (0, (3, 1, 1, 1))]
 
-    def _kw(ls):
+    # [SIGMA] Niveles de credibilidad, SOMBREADOS y no solo como lineas.
+    #
+    # Los valores no son 68/95/99.7%: esos son los de una gaussiana en UNA
+    # dimension. En el plano de dos parametros la masa contenida dentro del
+    # contorno de n-sigma es 1 - exp(-n^2/2), es decir 39.3%, 86.5% y 98.9%.
+    # Usar 0.68/0.95 aqui — un error frecuente — dibujaria contornos
+    # sistematicamente MAS ANCHOS que 1 y 2 sigma y haria parecer que los
+    # metodos concuerdan mejor de lo que concuerdan.
+    #
+    # Se rellenan porque con solo lineas, y varios posteriores superpuestos, no
+    # se distingue cual contorno pertenece a cual metodo ni cual es el interior.
+    # La opacidad es baja (0.16) para que los rellenos se puedan superponer sin
+    # tapar el de abajo, y las lineas siguen encima marcando el borde exacto.
+    SIGMA_LEVELS = (0.393, 0.865, 0.989)          # 1, 2 y 3 sigma en 2D
+
+    def _kw(ls, col):
         return dict(labels=model.param_latex, bins=35, range=rng_,
                     plot_datapoints=False, plot_density=False, smooth=1.0,
-                    levels=(0.393, 0.865),
-                    contour_kwargs=dict(linestyles=ls, linewidths=1.9),
+                    levels=SIGMA_LEVELS,
+                    fill_contours=True, no_fill_contours=False,
+                    contourf_kwargs=dict(colors=_sigma_fill_colors(col)),
+                    contour_kwargs=dict(linestyles=ls, linewidths=1.7,
+                                        alpha=0.95),
                     hist_kwargs=dict(density=True, lw=1.8, ls=ls))
 
     fig = None
     for k, (data, col, w) in enumerate(zip(datasets, colors, weights_list)):
         fig = corner.corner(data, color=col, weights=w, fig=fig,
-                            **_kw(ls_cycle[k % len(ls_cycle)]))
+                            **_kw(ls_cycle[k % len(ls_cycle)], col))
     corner.overplot_lines(fig, model.fiducial, color='k', ls='--', lw=1.2)
     ref_handles = _overplot_refs_corner(fig, model)
 
@@ -2599,9 +2894,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--no-plot', action='store_true', help='Skip figures')
     p.add_argument('--no-csv', action='store_true',
                    help='Skip writing resultados_config.csv')
+    p.add_argument('--gpu-check', action='store_true',
+                   help='imprime por que la GPU esta o no disponible y sale, sin correr nada. Util en una HPC nueva: --gpu degrada a CPU cuando Aer no expone GPU, y sin este chequeo eso solo se nota por el tiempo de pared.')
     p.add_argument('--gpu', action='store_true',
                    help='Use the GPU for Aer simulation if available '
                         '(qiskit-aer-gpu + CUDA). Falls back to CPU otherwise.')
+    # [NOISE] Segundo eje de ablacion. `--noise none` (por defecto) reproduce
+    # bit a bit el comportamiento previo a este eje.
+    cnoise.add_noise_cli(p)
+    p.add_argument('--proposal-route', type=str, default='auto',
+                   choices=('auto', 'amplitude', 'counts'),
+                   help="lectura del motor de propuesta. 'amplitude' es la "
+                        "original (Re(psi)*sign(Im(psi))) y solo existe sin "
+                        "ruido; 'counts' usa <Z_q> como el hardware real y "
+                        "esta disponible TAMBIEN en el peldano ideal, para "
+                        "poder separar el efecto del ruido del efecto del "
+                        "cambio de lectura. 'auto' (por defecto) elige "
+                        "amplitudes sin ruido y conteos con ruido.")
     p.add_argument('--profile', action='store_true',
                    help='Profile peak CPU/GPU memory, wall time and GPU-hours, '
                         'and save a resource_usage_*.png figure.')
@@ -2773,6 +3082,11 @@ def main():
         _validate_args(args)
 
     # --sanity-check short-circuits everything: routing + correctness only.
+    if getattr(args, 'gpu_check', False):
+        from cosmo_core import gpu_diagnosis
+        print(gpu_diagnosis())
+        return 0
+
     if getattr(args, 'sanity_check', False):
         sanity_check_routing(model_name=args.model, nqpp=min(args.nqpp, 2))
         return
@@ -2792,6 +3106,16 @@ def main():
     USE_GPU = want_gpu
     do_profile = bool(getattr(args, 'profile', False))
 
+    # [NOISE] Publicar el peldano de ruido module-wide, igual que USE_GPU, y
+    # ANTES de construir cualquier motor cuantico: la ruta de lectura y la
+    # calibracion de la propuesta se fijan en construccion.
+    spec = cnoise.spec_from_args(args)
+    set_noise(spec, getattr(args, 'proposal_route', 'auto'))
+    if not spec.is_ideal:
+        print(f"[NOISE] peldano='{spec.label}' | metodo=density_matrix | "
+              f"techo={cnoise.MAX_NOISY_QUBITS}q | "
+              f"ruta de propuesta={PROPOSAL_ROUTE}")
+
     _reseed(args.seed)
 
     # ── SWEEP-ALL: run the benchmark for every model in one master folder ──
@@ -2800,7 +3124,7 @@ def main():
         # normal cli_mode branch that would otherwise call this, and on an HPC
         # compute node (no display) Matplotlib must not try to open a GUI.
         set_headless_backend()
-        device = resolve_device(USE_GPU)
+        device = resolve_device(USE_GPU, warn=True)
         sweep_models = args.sweep_models or list(MODELS)
         # One master folder for the whole sweep; per-model subfolders inside.
         if args.outdir == 'results':
@@ -2892,7 +3216,7 @@ def main():
         f"dataset: {dataset} ({post.n_data} pts) | prior: {prior}")
 
     # [GPU] Report the device actually in use (after fallback resolution).
-    device = resolve_device(USE_GPU)
+    device = resolve_device(USE_GPU, warn=True)
     if USE_GPU and device == 'CPU':
         say("  ⚠  --gpu requested but no Aer GPU device is available "
             "(need qiskit-aer-gpu + CUDA). Running on CPU.")

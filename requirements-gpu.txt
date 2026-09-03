@@ -1,3 +1,28 @@
+# ============================================================================
+# EXTRAS GPU
+# ============================================================================
+# [B-GPU] LEE ESTO ANTES DE INSTALAR.
+#
+# Estos paquetes por si solos NO habilitan la GPU. La rueda `qiskit-aer` que
+# instala requirements.txt desde PyPI esta compilada SOLO PARA CPU: poner
+# cuQuantum a su lado no la convierte en una version con GPU. Aer tiene que
+# estar CONSTRUIDA con soporte CUDA (la rueda con GPU que publica el propio
+# proyecto Aer, o compilarlo con AER_THRUST_BACKEND=CUDA).
+#
+# Si no, `--gpu` degrada a CPU. Antes lo hacia en SILENCIO — la corrida
+# terminaba, los numeros salian bien, y solo el tiempo de pared delataba que no
+# se habia usado el acelerador. Ahora avisa y explica por que.
+#
+# Comprueba en cualquier nodo nuevo ANTES de lanzar una corrida larga:
+#
+#     python cosmo_hpc_runner.py --gpu-check
+#
+# Te dira que dispositivos declara Aer, que paquetes hay instalados y si
+# nvidia-smi ve una tarjeta. Consulta la documentacion de qiskit-aer para saber
+# que rueda con GPU corresponde a la version 0.17.x antes de instalar nada: el
+# nombre y la disponibilidad han cambiado entre versiones.
+# ============================================================================
+
 # =============================================================================
 # requirements-gpu.txt — CUDA 12 cuQuantum statevector backend (optional)
 # =============================================================================
