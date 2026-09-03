@@ -798,3 +798,151 @@ def test_b_gpu_el_diagnostico_no_revienta_sin_gpu():
     assert resolve_device(True, warn=False) in ('CPU', 'GPU')
     assert resolve_device(True, warn=True) in ('CPU', 'GPU')
     assert resolve_device(False) == 'CPU'
+
+
+# =============================================================================
+# [B-CGROUP] Limites del contenedor
+# =============================================================================
+
+def test_b_cgroup_lee_el_limite_del_contenedor(tmp_path, monkeypatch):
+    """[B-CGROUP] En un contenedor hay que leer el cgroup, no el nodo.
+
+    `psutil.virtual_memory()` y `os.cpu_count()` reportan los recursos del
+    NODO. En un pod con "Maximum memory 63Gi" sobre un nodo de 512 GB, el
+    runner creia tener 512 GB, admitia decenas de tareas a la vez y el runtime
+    mataba el pod por OOM — un SIGKILL, sin traceback ni resultados parciales.
+    """
+    import cosmo_hpc_runner as r
+
+    v2 = tmp_path / 'v2'
+    v2.mkdir()
+    (v2 / 'memory.max').write_text('67645734912\n')      # 63 GiB
+    (v2 / 'cpu.max').write_text('1500000 100000\n')      # 15 nucleos
+
+    real_open = open
+
+    def fake_open(path, *a, **kw):
+        p = str(path)
+        if p.startswith('/sys/fs/cgroup/'):
+            return real_open(str(v2 / os.path.basename(p)), *a, **kw)
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr('builtins.open', fake_open)
+    assert abs(r._cgroup_memory_limit_mb() - 67645.7) < 1.0
+    assert r._cgroup_cpu_limit() == 15
+    assert r.detected_cores() == 15
+    assert abs(r.detected_memory_mb() - 67645.7) < 1.0
+
+
+def test_b_cgroup_sin_limite_cae_al_nodo(monkeypatch):
+    """Sin cgroup (o con 'max'), debe comportarse como antes del arreglo."""
+    import cosmo_hpc_runner as r
+
+    real_open = open
+
+    def no_cgroup(path, *a, **kw):
+        if str(path).startswith('/sys/fs/cgroup/'):
+            raise FileNotFoundError(path)
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr('builtins.open', no_cgroup)
+    assert r._cgroup_memory_limit_mb() is None
+    assert r._cgroup_cpu_limit() is None
+    assert r.detected_cores() >= 1
+    assert r.detected_memory_mb() > 0
+
+
+def test_b_cgroup_centinela_de_ilimitado(monkeypatch, tmp_path):
+    """El centinela gigante de cgroup v1 no debe leerse como un limite real.
+
+    cgroup v1 escribe 2^63-1 para decir "sin limite". Tomarlo al pie de la
+    letra daria un presupuesto de 9 millones de TB.
+    """
+    import cosmo_hpc_runner as r
+
+    d = tmp_path / 'v1'
+    d.mkdir()
+    (d / 'memory.limit_in_bytes').write_text('9223372036854771712\n')
+    real_open = open
+
+    def fake_open(path, *a, **kw):
+        p = str(path)
+        if p == '/sys/fs/cgroup/memory.max':
+            raise FileNotFoundError(p)
+        if p.startswith('/sys/fs/cgroup/'):
+            return real_open(str(d / os.path.basename(p)), *a, **kw)
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr('builtins.open', fake_open)
+    assert r._cgroup_memory_limit_mb() is None
+
+
+# =============================================================================
+# [B-GRID] La comparacion de ruido no puede mezclar resoluciones
+# =============================================================================
+
+def _fake_run(tmp_path, folders):
+    """Arma un master_dir falso con un CSV minimo por carpeta."""
+    hdr = ("Method,Om_mean,Om_std,H0_mean,H0_std,nqpp,chi2_red,final_KL,ESS\n")
+    for name, kl in folders.items():
+        d = tmp_path / name
+        d.mkdir(parents=True)
+        (d / 'resultados_config.csv').write_text(
+            hdr
+            + f"Classical MCMC,0.26,0.016,70.8,1.09,—,0.56,,101\n"
+            + f"QVMC 67%,0.26,0.017,70.8,1.10,3,0.56,{kl},91\n")
+    return str(tmp_path)
+
+
+def test_b_grid_no_mezcla_resoluciones(tmp_path):
+    """[B-GRID] Con --nqpp-sweep y --noise-sweep juntos, una figura por nqpp.
+
+    El techo con ruido recorta unas resoluciones y no otras, asi que la
+    columna ideal puede quedarse con nqpp=5 mientras la ruidosa baja a nqpp=3.
+    Comparandolas en el mismo eje, la figura atribuiria al ruido lo que es un
+    cambio de resolucion — y la serie no avisaba: tomaba `sel[-1]`, una fila
+    arbitraria entre las varias que compartian metodo y peldano.
+    """
+    import cosmo_hpc_runner as r
+
+    master = _fake_run(tmp_path, {
+        'samplers_lcdm_nqpp3_noise-none': 10.0,
+        'samplers_lcdm_nqpp3_noise-full': 11.5,
+        'samplers_lcdm_nqpp5_noise-none': 8.0,
+        'samplers_lcdm_nqpp5_noise-full': 9.2,
+    })
+    made = r.generate_noise_comparison_plots(master)
+    names = {os.path.basename(p) for p in made}
+    assert names == {'noise_comparison_nqpp3_lcdm.png',
+                     'noise_comparison_nqpp5_lcdm.png'}, names
+
+
+def test_b_grid_una_sola_resolucion_conserva_el_nombre(tmp_path):
+    """Sin barrido, el nombre y el titulo se quedan como siempre."""
+    import cosmo_hpc_runner as r
+
+    master = _fake_run(tmp_path, {
+        'samplers_lcdm_noise-none': 10.0,
+        'samplers_lcdm_noise-full': 11.5,
+    })
+    made = r.generate_noise_comparison_plots(master)
+    assert [os.path.basename(p) for p in made] == \
+        ['noise_comparison_lcdm.png']
+
+
+def test_b_grid_una_carpeta_sin_etiqueta_es_UN_grupo(tmp_path):
+    """Un CSV sin etiqueta de carpeta no debe partirse en dos grupos.
+
+    Deducir la resolucion fila a fila de la columna `nqpp` lo hacia: el MCMC
+    clasico la deja vacia, asi que el mismo CSV generaba un grupo '' y otro
+    'nqpp3', y salian dos figuras con la mitad de los metodos cada una.
+    """
+    import cosmo_hpc_runner as r
+
+    assert r._infer_grid('/x/samplers_lcdm_noise-none/r.csv',
+                         {'nqpp': '3'}) == ''
+    assert r._infer_grid('/x/samplers_lcdm_noise-none/r.csv',
+                         {'nqpp': ''}) == ''
+    assert r._infer_grid('/x/samplers_lcdm_nqpp5_noise-full/r.csv',
+                         {}) == 'nqpp5'
+    assert r._infer_grid('/x/genetic_cpl_nb4_noise-full/r.csv', {}) == 'nb4'

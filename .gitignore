@@ -2,13 +2,16 @@ __pycache__/
 *.pyc
 *:Zone.Identifier
 *.lock
-results/
+# Salidas de corridas. Patrones con comodin y no nombres exactos: `resultados/`
+# no cubria `resultados_quick/`, `resultados_ro_0.03/` ni ninguna carpeta con
+# --outdir propio, asi que un `git add -A` tras una corrida metia el run entero
+# —figuras, GIF, CSV— en el repo sin que se notara hasta el commit.
+results*/
+resultados*/
 bridge.aux
 bridge.log
 bridge.out
 bridge.toc
 data_checksums.json
-resultados/
-results_retune/
 cosmic_chronometers.txt
 pantheon_full_parameters.txt

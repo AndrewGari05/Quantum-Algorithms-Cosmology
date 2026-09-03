@@ -33,7 +33,7 @@ si `nvidia-smi` ve tarjeta. **Córrelo en cada máquina nueva.**
 > documentación de qiskit-aer para saber qué rueda con GPU corresponde a la
 > versión 0.17.x antes de instalar nada.
 
-El segundo debe dar **69 tests en verde**. Si alguno falla en un nodo nuevo,
+El segundo debe dar **75 tests en verde**. Si alguno falla en un nodo nuevo,
 párate ahí: algo del entorno no coincide.
 
 ## 2. La corrida completa
@@ -46,24 +46,29 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
 python cosmo_hpc_runner.py \
     --noise-sweep none,readout,full,FakeBrisbane \
-    --nqpp-sweep 3 6 \
-    --nbits-sweep 4 8 \
+    --nqpp-sweep 3 5 \
+    --nbits-sweep 4 7 \
     --dataset CC+BAO+Pantheon \
     --steps 20000 --qvmc-iter 3000 --chains 8 --shots 4096 \
     --generations 200 --population-size 300 \
-    --max-task-gb 90 \
-    --seed 42 --profile
+    --total-cores 14 --mem-budget-gb 50 --max-task-gb 12 \
+    --seed 42
 ```
+
+Ajustado a un contenedor de **63 Gi y 15 nucleos**. En una maquina con mas RAM
+sube `--max-task-gb` y `--mem-budget-gb`; el runner detecta solo los limites
+del contenedor (cgroup) si no los pasas.
 
 Qué hace cada parte:
 
 | Flag | Por qué |
 |---|---|
 | `--noise-sweep` | los cuatro peldaños del eje. Añade sola una quinta columna, `none-counts`, que es el control. |
-| `--nqpp-sweep 3 6` | resolución del QVMC. El runner **recorta por modelo**: ΛCDM llega a 6, CPL baja a 3 bajo ruido, y te dice por qué. |
-| `--nbits-sweep 4 8` | resolución del genético, que aguanta más porque no tiene el lote de parameter-shift. |
-| `--max-task-gb 90` | **importa más de lo que parece**: de aquí sale el techo de qubits. Sin él usa el presupuesto agregado, que con varios procesos es menor. |
-| `--profile` | RAM pico, VRAM, horas-GPU por tarea. |
+| `--nqpp-sweep 3 5` | resolución del QVMC. El runner **recorta por modelo**: ΛCDM llega a 6, CPL baja a 3 bajo ruido, y te dice por qué. |
+| `--nbits-sweep 4 7` | resolución del genético, que aguanta más porque no tiene el lote de parameter-shift. |
+| `--max-task-gb 12` | **importa más de lo que parece**: de aquí sale el techo de qubits. A 11 qubits una tarea ruidosa pesa 10.4 GiB y caben 6 en paralelo; a 12 pesa 44 GiB y solo cabe **una**, desperdiciando el resto de núcleos. |
+| `--mem-budget-gb 50` | presupuesto agregado. Deja colchón sobre el límite duro del contenedor: pasarse es un OOMKill (SIGKILL, sin traceback ni resultados parciales). |
+| (perfilado) | Está **activado por defecto** en el runner: RAM pico, VRAM, horas-GPU por tarea. `--profile` NO es un flag válido aquí — el runner lo reenvía solo a los hijos. Para apagarlo: `--no-profile`. |
 | `--seed 42` | reproducibilidad, también de las partes cuánticas. |
 
 `--dataset`: usa `CC+BAO+Pantheon` si solo tienes
@@ -76,7 +81,7 @@ hacen falta además `Pantheon+SH0ES.dat` y `Pantheon+SH0ES_STAT+SYS.cov`, que
 ```bash
 python cosmo_hpc_runner.py --noise-sweep none,readout --models lcdm \
     --nqpp 3 --steps 500 --qvmc-iter 20 --generations 20 \
-    --population-size 40 --n-bits 4 --max-task-gb 90 --outdir /tmp/prueba
+    --population-size 40 --n-bits 4 --max-task-gb 12 --outdir /tmp/prueba
 ```
 
 Cinco minutos. Valida el flujo entero, incluidas las figuras nuevas.
@@ -88,7 +93,7 @@ sus circuitos. Si quieres el QMCMC ruidoso a resolución alta:
 
 ```bash
 python cosmo_hpc_runner.py --models lcdm --noise-sweep none,readout,full \
-    --nqpp 9 --only-samplers --qvmc-iter 0 --steps 40000 --max-task-gb 90
+    --nqpp 9 --only-samplers --qvmc-iter 0 --steps 40000 --max-task-gb 12
 ```
 
 **Curva de degradación continua** — convierte cuatro peldaños en una curva.
@@ -97,7 +102,7 @@ Barato (2–4 qubits):
 ```bash
 for p in 0.005 0.01 0.02 0.03 0.05 0.08 0.12; do
   python cosmo_hpc_runner.py --models lcdm --noise readout --noise-readout-p $p \
-      --only-samplers --nqpp 4 --steps 40000 --max-task-gb 90 \
+      --only-samplers --nqpp 4 --steps 40000 --max-task-gb 12 \
       --outdir resultados_ro_$p
 done
 ```
@@ -107,7 +112,7 @@ done
 ```bash
 python cosmo_hpc_runner.py --only-genetic \
     --noise-sweep none,readout,full,FakeBrisbane \
-    --nbits-sweep 4 8 --generations 300 --population-size 400 --max-task-gb 90
+    --nbits-sweep 4 7 --generations 300 --population-size 400 --max-task-gb 12
 ```
 
 **El pipeline QPU contra ruido simulado** (no toca hardware ni credenciales):
@@ -119,14 +124,17 @@ python qpu_noisy_simulation.py --model lcdm --method both --noise FakeBrisbane \
 
 ## 4. Techos de qubits: qué esperar
 
-Con **95 GB**, el eje de ruido concede:
+Con **63 Gi**, el eje de ruido concede:
 
 | pipeline | techo | por qué |
 |---|---|---|
 | QMCMC | sin límite de `nqpp` | su motor usa `max(2, d)` qubits |
-| QVMC rungs 0% / 33% | 16 q | una ρ suelta |
-| QVMC rungs 67% / 100% | **12 q** | manda el lote de parameter-shift (`2·n_φ` matrices de densidad: 42 GB a 12 q) |
-| QGA | 16 q | una ρ por operador, sin lote |
+| QVMC rungs 0% / 33% | 15 q | una ρ suelta |
+| QVMC rungs 67% / 100% | **11–12 q** | manda el lote de parameter-shift (`2·n_φ` matrices de densidad: 10.4 GiB a 11 q, **44 GiB a 12**) |
+| QGA | 15 q | una ρ por operador, sin lote |
+
+Por modelo, con ruido y `--max-task-gb 12`: ΛCDM/PEDE llegan a nqpp=5, 
+wCDM/GEDE a nqpp=3, CPL a nqpp=2.
 
 Como `--benchmark` recorre la escalera entera, el peldaño del lote fija el
 techo de una tarea de samplers. Más RAM sube poco: el lote crece como `4^n`.
@@ -135,7 +143,7 @@ techo de una tarea de samplers. Más RAM sube poco: el lote crece como `4^n`.
 
 | Archivo | Qué responde |
 |---|---|
-| `noise_comparison_<modelo>.png` | **empieza aquí.** Cada rung a lo largo del eje de ruido. Parámetros en unidades de σ (banda gris = ±1σ), calidad de ajuste a la derecha. |
+| `noise_comparison[_nqppN]_<modelo>.png` | **empieza aquí.** Con `--nqpp-sweep` sale **una por resolución**: mezclarlas convertiría un recorte de techo en lo que parece un efecto del ruido. Cada rung a lo largo del eje de ruido. Parámetros en unidades de σ (banda gris = ±1σ), calidad de ajuste a la derecha. |
 | `genetic_evolution_<modelo>.gif` | la animación de la población convergiendo, todos los rungs juntos. Para la defensa. |
 | `genetic_convergence_<modelo>.png` | trayectoria + estimación final del genético. Sustituye al corner. |
 | `corner_ladder_*` | posteriores con bandas 1σ/2σ/3σ sombreadas. |

@@ -1,7 +1,7 @@
 {
-  "wall_s": 67.38,
-  "peak_rss_mb": 267.2,
-  "peak_vram_mb": 0.0,
+  "wall_s": 64.71,
+  "peak_rss_mb": 265.9,
+  "peak_vram_mb": 9.0,
   "gpu_hours": 0.0,
   "mean_gpu_util_pct": 0.0,
   "device": "CPU",

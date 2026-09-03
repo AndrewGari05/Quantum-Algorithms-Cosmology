@@ -183,6 +183,93 @@ BYTES_PER_STATE_NOISY_NOTE = (
 BYTES_PER_STATE = BYTES_PER_STATE_SAMPLERS
 
 
+def _cgroup_memory_limit_mb() -> Optional[float]:
+    """Limite de RAM del CONTENEDOR en MB, o None si no hay ninguno.
+
+    [B-CGROUP] `psutil.virtual_memory().total` reporta la RAM del NODO, no la
+    del contenedor. En un pod de Kubernetes con "Maximum memory 63Gi" sobre un
+    nodo de, digamos, 512 GB, el runner creia tener 512 GB, admitia decenas de
+    tareas a la vez y el runtime mataba el pod por OOM.
+
+    Y un OOMKill no es un MemoryError de Python: es un SIGKILL. No hay
+    traceback, no hay resultados parciales, no queda ni una linea en el log
+    explicando por que. La corrida entera desaparece.
+
+    Lee cgroup v2 y v1. Un valor gigantesco ('max', o el centinela de v1)
+    significa sin limite, y entonces devuelve None para que el llamador use la
+    RAM del nodo como antes.
+
+    Returns:
+        Limite en MB, o None si no hay cgroup o es ilimitado.
+    """
+    candidates = (
+        '/sys/fs/cgroup/memory.max',                       # cgroup v2
+        '/sys/fs/cgroup/memory/memory.limit_in_bytes',     # cgroup v1
+    )
+    for path in candidates:
+        try:
+            raw = open(path).read().strip()
+        except Exception:
+            continue
+        if raw == 'max':
+            return None
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        # v1 usa 2^63-1 (o similar) como "sin limite"; cualquier cosa por
+        # encima de 1 PB es claramente un centinela y no un limite real.
+        if value <= 0 or value > 1e15:
+            return None
+        return value / 1e6
+    return None
+
+
+def _cgroup_cpu_limit() -> Optional[int]:
+    """Nucleos que el CONTENEDOR puede usar, o None si no hay limite.
+
+    [B-CGROUP] Mismo problema que la memoria: `os.cpu_count()` devuelve los
+    nucleos del nodo. Con "Maximum CPU 15" sobre un nodo de 128, el runner
+    lanzaba 128 procesos peleandose por 15 nucleos — mas lento que hacerlo
+    bien, y con mucha mas RAM en vuelo.
+
+    Returns:
+        Numero de nucleos (>=1), o None si no hay limite declarado.
+    """
+    try:                                                   # cgroup v2
+        quota, period = open('/sys/fs/cgroup/cpu.max').read().split()
+        if quota != 'max':
+            return max(1, int(float(quota) / float(period)))
+        return None
+    except Exception:
+        pass
+    try:                                                   # cgroup v1
+        quota = float(open('/sys/fs/cgroup/cpu/cpu.cfs_quota_us').read())
+        period = float(open('/sys/fs/cgroup/cpu/cpu.cfs_period_us').read())
+        if quota > 0 and period > 0:
+            return max(1, int(quota / period))
+    except Exception:
+        pass
+    return None
+
+
+def detected_cores() -> int:
+    """Nucleos usables: el limite del contenedor si lo hay, si no los del nodo."""
+    return _cgroup_cpu_limit() or os.cpu_count() or 1
+
+
+def detected_memory_mb() -> float:
+    """RAM usable en MB: el limite del contenedor si lo hay, si no la del nodo."""
+    limit = _cgroup_memory_limit_mb()
+    if limit is not None:
+        return limit
+    try:
+        import psutil
+        return psutil.virtual_memory().total / 1e6
+    except Exception:
+        return 8_000.0
+
+
 @dataclass
 class Task:
     name: str                       # human-readable label
@@ -967,6 +1054,32 @@ def _noise_sort_key(level: str):
             else len(NOISE_ORDER), level)
 
 
+def _infer_grid(path: str, row: dict) -> str:
+    """Resolucion de la tarea ('nqpp3', 'nb5', ...) o '' si no se puede saber.
+
+    Se toma del nombre de la carpeta, que el runner etiqueta cuando hay
+    barrido; si no lo lleva, se cae a la columna `nqpp` del CSV.
+
+    Args:
+        path: ruta del CSV.
+        row: fila ya parseada (sin usar; se conserva por compatibilidad).
+
+    Returns:
+        Etiqueta de resolucion, o cadena vacia.
+    """
+    import re as _re
+    for part in path.split(os.sep):
+        m = _re.search(r'_(nqpp\d+|nb\d+)(?:_|$)', part)
+        if m:
+            return m.group(1)
+    # Sin etiqueta en la carpeta no hubo barrido, asi que TODAS las filas de
+    # ese CSV son la misma resolucion. Deducirla fila a fila de la columna
+    # `nqpp` seria peor: el MCMC clasico la deja vacia, de modo que un mismo
+    # CSV se partia en dos grupos ('' y 'nqpp3') y salian figuras duplicadas
+    # con la mitad de los metodos cada una.
+    return ''
+
+
 def _parse_noise_rows(csv_paths: List[str]) -> List[dict]:
     """Aplana los CSV en registros {model, method, noise, param, mean, std, ...}.
 
@@ -987,6 +1100,15 @@ def _parse_noise_rows(csv_paths: List[str]) -> List[dict]:
                     common = dict(
                         model=row.get('model', '') or _infer_model(path),
                         method=row.get('Method', '?'), noise=noise,
+                        # [B-GRID] La resolucion TIENE que viajar en el
+                        # registro. Sin ella, comparar a lo largo del eje de
+                        # ruido mezclaba nqpp distintos: con --nqpp-sweep y
+                        # --noise-sweep a la vez, el techo con ruido recorta
+                        # unos peldanos y no otros, asi que la columna ideal
+                        # podia quedarse con nqpp=5 y la ruidosa con nqpp=3.
+                        # La figura entonces atribuia al ruido lo que era un
+                        # cambio de resolucion.
+                        grid=_infer_grid(path, row),
                         chi2_red=_to_float(row.get('chi2_red', 'nan')),
                         final_KL=_to_float(row.get('final_KL', 'nan')),
                         ESS=_to_float(row.get('ESS', 'nan')))
@@ -1082,19 +1204,40 @@ def generate_noise_comparison_plots(master_dir: str,
         for kind, keep, suffix in (
                 ('samplers', lambda m: not _is_genetic(m), ''),
                 ('genetic', _is_genetic, '_genetic')):
-            sub = [r for r in records if r['model'] == model
-                   and keep(r['method'])]
-            if sub:
-                pth = _one_noise_figure(model, sub, levels, outdir, suffix,
+            pool = [r for r in records if r['model'] == model
+                    and keep(r['method'])]
+            if not pool:
+                continue
+            # [B-GRID] Una figura por RESOLUCION. Mezclar nqpp distintos en un
+            # mismo eje de ruido convierte un recorte de techo en lo que parece
+            # un efecto del ruido.
+            grids = sorted({r['grid'] for r in pool})
+            # Con una sola resolucion no hay nada que separar: el nombre y el
+            # titulo se quedan como antes, para no romper referencias previas.
+            split = len(grids) > 1
+            for g in grids:
+                sub = [r for r in pool if r['grid'] == g]
+                # Solo tiene sentido comparar si esa resolucion existe en mas
+                # de un peldano; si el techo la recorto en los ruidosos, no hay
+                # comparacion que hacer y dibujarla enganaria.
+                if len({r['noise'] for r in sub}) < 2:
+                    print(f"  . {model} [{kind}] {g or 'sin-grid'}: solo "
+                          f"1 peldano de ruido, no hay comparacion (omitida)")
+                    continue
+                gsuf = f"{suffix}_{g}" if (split and g) else suffix
+                label = f"{model} ({g})" if (split and g) else model
+                pth = _one_noise_figure(model, sub, levels, outdir, gsuf,
                                         pull=(kind == 'samplers'),
-                                        np=np, plt=plt)
+                                        np=np, plt=plt, title_label=label)
                 if pth:
                     made.append(pth)
-                    print(f"  . {model} [{kind}]: {pth}")
+                    print(f"  . {model} [{kind}]"
+                          f"{' ' + g if split and g else ''}: {pth}")
     return made
 
 
-def _one_noise_figure(model, rows, levels, outdir, suffix, pull, np, plt):
+def _one_noise_figure(model, rows, levels, outdir, suffix, pull, np, plt,
+                      title_label=None):
     """Dibuja UNA figura de comparacion de ruido.
 
     Args:
@@ -1218,7 +1361,8 @@ def _one_noise_figure(model, rows, levels, outdir, suffix, pull, np, plt):
                  "genetic: absolute MAP — a GA's spread is convergence, not a "
                  "credible interval, so sigma units would be meaningless")
         fig.suptitle(
-            f"{model} — every quantumness rung, with and without noise\n"
+            f"{title_label or model} — every quantumness rung, with and "
+            f"without noise\n"
             f"{sub_t}   ·   right: fit quality",
             fontsize=13, fontweight='bold')
         fig.tight_layout(rect=(0, 0.06, 1, 0.90))
@@ -1401,7 +1545,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Models to sweep (default: all)')
 
     # --- node resources ---
-    p.add_argument('--total-cores', type=int, default=os.cpu_count() or 1,
+    p.add_argument('--total-cores', type=int, default=detected_cores(),
                    help='Node cores (default: those detected on the node)')
     p.add_argument('--max-parallel', type=int, default=None,
                    help='Max concurrent processes (default: cores//threads)')
@@ -1538,7 +1682,8 @@ def main() -> int:
     if args.mem_budget_gb:
         mem_budget_mb = args.mem_budget_gb * 1024
     elif _PSUTIL:
-        mem_budget_mb = psutil.virtual_memory().total / 1e6 * 0.85
+        # [B-CGROUP] Limite del contenedor si lo hay; si no, la RAM del nodo.
+        mem_budget_mb = detected_memory_mb() * 0.85
     else:
         mem_budget_mb = 125 * 1024 * 0.85
 
