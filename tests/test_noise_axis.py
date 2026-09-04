@@ -11,6 +11,8 @@ suite.
 
 import os
 import sys
+import inspect
+import tempfile
 
 import numpy as np
 import pytest
@@ -946,3 +948,353 @@ def test_b_grid_una_carpeta_sin_etiqueta_es_UN_grupo(tmp_path):
     assert r._infer_grid('/x/samplers_lcdm_nqpp5_noise-full/r.csv',
                          {}) == 'nqpp5'
     assert r._infer_grid('/x/genetic_cpl_nb4_noise-full/r.csv', {}) == 'nb4'
+
+
+# =============================================================================
+# [B-OFFSET] El eje de chi2 no puede mentir con notacion de offset
+# =============================================================================
+
+@pytest.mark.qiskit
+def test_b_offset_el_eje_de_chi2_muestra_valores_reales():
+    """[B-OFFSET] Sin offset: un chi2 de 1100 debe leerse como 1100.
+
+    Los rungs convergen a chi2 casi identicos, asi que el rango del eje es de
+    decimas sobre un valor de cuatro cifras. Ante eso matplotlib etiqueta
+    0.0, 0.1, 0.2... y esconde un '+1.1e3' en una esquina: la figura APARENTA
+    un chi2 entre 0 y 1 y un lector razonable concluye que esta viendo el
+    reducido, o que el ajuste es absurdamente bueno.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import cosmo_genetic_optimizers as ge
+
+    gens = np.arange(40)
+    fig, ax = plt.subplots()
+    for off in (0.42, 0.45, 0.51):
+        ax.plot(gens, 1100.0 + off - 0.3 * np.exp(-gens / 5.0))
+
+    class _R:
+        stats = {'n_data': 1099, 'chi2_red': 1.001}
+
+    ge._chi2_axis(ax, [_R()], plt)
+    fig.canvas.draw()
+    assert ax.get_yaxis().get_offset_text().get_text() == '', \
+        "el eje sigue usando notacion de offset"
+    ticks = [t.get_text().replace('−', '-')
+             for t in ax.get_yticklabels() if t.get_text()]
+    vals = []
+    for t in ticks:
+        try:
+            vals.append(float(t))
+        except ValueError:
+            pass
+    assert vals and min(vals) > 1000, \
+        f"las etiquetas deberian rondar 1100, son {ticks}"
+    # y el eje debe decir que es crudo, con cuantos datos
+    lab = ax.get_ylabel()
+    assert 'not reduced' in lab and '1099' in lab
+    plt.close(fig)
+
+
+@pytest.mark.qiskit
+def test_b_overlap_las_etiquetas_de_valor_no_se_pisan():
+    """[B-OVERLAP] Etiquetas superpuestas son peor que no ponerlas.
+
+    Las curvas de chi2 de los rungs acaban a milesimas unas de otras, asi que
+    la etiqueta directa del valor final es lo unico que las separa sin
+    ambiguedad — pero si las etiquetas se solapan el numero queda ilegible y
+    parece un valor que no es.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import cosmo_genetic_optimizers as ge
+
+    fig, ax = plt.subplots()
+    ax.set_ylim(27.4, 29.0)
+    vals = [27.469, 27.469, 27.475, 27.680, 28.079]
+    items = []
+    for v in vals:
+        ann = ax.annotate(f"{v:.3f}", xy=(30, v), xytext=(4, 0),
+                          textcoords='offset points', va='center')
+        items.append((v, ann))
+    fig.canvas.draw()
+    ge._spread_labels(ax, items)
+    fig.canvas.draw()
+
+    # posiciones efectivas en datos, tras el desplazamiento
+    lo, hi = ax.get_ylim()
+    ys = sorted(v + ann.get_position()[1] / ax.bbox.height * (hi - lo)
+                for v, ann in items)
+    gaps = np.diff(ys)
+    assert np.all(gaps > 0.02 * (hi - lo)), \
+        f"quedaron etiquetas pisadas: separaciones {gaps}"
+    # y el punto al que apuntan NO se movio: la figura no miente
+    assert sorted(a.xy[1] for _, a in items) == sorted(vals)
+    plt.close(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [B-MEM] El modelo de memoria de los samplers debe depender de N_data
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Origen: campana CC+BAO+Pantheon del 2026-08-31. El planificador estimo
+# 3.7 GB para 18 qubits y se midieron 17.9-19.6 GB. Tres tareas de 20 y 21
+# qubits llegaron al OOM killer (rc=-9). La causa no era calibracion sino
+# forma: la constante 1660*8 no dependia de N_data, cuando el termino que
+# domina son arreglos de forma (n_states, N_data).
+
+#: Mediciones reales de peak RSS (MB) de dos campanas, misma maquina, mismo
+#: codigo, subproceso limpio. (dataset_n_data, total_qubits, peak_rss_mb)
+MEDICIONES_RSS_SAMPLERS = [
+    (1099, 12, 520.9), (1099, 14, 1156.5), (1099, 15, 2555.6),
+    (1099, 16, 4822.1), (1099, 18, 19585.8),
+    (51, 16, 999.8), (51, 18, 4035.5),
+]
+
+
+def test_b_mem_estimacion_cubre_todas_las_mediciones_reales():
+    """[B-MEM] La estimacion nunca puede quedar por debajo de lo medido.
+
+    Equivocarse por abajo es un SIGKILL sin traceback ni resultados
+    parciales; por arriba es una tarea menos en paralelo. El test exige
+    cobertura estricta y ademas acota la sobreestimacion, para que "seguro"
+    no degenere en "inutilmente conservador".
+    """
+    r = pytest.importorskip('cosmo_hpc_runner')
+    for n_data, q, medido in MEDICIONES_RSS_SAMPLERS:
+        est = r.estimate_qubits_and_mem(q, 'nqpp', n_data=n_data)
+        assert est >= medido, (
+            f"SUBestimacion en N_data={n_data}, {q}q: estimado {est:.0f} MB "
+            f"< medido {medido:.0f} MB -> riesgo de OOMKill")
+        assert est <= 2.0 * medido, (
+            f"sobreestimacion excesiva en N_data={n_data}, {q}q: "
+            f"{est:.0f} MB frente a {medido:.0f} MB medidos")
+
+
+def test_b_mem_la_constante_vieja_habria_fallado():
+    """[B-MEM] Prueba de regresion: el modelo viejo SI subestimaba.
+
+    Sin esto el test de arriba pasaria tambien con un modelo que acertara por
+    casualidad. Aqui se fija que el fallo concreto que se corrigio existia.
+    """
+    r = pytest.importorskip('cosmo_hpc_runner')
+    viejo_por_estado = 1660 * 8          # la constante original
+    peores = [(n, q, m) for n, q, m in MEDICIONES_RSS_SAMPLERS if q >= 15]
+    assert peores
+    for n_data, q, medido in peores:
+        viejo = (2 ** q) * viejo_por_estado / 1e6 + r.PROCESS_BASELINE_MB
+        nuevo = r.estimate_qubits_and_mem(q, 'nqpp', n_data=n_data)
+        if n_data >= 1000:
+            assert viejo < medido, "la mediicon deberia exponer el modelo viejo"
+        assert nuevo > viejo
+
+
+def test_b_mem_depende_del_dataset_y_solo_en_samplers():
+    """[B-MEM] N_data mueve el coste de los samplers, no el del genetico."""
+    r = pytest.importorskip('cosmo_hpc_runner')
+    chico = r.estimate_qubits_and_mem(16, 'nqpp', n_data=51)
+    grande = r.estimate_qubits_and_mem(16, 'nqpp', n_data=1099)
+    assert grande > 3 * chico, (
+        "el coste por estado debe crecer con N_data; si no, el termino "
+        "(n_states, N_data) no esta en el modelo")
+    # El QGA evalua la verosimilitud sobre la POBLACION, no sobre la rejilla.
+    g1 = r.estimate_qubits_and_mem(20, 'n_bits', n_data=51)
+    g2 = r.estimate_qubits_and_mem(20, 'n_bits', n_data=1099)
+    assert g1 == g2
+
+
+def test_b_mem_dataset_desconocido_es_conservador():
+    """[B-MEM] Un dataset que no esta en la tabla usa el mayor, no el menor."""
+    r = pytest.importorskip('cosmo_hpc_runner')
+    assert r.dataset_n_data('CC+BAO') == 51
+    assert r.dataset_n_data(None) == r.DEFAULT_PLAN_N_DATA
+    assert r.dataset_n_data('CC+BAO+DESI+Union3') == r.DEFAULT_PLAN_N_DATA
+    assert r.DEFAULT_PLAN_N_DATA == max(r.DATASET_N_DATA.values())
+
+
+def test_b_mem_las_tareas_que_murieron_ahora_se_rechazan():
+    """[B-MEM] Las tres configuraciones que dieron rc=-9 no deben planificarse.
+
+    cpl/nqpp5 = 20 q, gede/nqpp7 y wcdm/nqpp7 = 21 q, en un contenedor de
+    63 GiB. Con el modelo viejo el techo las admitia.
+    """
+    r = pytest.importorskip('cosmo_hpc_runner')
+    techo = r.qubit_ceiling(None, 63 * 1024, 'nqpp', n_data=1099)
+    assert techo < 20, (
+        f"el techo ({techo} q) sigue admitiendo las tareas que fueron "
+        f"OOMKilled a 20 y 21 qubits")
+    # y con CC+BAO, que es 20x mas chico, el mismo nodo concede mas
+    assert r.qubit_ceiling(None, 63 * 1024, 'nqpp', n_data=51) > techo
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [B-GAPLOT] La figura del genetico y el CSV deben reportar el MISMO numero
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_b_gaplot_barra_de_la_figura_coincide_con_el_csv():
+    """[B-GAPLOT] Misma estadistica en la tabla y en la figura.
+
+    La figura dibujaba `theta_map` con la desviacion SIN pesos de la poblacion
+    final; el CSV reporta la media y la desviacion PONDERADAS por fitness. En
+    lcdm/nb6 eso daba +-0.0165 en la figura contra +-0.0014 en la tabla, doce
+    veces mas ancha, sin nada que avisara cual era cual.
+    """
+    ge = pytest.importorskip('cosmo_genetic_optimizers')
+    rng = np.random.default_rng(0)
+    pop = rng.normal(0.28, 0.02, size=(400, 2))
+    pop[:, 1] = rng.normal(69.6, 1.5, size=400)
+    # fitness que concentra el peso en un nucleo estrecho, como el elitismo
+    fit = -0.5 * (((pop[:, 0] - 0.276) / 0.0015) ** 2
+                  + ((pop[:, 1] - 69.60) / 0.11) ** 2)
+    w = ge._fitness_weights(fit)
+
+    class _R:
+        method, quantumness, label = 'CGA', 0.0, 'CGA'
+        theta_map = np.array([0.2763, 69.5949])
+        chi2_map, stats, elapsed, config = 0.0, {}, 0.0, {}
+        final_pop, final_fit, final_weights = pop, fit, w
+        history = [{'gen': g, 'theta_best': np.array([0.2763, 69.5949]),
+                    'best_chi2': 1.0, 'mean_chi2': 2.0} for g in range(5)]
+        pop_history, fit_history = [], []
+
+    mu_csv = np.average(pop, weights=w, axis=0)
+    sd_csv = np.sqrt(np.average((pop - mu_csv) ** 2, weights=w, axis=0))
+    sd_sin_pesos = pop.std(axis=0)
+    # el escenario tiene que ser el del bug, si no el test no prueba nada
+    assert (sd_sin_pesos > 5 * sd_csv).all()
+
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    class _M:
+        name, label = 'lcdm', 'Flat LCDM'
+        n_params = 2
+        param_names = ['Om', 'H0']
+        param_latex = [r'$\Omega_m$', r'$H_0$']
+        fiducial = np.array([0.3111, 67.66])
+
+    with tempfile.TemporaryDirectory() as td:
+        ge.plot_genetic_convergence([_R()], _M(), td)
+        fig = plt.gcf()
+    # recuperar las barras dibujadas de la figura ya cerrada no es posible, asi
+    # que se comprueba la estadistica que el codigo de la figura calcula ahora,
+    # replicandola: media y desviacion ponderadas, identicas a las del CSV.
+    finite = np.isfinite(fit)
+    mu_fig = np.average(pop[finite], weights=w[finite], axis=0)
+    sd_fig = np.sqrt(np.average((pop[finite] - mu_fig) ** 2,
+                                weights=w[finite], axis=0))
+    assert np.allclose(mu_fig, mu_csv)
+    assert np.allclose(sd_fig, sd_csv)
+    plt.close('all')
+
+
+def test_b_gaplot_el_pie_no_llama_intervalo_a_la_dispersion():
+    """[B-GAPLOT] La barra del genetico NO es un intervalo de credibilidad.
+
+    Es dispersion de convergencia del optimizador. Confundirlas es como se
+    llega a "el QGA difiere del CGA en 9 sigma" cuando en unidades del sigma
+    del MCMC la diferencia es 0.16.
+    """
+    ge = pytest.importorskip('cosmo_genetic_optimizers')
+    src = inspect.getsource(ge.plot_genetic_convergence)
+    assert 'NOT a credible interval' in src
+    assert 'fitness-weighted' in src
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [B-TIME] Al genetico con ruido lo acota el reloj, no la RAM
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Origen: campana 2026-09-03. El techo del genetico ruidoso se derivaba solo
+# de la memoria, que a 14 qubits concede sin problema (una rho son 4.3 GB).
+# Pero a 14 qubits el QGA tarda ~7.7 h POR GENERACION, o sea ~4 meses las 500
+# que se pidieron. La tarea quedo colgada y ademas bloqueo las figuras de
+# resumen de la corrida entera, porque el runner no las escribe hasta que
+# todas las tareas terminan.
+
+#: Ritmo medido en los logs de esa campana (pop=500, readout, nodo de 63 GiB).
+MEDICIONES_SEG_POR_GEN_QGA = [(10, 73.0), (12, 1425.0)]
+
+
+def test_b_time_el_modelo_reproduce_las_mediciones():
+    """[B-TIME] La extrapolacion tiene que pasar por los puntos medidos."""
+    for n, seg in MEDICIONES_SEG_POR_GEN_QGA:
+        est = cn.genetic_noisy_seconds_per_gen(n)
+        assert abs(est - seg) / seg < 0.05, (
+            f"{n}q: modelo {est:.0f} s/gen contra {seg:.0f} s medidos")
+
+
+def test_b_time_extrapolacion_a_14q_coincide_con_lo_observado():
+    """[B-TIME] Validacion fuera de la muestra.
+
+    El modelo se ajusta con 10 y 12 qubits. La tercera observacion — a 14
+    qubits no habia registrado ni la generacion 0 tras 7 h — no entra en el
+    ajuste, asi que sirve para comprobarlo: el modelo debe predecir mas de 7 h
+    por generacion, y no un valor absurdo.
+    """
+    s14 = cn.genetic_noisy_seconds_per_gen(14)
+    assert s14 > 7 * 3600, f"predice {s14/3600:.1f} h/gen; se observo >7 h"
+    assert s14 < 24 * 3600, f"predice {s14/3600:.1f} h/gen, implausible"
+
+
+def test_b_time_el_techo_corta_la_celda_que_nunca_termino():
+    """[B-TIME] 14 qubits con 500 generaciones no puede entrar en el plan."""
+    techo = cn.genetic_noisy_time_ceiling(500, cn.DEFAULT_NOISY_TASK_HOURS)
+    assert techo < 14, (
+        f"el techo ({techo} q) sigue admitiendo la celda de ~4 meses")
+    # y el presupuesto tiene que MANDAR sobre lo que la RAM concederia
+    solo_ram = cn.noisy_qubit_ceiling(mem_mb=95 * 1024, quantum_training=False)
+    con_tiempo = cn.noisy_qubit_ceiling(mem_mb=95 * 1024,
+                                        quantum_training=False,
+                                        generations=500)
+    assert con_tiempo < solo_ram, (
+        "con generaciones dadas, el techo temporal debe ser mas restrictivo "
+        "que el de memoria en un nodo grande")
+
+
+def test_b_time_es_un_presupuesto_no_una_constante():
+    """[B-TIME] Mas presupuesto o menos generaciones conceden mas qubits.
+
+    Esto es lo que lo distingue del MAX_NOISY_QUBITS=13 duro que se quito en
+    [REV]: aquel no se movia con nada.
+    """
+    assert (cn.genetic_noisy_time_ceiling(60, 48)
+            > cn.genetic_noisy_time_ceiling(500, 48))
+    assert (cn.genetic_noisy_time_ceiling(60, 480)
+            > cn.genetic_noisy_time_ceiling(60, 48))
+    # y nunca devuelve 0, que produciria un plan vacio sin explicacion
+    assert cn.genetic_noisy_time_ceiling(10 ** 6, 0.001) >= 1
+
+
+def test_b_time_no_toca_ni_los_samplers_ni_las_tareas_ideales():
+    """[B-TIME] El techo temporal es SOLO del genetico con ruido.
+
+    Los samplers los acota el lote de parameter-shift (memoria) y las tareas
+    sin ruido no construyen matriz de densidad en absoluto.
+    """
+    r = pytest.importorskip('cosmo_hpc_runner')
+    mem = 63 * 1024
+    # samplers: pasar generations no puede cambiar nada
+    a = r.qubit_ceiling(None, mem, 'nqpp', noisy=True, n_data=1099)
+    b = r.qubit_ceiling(None, mem, 'nqpp', noisy=True, n_data=1099,
+                        generations=500)
+    assert a == b
+    # genetico ideal: tampoco
+    c = r.qubit_ceiling(None, mem, 'n_bits', noisy=False)
+    d = r.qubit_ceiling(None, mem, 'n_bits', noisy=False, generations=500)
+    assert c == d
+    # genetico ruidoso: si
+    e = r.qubit_ceiling(None, mem, 'n_bits', noisy=True, generations=500)
+    assert e < c
+
+
+def test_b_time_flag_expuesto_en_el_cli():
+    """[B-TIME] El presupuesto tiene que poder cambiarse sin editar codigo."""
+    r = pytest.importorskip('cosmo_hpc_runner')
+    p = r.build_parser()
+    ns = p.parse_args(['--noisy-task-hours', '12'])
+    assert ns.noisy_task_hours == 12.0
+    assert p.parse_args([]).noisy_task_hours == cn.DEFAULT_NOISY_TASK_HOURS

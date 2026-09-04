@@ -116,15 +116,99 @@ ALL_MODELS = list(MODEL_DIM)
 # going to be used).
 #
 # SAMPLERS (cosmo_modular_quantum.py — QVMC/VI):
-#   The grid is 2^(nqpp*d) states AND the likelihood builds auxiliary arrays
-#   of shape (n_states, N_data) over it. Uses EXACTLY the same constant as
-#   the validation in cosmo_modular_quantum.py (_validate_args:
-#   2**total_q * 1660 * 8), to avoid having two different magic numbers. The
-#   1660 floats/state are those auxiliary arrays; x8 bytes (float64).
-#   (This also covers the QVMC training batch, which materializes 2*n_phi
-#   statevectors at 16 B/state — smaller than the auxiliary arrays at every
-#   nqpp the cap allows, so this constant stays the binding one.)
-BYTES_PER_STATE_SAMPLERS = 1660 * 8
+#   La rejilla son 2^(nqpp*d) estados Y la verosimilitud construye arreglos
+#   auxiliares de forma (n_states, N_data) sobre ella.
+#
+#   [B-MEM] La primera version usaba UNA constante, 1660*8 = 13.3 kB/estado,
+#   heredada de la validacion de cosmo_modular_quantum.py (_validate_args).
+#   Es un numero de diseno que NUNCA se calibro contra una medicion, y el
+#   error es estructural, no de calibracion: el comentario original decia que
+#   los 1660 floats/estado ERAN los arreglos de forma (n_states, N_data), pero
+#   1660 es una constante — no depende de N_data. O sea, el modelo capturaba
+#   solo la parte independiente del dataset y tiraba el termino dominante.
+#
+#   Consecuencia real, medida en la campana CC+BAO+Pantheon de 2026-08-31: el
+#   planificador estimo 3.7 GB para 18 qubits, se midieron 17.9–19.6 GB (5.3x),
+#   y tres tareas (cpl/nqpp5 a 20q, gede/nqpp7 y wcdm/nqpp7 a 21q) llegaron al
+#   OOM killer — rc=-9, SIGKILL, sin traceback ni resultados parciales.
+#
+#   Recalibrado contra 26 mediciones de peak RSS de dos campanas con datasets
+#   de tamano muy distinto (misma maquina, mismo codigo, subproceso limpio):
+#
+#       total_q    N_data=51 (CC+BAO)     N_data=1099 (CC+BAO+Pantheon)
+#          12          --                      521 MB
+#          14          --                     1157 MB
+#          15          --                     2556 MB
+#          16         1000 MB                 4822 MB
+#          18         4036 MB                19586 MB
+#          20          --                    >59580 MB  (OOMKill)
+#          21          --                    >56366 MB  (OOMKill)
+#
+#   Restando la linea base del proceso y dividiendo entre 2^q, el coste por
+#   estado converge por abajo a 14.4 kB con N_data=51 y a 73.7 kB con
+#   N_data=1099. Los dos puntos fijan una recta en N_data, que es justo la
+#   forma que predice el arreglo (n_states, N_data):
+#
+#       bytes/estado = 11500 + 57 * N_data
+#
+#   Los 57 B/dato son ~7 float64 por punto de datos y por estado (residuo,
+#   modelo, chi2 parcial y sus copias temporales); los 11.5 kB fijos son la
+#   rejilla y sus auxiliares independientes del dataset — y son, casualmente,
+#   lo unico que capturaba la constante vieja.
+#
+#   (Cubre tambien el lote de entrenamiento del QVMC, que materializa
+#   2*n_phi statevectors a 16 B/estado: menor que los auxiliares en todo nqpp
+#   que el tope permite, asi que este modelo sigue siendo el limitante.)
+BYTES_PER_STATE_SAMPLERS_FIXED = 11_500
+BYTES_PER_STATE_SAMPLERS_PER_DATUM = 57
+
+#: Margen sobre el ajuste. El ajuste reproduce las mediciones por arriba en
+#: todo el rango util (12–18 q, ambos datasets), pero un pico de RSS es una
+#: marca de agua muestreada: el maximo real puede ser mas alto que el visto.
+#: Equivocarse por abajo aqui es un SIGKILL sin resultados; por arriba, una
+#: tarea menos en paralelo.
+SAMPLERS_MEM_SAFETY = 1.15
+
+#: N_data aproximado por dataset, SOLO para planificar. El planificador no
+#: puede cargar los datos de verdad sin arrastrar numpy/astropy al proceso
+#: padre — ese fue el bug [B-PLAN] — asi que se queda con esta tabla.
+DATASET_N_DATA: Dict[str, int] = {
+    'CC+BAO': 51,
+    'CC+BAO+Pantheon': 1099,
+    'CC+BAO+Pantheon+': 1752,
+}
+#: Fallback para un dataset desconocido: el mayor de la tabla. Sobreestimar es
+#: la direccion segura.
+DEFAULT_PLAN_N_DATA = max(DATASET_N_DATA.values())
+
+
+def bytes_per_state_samplers(n_data: Optional[int] = None) -> float:
+    """Coste de memoria por estado de rejilla para una tarea de samplers.
+
+    Args:
+        n_data: numero de puntos de datos del dataset activo. `None` usa
+            `DEFAULT_PLAN_N_DATA` (el dataset mas grande de la tabla), que es
+            la direccion conservadora.
+
+    Returns:
+        Bytes por estado, margen de seguridad incluido.
+    """
+    n = DEFAULT_PLAN_N_DATA if n_data is None else int(n_data)
+    return ((BYTES_PER_STATE_SAMPLERS_FIXED
+             + BYTES_PER_STATE_SAMPLERS_PER_DATUM * n) * SAMPLERS_MEM_SAFETY)
+
+
+def dataset_n_data(dataset: Optional[str]) -> int:
+    """N_data del dataset para planificar, con fallback conservador."""
+    if not dataset:
+        return DEFAULT_PLAN_N_DATA
+    return DATASET_N_DATA.get(dataset, DEFAULT_PLAN_N_DATA)
+
+
+#: Alias retrocompatible: el valor que da el modelo para el dataset mas
+#: grande. Cualquier script externo que importara el nombre viejo sigue
+#: recibiendo un numero de la misma clase, ahora calibrado.
+BYTES_PER_STATE_SAMPLERS = bytes_per_state_samplers()
 #
 # GENETIC (cosmo_genetic_optimizers.py — QGA):
 #   The QGA never evaluates the likelihood over the grid: fitness is computed
@@ -151,11 +235,24 @@ BYTES_PER_STATE_GENETIC = 16
 #     genetic/cpl,  24q: 510 MB peak - 268 MB statevector -> ~242 MB baseline
 PROCESS_BASELINE_MB = 250.0
 
-# Kind -> per-state cost, so callers can stay declarative.
+# Kind -> per-state cost, so callers can stay declarative. El de samplers
+# depende de N_data, asi que se resuelve con la funcion de abajo y no con el
+# diccionario (que queda para el caso 'n_bits' y para compatibilidad).
 BYTES_PER_STATE_BY_KIND = {
-    'nqpp': BYTES_PER_STATE_SAMPLERS,     # samplers tasks
+    'nqpp': BYTES_PER_STATE_SAMPLERS,     # samplers tasks (dataset por defecto)
     'n_bits': BYTES_PER_STATE_GENETIC,    # genetic tasks
 }
+
+
+def bytes_per_state(kind: str = 'nqpp', n_data: Optional[int] = None) -> float:
+    """Coste por estado del pipeline `kind`.
+
+    El genetico no toca la verosimilitud sobre la rejilla, asi que su coste no
+    depende del dataset; el de samplers si — ver [B-MEM] arriba.
+    """
+    if kind == 'n_bits':
+        return float(BYTES_PER_STATE_GENETIC)
+    return bytes_per_state_samplers(n_data)
 #
 # NOISY (tercer modelo de memoria — segundo eje de ablacion):
 #   Simular con ruido exige matriz de densidad: 2^(2n) amplitudes complejas en
@@ -308,14 +405,17 @@ class Task:
 # =============================================================================
 
 def estimate_qubits_and_mem(total_q: int, kind: str = 'nqpp',
-                            noisy: bool = False) -> float:
+                            noisy: bool = False,
+                            n_data: Optional[int] = None) -> float:
     """Estimated peak RAM (MB) of a task whose circuit/grid has 2^total_q
     states, plus the fixed per-process interpreter cost.
 
     `kind` selects the per-state cost: 'nqpp' (samplers — grid + likelihood
-    auxiliaries) or 'n_bits' (genetic — one plain statevector). See the
-    BYTES_PER_STATE_* comments: using the samplers constant for the QGA
-    over-estimated it by ~830x.
+    auxiliaries, que dependen de N_data) o 'n_bits' (genetico — un statevector
+    liso, independiente del dataset). Ver los comentarios BYTES_PER_STATE_*:
+    usar la constante de samplers para el QGA lo sobreestimaba ~830x, y usar
+    una constante independiente de N_data para los samplers lo SUBestimaba
+    5.3x, que es lo que mando tres tareas al OOM killer ([B-MEM]).
 
     Args:
         total_q: total circuit/grid qubits (nqpp*d or n_bits*d).
@@ -323,8 +423,10 @@ def estimate_qubits_and_mem(total_q: int, kind: str = 'nqpp',
         noisy: si True, ANADE la matriz de densidad (16 * 4^total_q). Es un
             tercer modelo aditivo, no un sustituto: la tarea de samplers sigue
             necesitando su grid ademas de rho.
+        n_data: puntos de datos del dataset activo; `None` usa el mayor de
+            `DATASET_N_DATA` (conservador). Se ignora con kind='n_bits'.
     """
-    per_state = BYTES_PER_STATE_BY_KIND.get(kind, BYTES_PER_STATE_SAMPLERS)
+    per_state = bytes_per_state(kind, n_data)
     mb = (2 ** total_q) * per_state / 1e6 + PROCESS_BASELINE_MB
     if noisy:
         # [REV] Con entrenamiento cuantico el coste no es rho suelta sino el
@@ -337,13 +439,18 @@ def estimate_qubits_and_mem(total_q: int, kind: str = 'nqpp',
     return mb
 
 
-def qubits_fitting_in(mem_mb: float, kind: str = 'nqpp') -> int:
+def qubits_fitting_in(mem_mb: float, kind: str = 'nqpp',
+                      n_data: Optional[int] = None) -> int:
     """Largest number of qubits whose 2^q states fit in mem_mb, for the given
-    pipeline `kind` (the per-process baseline is reserved first)."""
+    pipeline `kind` (the per-process baseline is reserved first).
+
+    `n_data` solo importa para 'nqpp': el coste por estado de los samplers
+    crece con el tamano del dataset ([B-MEM]).
+    """
     usable = mem_mb - PROCESS_BASELINE_MB
     if usable <= 0:
         return 0
-    per_state = BYTES_PER_STATE_BY_KIND.get(kind, BYTES_PER_STATE_SAMPLERS)
+    per_state = bytes_per_state(kind, n_data)
     cap_states = usable * 1e6 / per_state
     q = 0
     while 2 ** (q + 1) <= cap_states:
@@ -352,7 +459,11 @@ def qubits_fitting_in(mem_mb: float, kind: str = 'nqpp') -> int:
 
 
 def qubit_ceiling(max_qubits: Optional[int], mem_ceiling_mb: float,
-                  kind: str = 'nqpp', noisy: bool = False) -> int:
+                  kind: str = 'nqpp', noisy: bool = False,
+                  n_data: Optional[int] = None,
+                  generations: Optional[int] = None,
+                  budget_hours: float = cnoise.DEFAULT_NOISY_TASK_HOURS
+                  ) -> int:
     """EFFECTIVE per-task qubit ceiling for the given pipeline `kind`.
 
     [AUTO] `max_qubits=None` (the default — see build_parser) means "no user
@@ -381,14 +492,20 @@ def qubit_ceiling(max_qubits: Optional[int], mem_ceiling_mb: float,
         mem_ceiling_mb: RAM disponible por tarea.
         kind: 'nqpp' | 'n_bits'.
         noisy: aplica el techo del eje de ruido.
+        n_data: puntos de datos del dataset activo (solo afecta a 'nqpp').
+        generations: generaciones previstas, para el techo por TIEMPO del
+            genetico ruidoso ([B-TIME] en cosmo_noise). Solo aplica con
+            kind='n_bits' y noisy=True.
+        budget_hours: presupuesto de reloj por tarea para ese techo.
     """
-    ram_ceiling = qubits_fitting_in(mem_ceiling_mb, kind)
+    ram_ceiling = qubits_fitting_in(mem_ceiling_mb, kind, n_data)
     ceiling = (ram_ceiling if max_qubits is None
                else min(max_qubits, ram_ceiling))
     if noisy:
         ceiling = min(ceiling, cnoise.noisy_qubit_ceiling(
             requested=None, mem_mb=mem_ceiling_mb,
-            quantum_training=(kind == 'nqpp')))
+            quantum_training=(kind == 'nqpp'),
+            generations=generations, budget_hours=budget_hours))
     return ceiling
 
 
@@ -571,8 +688,10 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
                     tasks.append(Task(
                         name=name, script='cosmo_modular_quantum.py',
                         argv=argv, model=m, total_qubits=total_q,
-                        est_mem_mb=estimate_qubits_and_mem(total_q, 'nqpp',
-                                                           noisy=noisy),
+                        est_mem_mb=estimate_qubits_and_mem(
+                            total_q, 'nqpp', noisy=noisy,
+                            n_data=dataset_n_data(getattr(args, 'dataset',
+                                                          None))),
                         outdir=outdir, grid_value=nqpp, grid_kind='nqpp',
                         noise=noise_col))
 
@@ -1616,6 +1735,16 @@ def build_parser() -> argparse.ArgumentParser:
                         'the QGA never builds the samplers grid, so it '
                         'affords many more qubits at the same RAM). Pass a '
                         'number only to be more conservative.')
+    p.add_argument('--noisy-task-hours', type=float,
+                   default=cnoise.DEFAULT_NOISY_TASK_HOURS, metavar='H',
+                   help='[B-TIME] Presupuesto de reloj por tarea GENETICA con '
+                        'ruido, en horas (por defecto %(default)s). Al QGA con '
+                        'matriz de densidad no lo frena la RAM sino el tiempo: '
+                        'crece x4.4 por qubit (medido: 73 s/gen a 10 q, '
+                        '1425 s/gen a 12 q, ~7.7 h/gen a 14 q). De este '
+                        'presupuesto y de --generations sale el techo de '
+                        'qubits del eje de ruido en el genetico. Subirlo '
+                        'admite celdas mas anchas y mas lentas.')
     p.add_argument('--max-task-gb', type=float, default=None,
                    help='Max RAM per task for the clamp (default: the aggregate '
                         'budget). Together with --max-qubits it sets the '
@@ -1697,7 +1826,12 @@ def main() -> int:
     # or, if not given, the aggregate budget as a single-task cap).
     task_mem_ceiling = (args.max_task_gb * 1024 if args.max_task_gb
                         else mem_budget_mb)
-    q_ceiling = qubit_ceiling(args.max_qubits, task_mem_ceiling, 'nqpp')
+    # [B-MEM] El techo de samplers depende del dataset: con CC+BAO (51 puntos)
+    # un estado cuesta 14 kB y con CC+BAO+Pantheon (1099) cuesta 74 kB, asi que
+    # el mismo --max-task-gb concede ~2 qubits menos en el segundo caso.
+    plan_n_data = dataset_n_data(getattr(args, 'dataset', None))
+    q_ceiling = qubit_ceiling(args.max_qubits, task_mem_ceiling, 'nqpp',
+                              n_data=plan_n_data)
     # [FIX] The genetic pipeline gets its own ceiling from its own per-state
     # cost; sharing the samplers' ceiling used to clamp n_bits for 4-parameter
     # models (CPL 6 -> 4) to save memory that was never going to be used.
@@ -1720,10 +1854,14 @@ def main() -> int:
     any_noisy = any(lvl != 'none' for lvl in noise_levels)
 
     noisy_q_ceiling = qubit_ceiling(args.max_qubits, task_mem_ceiling,
-                                    'nqpp', noisy=True)
-    noisy_q_ceiling_genetic = qubit_ceiling(args.max_qubits_genetic,
-                                            task_mem_ceiling, 'n_bits',
-                                            noisy=True)
+                                    'nqpp', noisy=True, n_data=plan_n_data)
+    # [B-TIME] El genetico ruidoso lo acota el RELOJ, no la RAM: a 14 qubits
+    # una rho son 4.3 GB (caben) pero ~7.7 h por generacion (no caben en
+    # ninguna campana). El techo sale del presupuesto por tarea y de cuantas
+    # generaciones se pidieron.
+    noisy_q_ceiling_genetic = qubit_ceiling(
+        args.max_qubits_genetic, task_mem_ceiling, 'n_bits', noisy=True,
+        generations=args.generations, budget_hours=args.noisy_task_hours)
 
     # --- build tasks (with per-model clamp) ---
     clamp_notices: List[str] = []
@@ -1761,8 +1899,9 @@ def main() -> int:
              "auto, derived from detected RAM (no --max-qubits set)")
     print(f"Grid ceiling (samplers): {q_ceiling} qubits/task  [{src_s}]\n"
           f"    ({task_mem_ceiling/1024:.0f} GB available -> "
-          f"{qubits_fitting_in(task_mem_ceiling, 'nqpp')}q fit at "
-          f"{BYTES_PER_STATE_SAMPLERS/1024:.1f} kB/state)")
+          f"{qubits_fitting_in(task_mem_ceiling, 'nqpp', plan_n_data)}q fit at "
+          f"{bytes_per_state_samplers(plan_n_data)/1024:.1f} kB/state, "
+          f"N_data={plan_n_data})")
     if not args.only_samplers:
         src_g = (f"user override --max-qubits-genetic={args.max_qubits_genetic}"
                  if args.max_qubits_genetic is not None else

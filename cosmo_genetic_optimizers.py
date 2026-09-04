@@ -109,6 +109,9 @@ USE_GPU = False
 #   ('gif','mp4') -> ambos
 ANIM_FORMATS: Sequence[str] = ('gif',)
 
+# [B-OVERLAP] Disposicion de la animacion: 'overlay' o 'facets'.
+ANIM_LAYOUT: str = 'overlay'
+
 # =============================================================================
 #  [NOISE] Segundo eje de ablacion — nivel de ruido del modulo.
 # =============================================================================
@@ -161,6 +164,10 @@ C_QUANTUM   = '#d62728'   # red    — QMCMC
 C_QUANTUM2  = '#ff7f0e'   # orange — QVMC
 C_GENETIC  = '#2ca02c'    # green  — CGA (classical genetic)
 C_GENETIC2 = '#9467bd'    # purple — QGA (quantum genetic)
+
+# [B-OVERLAP] Estilos de linea para series que se solapan. Nombrados (no
+# tuplas) porque las colecciones de contorno de matplotlib exigen nombres.
+_LS_CYCLE = ['solid', 'dashed', 'dashdot', 'dotted', (0, (3, 1, 1, 1))]
 
 
 def _cmq():
@@ -1360,17 +1367,40 @@ def plot_genetic_convergence(results, model, outdir: str,
 
     for j in range(d):
         ax = axes[0][j]
+        todos = []
         for i, r in enumerate(order):
             col, mk = styles[r.label]
             gens = [h['gen'] for h in r.history]
             vals = [h['theta_best'][j] for h in r.history]
+            todos.extend(vals)
             ax.plot(gens, vals, '-', color=col,
                     lw=max(1.4, 4.0 - 0.7 * i), label=_label(r) if j == 0 else None,
                     marker=mk, markevery=max(1, len(gens) // 8), ms=5,
                     alpha=0.95, zorder=2 + i)
+        # [B-FIDSCALE] El fiducial NO puede fijar la escala del eje. En
+        # lcdm/CC+BAO+Pantheon los rungs viven entre 0.2763 y 0.2775 y el
+        # fiducial de Planck esta en 0.3111: dejarlo dentro de los limites
+        # estiraba el eje a 0.275-0.311 y las diferencias entre rungs — que
+        # son el contenido de la figura — quedaban en un pixel. Se dibuja la
+        # linea igual, pero los limites los ponen las trayectorias; si el
+        # fiducial cae fuera, se anota en el borde en vez de deformar el eje.
+        if todos:
+            lo, hi = min(todos), max(todos)
+            pad = max((hi - lo) * 0.25, abs(hi) * 1e-4, 1e-12)
+            ax.set_ylim(lo - pad, hi + pad)
         fid = getattr(model, 'fiducial', None)
         if fid is not None and j < len(fid):
-            ax.axhline(fid[j], ls=':', color='0.45', lw=1.2, zorder=0)
+            y0, y1 = ax.get_ylim()
+            if y0 <= fid[j] <= y1:
+                ax.axhline(fid[j], ls=':', color='0.45', lw=1.2, zorder=0)
+            else:
+                arriba = fid[j] > y1
+                ax.annotate(f"fiducial = {fid[j]:.4g} "
+                            f"({'arriba' if arriba else 'abajo'} del rango)",
+                            xy=(0.99, 0.985 if arriba else 0.015),
+                            xycoords='axes fraction', ha='right',
+                            va='top' if arriba else 'bottom',
+                            fontsize=8, color='0.35')
         ax.set_xlabel('Generation', fontsize=11)
         # param_latex ya viene con sus delimitadores $...$: envolverlo otra
         # vez rompe el parser de mathtext.
@@ -1381,23 +1411,78 @@ def plot_genetic_convergence(results, model, outdir: str,
         if j == 0:
             ax.legend(fontsize=8, frameon=False)
 
-    # ── fila 2: MAP final +- dispersion de la poblacion ──────────────────
+    # ── fila 2: estimacion final, LA MISMA que reporta el CSV ───────────
+    # [B-GAPLOT] Esta fila dibujaba `theta_map` con la desviacion SIN PESOS de
+    # la poblacion final, mientras que la fila del CSV (`_ga_side`) reporta la
+    # media y la desviacion PONDERADAS POR FITNESS. Son dos cosas distintas y
+    # la diferencia no es cosmetica: en lcdm/nb6 de la campana 2026-09-03 el
+    # CSV daba Om = 0.276289 +- 0.001407 y la figura pintaba la misma fila con
+    # una barra de +-0.0165, doce veces mas ancha. Quien comparara tabla y
+    # figura veria una contradiccion y no sabria a cual creerle.
+    #
+    # Se unifica en la version ponderada, que es la que va al CSV y a la tesis:
+    # la poblacion final de un GA con elitismo tiene una cola de individuos
+    # malos que la desviacion sin pesos cuenta igual que a los buenos, asi que
+    # mide el ancho de la poblacion, no la incertidumbre de la estimacion.
+    #
+    # El MAP se conserva como marcador abierto encima, porque es el punto que
+    # define chi2/AIC/BIC y no coincide exactamente con la media ponderada.
+    #
+    # ADVERTENCIA que va en el pie de figura: esta barra es dispersion de
+    # convergencia del optimizador, NO un intervalo de credibilidad. Comparar
+    # un rung con otro en unidades de esta barra sobreestima cualquier
+    # discrepancia — para eso esta sigma del MCMC.
     ypos = np.arange(len(order))
     for j in range(d):
         ax = axes[1][j]
+        extremos: List[float] = []
         for i, r in enumerate(order):
             col, mk = styles[r.label]
             finite = np.isfinite(r.final_fit)
             pop = r.final_pop[finite]
-            spread = float(np.std(pop[:, j])) if len(pop) else 0.0
-            ax.errorbar(r.theta_map[j], ypos[i], xerr=spread, fmt=mk,
+            w = np.asarray(r.final_weights, float)[finite]
+            if len(pop) == 0:
+                mu_j, spread = float(r.theta_map[j]), 0.0
+            else:
+                if not np.isfinite(w).all() or w.sum() <= 0:
+                    w = np.ones(len(pop)) / len(pop)
+                mu_j = float(np.average(pop[:, j], weights=w))
+                spread = float(np.sqrt(
+                    np.average((pop[:, j] - mu_j) ** 2, weights=w)))
+            ax.errorbar(mu_j, ypos[i], xerr=spread, fmt=mk,
                         color=col, ms=9, capsize=4, lw=2, mec='white', mew=1.2)
+            ax.plot(r.theta_map[j], ypos[i], marker='|', ms=13, mew=1.6,
+                    color=col, alpha=0.9, zorder=5,
+                    label='MAP' if (i == 0 and j == 0) else None)
+            extremos.extend([mu_j - spread, mu_j + spread,
+                             float(r.theta_map[j])])
+        # [B-FIDSCALE] Mismo criterio que arriba: el fiducial se dibuja si cae
+        # dentro, y se anota en el borde si no. Que Planck quede fuera del
+        # rango del genetico ES un resultado (tension en Om con este dataset),
+        # pero no puede costar la legibilidad de la comparacion entre rungs.
+        if extremos:
+            lo, hi = min(extremos), max(extremos)
+            pad = max((hi - lo) * 0.30, abs(hi) * 1e-4, 1e-12)
+            ax.set_xlim(lo - pad, hi + pad)
         fid = getattr(model, 'fiducial', None)
         if fid is not None and j < len(fid):
-            ax.axvline(fid[j], ls=':', color='0.45', lw=1.2, zorder=0)
+            x0, x1 = ax.get_xlim()
+            if x0 <= fid[j] <= x1:
+                ax.axvline(fid[j], ls=':', color='0.45', lw=1.2, zorder=0)
+            else:
+                der = fid[j] > x1
+                ax.annotate(f"fiducial = {fid[j]:.4g} "
+                            f"({'>' if der else '<'} rango)",
+                            xy=(0.985 if der else 0.015, 0.02),
+                            xycoords='axes fraction',
+                            ha='right' if der else 'left', va='bottom',
+                            fontsize=8, color='0.35')
         ax.set_yticks(ypos)
         ax.set_yticklabels([_label(r) for r in order] if j == 0 else [],
                            fontsize=8)
+        if j > 0:
+            # sin etiquetas no hacen falta las marcas: dejaban un guion suelto
+            ax.tick_params(axis='y', length=0)
         ax.set_ylim(-0.6, len(order) - 0.4)
         ax.invert_yaxis()
         ax.set_xlabel(latex[j] if j < len(latex) else names[j], fontsize=12)
@@ -1406,11 +1491,13 @@ def plot_genetic_convergence(results, model, outdir: str,
             ax.spines[s].set_visible(False)
 
     axes[0][0].set_title('', loc='left')
-    fig.suptitle(f'{model.label} — genetic convergence and final estimate\n'
-                 f'top: best individual per generation   ·   '
-                 f'bottom: final MAP ± population spread   ·   '
-                 f'dotted line: fiducial',
-                 fontsize=12, fontweight='bold')
+    fig.suptitle(
+        f'{model.label} — genetic convergence and final estimate\n'
+        f'top: best individual per generation   ·   dotted line: fiducial\n'
+        f'bottom: fitness-weighted mean ± weighted spread (same numbers as '
+        f'the CSV); tick = MAP.  This bar is optimizer convergence spread, '
+        f'NOT a credible interval.',
+        fontsize=11, fontweight='bold')
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     path = os.path.join(outdir, f"genetic_convergence_{tag}.png")
     fig.savefig(path, dpi=150, bbox_inches='tight')
@@ -1448,7 +1535,8 @@ def _coincidence_label(result, others) -> str:
 def animate_genetic_evolution(results, model, outdir: str,
                               tag: Optional[str] = None,
                               fps: int = 8, max_frames: int = 120,
-                              formats: Sequence[str] = ('gif',)) -> List[str]:
+                              formats: Sequence[str] = ('gif',),
+                              layout: str = 'overlay') -> List[str]:
     """Anima la evolucion de la poblacion, con TODOS los rungs a la vez.
 
     [ANIM] Pensada para presentar. Un genetico se entiende mucho mejor viendo
@@ -1480,6 +1568,13 @@ def animate_genetic_evolution(results, model, outdir: str,
             GIF de 60 MB.
         formats: 'gif' y/o 'mp4'. El mp4 necesita ffmpeg; si falta, se avisa y
             se sigue con el resto.
+        layout: 'overlay' (todos los rungs en un panel) o 'facets' (un panel
+            por rung). [B-OVERLAP] La superposicion es honesta —los rungs
+            convergen al MISMO sitio, y verlo es el resultado— pero por eso
+            mismo las nubes se tapan y solo se distingue la ultima dibujada.
+            'overlay' lo mitiga con un marcador distinto por rung y orden de
+            dibujo por quantumness; 'facets' lo elimina dando a cada rung su
+            propio panel, a costa de perder la comparacion directa.
 
     Returns:
         Rutas generadas (vacia si no habia nada que animar).
@@ -1504,36 +1599,70 @@ def animate_genetic_evolution(results, model, outdir: str,
         frames.append(n_gen - 1)
 
     palette = [C_GENETIC, C_GENETIC2, C_QUANTUM2, C_CLASSICAL2, C_QUANTUM]
+    marks = ['o', 's', '^', 'D', 'v', 'P', 'X']
     style = {r.label: palette[i % len(palette)] for i, r in enumerate(usable)}
+    # [B-OVERLAP] Un MARCADOR distinto por rung ademas del color: cuando las
+    # nubes se solapan —y se solapan siempre, porque convergen al mismo sitio—
+    # el color por si solo no basta para saber cual es cual.
+    mark = {r.label: marks[i % len(marks)] for i, r in enumerate(usable)}
     # QGA(0%) reproduce al CGA bit a bit, asi que sus nubes se solapan y la de
     # abajo desaparece. Se anota para que no parezca una serie perdida.
     lab = {r.label: _coincidence_label(r, usable) for r in usable}
 
-    fig, (axp, axc) = plt.subplots(1, 2, figsize=(13.5, 5.6),
-                                   gridspec_kw={'width_ratios': [1.15, 1]})
+    # [B-OVERLAP] 'facets' da un panel por rung: la unica forma de garantizar
+    # que TODOS se vean cuando convergen al mismo punto. 'overlay' conserva la
+    # comparacion directa, que es lo que hace evidente que convergen juntos.
+    facets = (layout == 'facets') and len(usable) > 1
+    if facets:
+        ncol = len(usable) + 1
+        # Sin sharex/sharey: el panel de chi2 tiene escalas propias, y
+        # desengancharlo despues depende de una API privada de matplotlib que
+        # cambia entre versiones (`GrouperView.remove` no existe en 3.10+).
+        # Los paneles de fase se igualan a mano mas abajo, que es explicito y
+        # no depende de la version.
+        # El panel de chi2 lleva doble ancho: es una serie temporal con varias
+        # curvas y a 1/6 del ancho no se distingue cual es cual.
+        fig, axes = plt.subplots(
+            1, ncol, figsize=(3.7 * len(usable) + 6.2, 4.8),
+            gridspec_kw={'width_ratios': [1] * len(usable) + [1.9]})
+        panel = {r.label: axes[i] for i, r in enumerate(usable)}
+        axc = axes[-1]
+        axp = axes[0]
+    else:
+        fig, (axp, axc) = plt.subplots(1, 2, figsize=(13.5, 5.6),
+                                       gridspec_kw={'width_ratios': [1.15, 1]})
+        panel = {r.label: axp for r in usable}
 
     allpop = np.vstack([p for r in usable for p in r.pop_history])
     lo0, hi0 = np.nanpercentile(allpop[:, 0], [0.5, 99.5])
     lo1, hi1 = np.nanpercentile(allpop[:, 1], [0.5, 99.5])
     pad0, pad1 = 0.08 * (hi0 - lo0 + 1e-9), 0.08 * (hi1 - lo1 + 1e-9)
-    axp.set_xlim(lo0 - pad0, hi0 + pad0)
-    axp.set_ylim(lo1 - pad1, hi1 + pad1)
-    axp.set_xlabel(latex[0] if len(latex) > 0 else model.param_names[0],
-                   fontsize=12)
-    axp.set_ylabel(latex[1] if len(latex) > 1 else model.param_names[1],
-                   fontsize=12)
     fid = getattr(model, 'fiducial', None)
-    if fid is not None and len(fid) >= 2:
-        axp.plot(fid[0], fid[1], '+', color='0.35', ms=14, mew=2, zorder=1)
-    axp.grid(True, alpha=0.2, lw=0.6)
-    for s in ('top', 'right'):
-        axp.spines[s].set_visible(False)
-        axc.spines[s].set_visible(False)
+    seen_axes = []
+    for r in usable:
+        ax = panel[r.label]
+        if ax in seen_axes:
+            continue
+        seen_axes.append(ax)
+        ax.set_xlim(lo0 - pad0, hi0 + pad0)
+        ax.set_ylim(lo1 - pad1, hi1 + pad1)
+        ax.set_xlabel(latex[0] if len(latex) > 0 else model.param_names[0],
+                      fontsize=12)
+        if ax is seen_axes[0]:
+            ax.set_ylabel(latex[1] if len(latex) > 1 else model.param_names[1],
+                          fontsize=12)
+        if fid is not None and len(fid) >= 2:
+            ax.plot(fid[0], fid[1], '+', color='0.35', ms=14, mew=2, zorder=1)
+        ax.grid(True, alpha=0.2, lw=0.6)
+        for sp in ('top', 'right'):
+            ax.spines[sp].set_visible(False)
+    for sp in ('top', 'right'):
+        axc.spines[sp].set_visible(False)
 
     all_chi = np.concatenate([[h['best_chi2'] for h in r.history]
                               for r in usable])
     all_chi = all_chi[np.isfinite(all_chi)]
-    axc.set_xlim(0, n_gen - 1)
+    axc.set_xlim(0, (n_gen - 1) * 1.14)      # hueco para las etiquetas
     if len(all_chi):
         # Rango COMPLETO, no percentiles: recortar al 98% dejaba fuera el rung
         # peor, que es justo el que hay que poder ver empeorar.
@@ -1541,24 +1670,46 @@ def animate_genetic_evolution(results, model, outdir: str,
         pad = 0.08 * (c_hi - c_lo + 1e-9)
         axc.set_ylim(c_lo - pad, c_hi + pad)
     axc.set_xlabel('Generation', fontsize=12)
-    axc.set_ylabel(r'best $\chi^2$', fontsize=12)
+    _chi2_axis(axc, usable, plt)
     axc.grid(True, alpha=0.2, lw=0.6)
 
-    scats, bests, lines = {}, {}, {}
+    scats, bests, lines, ends = {}, {}, {}, {}
     for r in usable:
         col = style[r.label]
-        scats[r.label] = axp.scatter([], [], s=26, color=col, alpha=0.5,
-                                     edgecolors='none', label=lab[r.label],
-                                     zorder=3)
-        bests[r.label] = axp.plot([], [], '*', color=col, ms=18,
-                                  mec='white', mew=1.2, zorder=4)[0]
-        lines[r.label] = axc.plot([], [], '-', color=col, lw=2,
-                                  label=r.label)[0]
-    axp.legend(fontsize=8, frameon=False, loc='upper right')
+        scats[r.label] = panel[r.label].scatter(
+                                     [], [], s=30, color=col, alpha=0.55,
+                                     marker=mark[r.label],
+                                     linewidths=0.4, edgecolors='white',
+                                     label=lab[r.label], zorder=3)
+        bests[r.label] = panel[r.label].plot(
+            [], [], '*', color=col, ms=20, mec='black', mew=0.9, zorder=6)[0]
+        if facets:
+            panel[r.label].set_title(lab[r.label], fontsize=10,
+                                     color=col, fontweight='bold')
+        # [B-OVERLAP] Estilo de linea Y grosor decreciente por rung. Cuatro de
+        # las cinco curvas son GENUINAMENTE distintas (27.469 / 27.475 /
+        # 27.680 / 28.079 en la corrida de referencia) pero difieren en
+        # milesimas sobre un eje que abarca ~1.5, asi que a color solo se ven
+        # como una. El guionado deja ver la de abajo y el grosor da orden.
+        i = usable.index(r)
+        lines[r.label] = axc.plot(
+            [], [], color=col, lw=max(1.3, 3.4 - 0.55 * i),
+            ls=_LS_CYCLE[i % len(_LS_CYCLE)],
+            marker=mark[r.label], markevery=0.18, ms=5,
+            label=r.label)[0]
+        # Etiqueta directa con el valor: cuando dos curvas se pisan de todos
+        # modos, el numero es lo unico que las separa sin ambiguedad.
+        ends[r.label] = axc.annotate(
+            '', xy=(0, 0), fontsize=8, color=col, fontweight='bold',
+            xytext=(4, 0), textcoords='offset points',
+            va='center', ha='left', annotation_clip=False)
+    if not facets:
+        axp.legend(fontsize=8, frameon=False, loc='upper right')
     title = fig.suptitle('', fontsize=13, fontweight='bold')
 
     def draw(k):
         g = frames[k]
+        finals = []
         for r in usable:
             pop = r.pop_history[g]
             scats[r.label].set_offsets(pop[:, :2])
@@ -1567,9 +1718,15 @@ def animate_genetic_evolution(results, model, outdir: str,
             gens = [h['gen'] for h in r.history[:g + 1]]
             chi = [h['best_chi2'] for h in r.history[:g + 1]]
             lines[r.label].set_data(gens, chi)
+            if chi:
+                ends[r.label].set_text(f"{chi[-1]:.3f}")
+                ends[r.label].xy = (gens[-1], chi[-1])
+                finals.append((chi[-1], ends[r.label]))
+        _spread_labels(axc, finals)
         title.set_text(f"{model.label} — genetic evolution   ·   "
                        f"generation {g + 1}/{n_gen}")
-        return list(scats.values()) + list(bests.values()) + list(lines.values())
+        return (list(scats.values()) + list(bests.values())
+                + list(lines.values()) + list(ends.values()))
 
     anim = manim.FuncAnimation(fig, draw, frames=len(frames),
                                interval=1000 / max(fps, 1), blit=False)
@@ -1634,6 +1791,74 @@ def plot_overlay_with_samplers(result: GAResult, sampler_sets: dict,
     return f
 
 
+def _spread_labels(ax, items, min_gap_frac: float = 0.045):
+    """Separa verticalmente etiquetas que se pisan, sin mover los datos.
+
+    [B-OVERLAP] Las etiquetas directas de valor final resuelven el solapamiento
+    de las CURVAS, pero cuando dos curvas acaban casi en el mismo sitio son las
+    ETIQUETAS las que se pisan y el numero queda ilegible — que es peor que no
+    ponerlo, porque parece un valor y no lo es.
+
+    Empuja cada etiqueta lo justo para dejar un hueco minimo, en orden de
+    valor. Solo mueve el texto: el punto al que apunta no cambia, asi que la
+    figura no miente sobre donde acaba cada curva.
+
+    Args:
+        ax: eje que contiene las anotaciones.
+        items: lista de (valor_y, objeto_anotacion).
+        min_gap_frac: hueco minimo como fraccion del rango del eje.
+    """
+    if len(items) < 2:
+        return
+    lo, hi = ax.get_ylim()
+    gap = min_gap_frac * (hi - lo)
+    items = sorted(items, key=lambda t: t[0])
+    placed = []
+    for val, ann in items:
+        y = val
+        if placed and y - placed[-1] < gap:
+            y = placed[-1] + gap
+        placed.append(y)
+        x, _ = ann.xy
+        ann.set_position((4, (y - val) / (hi - lo) * ax.bbox.height))
+
+
+def _chi2_axis(ax, results, plt):
+    """Formatea un eje de chi2 para que NO mienta con notacion de offset.
+
+    [B-OFFSET] Los rungs convergen a chi2 casi identicos — con CC+BAO+Pantheon
+    (~1099 puntos) todos aterrizan cerca de 1100 — asi que el rango del eje es
+    de decimas sobre un valor de cuatro cifras. Ante eso matplotlib etiqueta el
+    eje 0.0, 0.1, 0.2... y pone un "+1.1e3" minusculo en una esquina, con lo
+    que la figura APARENTA un chi2 entre 0 y 1. Un lector razonable concluye
+    que esta viendo el chi2 reducido, o que el ajuste es absurdamente bueno.
+
+    Se desactiva el offset y se anade al eje el numero de datos y el chi2
+    reducido, que es lo que de verdad permite juzgar el ajuste de un vistazo:
+    chi2 ~ 1100 con 1099 puntos es chi2_red ~ 1.0, es decir, un buen ajuste.
+
+    Args:
+        ax: eje de matplotlib.
+        results: `GAResult` de la figura (para sacar n_data y chi2_red).
+        plt: modulo pyplot.
+    """
+    ax.ticklabel_format(axis='y', style='plain', useOffset=False)
+    ax.get_yaxis().get_major_formatter().set_useOffset(False)
+    n_data, red = None, None
+    for r in results:
+        st = getattr(r, 'stats', None) or {}
+        if st.get('n_data'):
+            n_data = int(st['n_data'])
+            red = st.get('chi2_red')
+            break
+    label = r'best $\chi^2$  (raw, not reduced)'
+    if n_data:
+        label += f'\n{n_data} data points'
+        if red is not None and np.isfinite(red):
+            label += f'   ·   best $\\chi^2_\\nu$ = {red:.3f}'
+    ax.set_ylabel(label, fontsize=11)
+
+
 def plot_fitness_curve(results: Sequence[GAResult], outdir: str,
                        model, tag: Optional[str] = None) -> str:
     """Best-χ² and mean-χ² vs generation for one or more genetic runs.
@@ -1644,17 +1869,33 @@ def plot_fitness_curve(results: Sequence[GAResult], outdir: str,
     os.makedirs(outdir, exist_ok=True)
     tag = tag or f"{model.name}_fitness"
     fig, ax = plt.subplots(figsize=(9, 5))
-    for r in results:
+    # [B-OVERLAP] Un color, un estilo y un grosor por rung, mas la etiqueta
+    # directa del valor final: las curvas convergen a valores que difieren en
+    # milesimas y a color solo se leen como una sola.
+    pal = [C_GENETIC, C_GENETIC2, C_QUANTUM2, C_CLASSICAL2, C_QUANTUM]
+    order = sorted(results, key=lambda x: x.quantumness)
+    end_labels = []
+    for i, r in enumerate(order):
         gens = [h['gen'] for h in r.history]
         best = [h['best_chi2'] for h in r.history]
         mean = [h['mean_chi2'] for h in r.history]
-        col = C_GENETIC if r.quantumness == 0 else C_GENETIC2
-        ax.plot(gens, best, '-', color=col, lw=2,
-                label=f"{r.label} — best χ²")
-        ax.plot(gens, mean, '--', color=col, lw=1.2, alpha=0.6,
-                label=f"{r.label} — mean χ²")
+        col = pal[i % len(pal)]
+        ax.plot(gens, best, color=col, lw=max(1.3, 3.4 - 0.55 * i),
+                ls=_LS_CYCLE[i % len(_LS_CYCLE)],
+                label=f"{_coincidence_label(r, order)} — best")
+        ax.plot(gens, mean, color=col, lw=1.0, alpha=0.45,
+                ls=_LS_CYCLE[i % len(_LS_CYCLE)])
+        if best:
+            ann = ax.annotate(f"{best[-1]:.3f}", xy=(gens[-1], best[-1]),
+                              xytext=(5, 0), textcoords='offset points',
+                              fontsize=8, color=col, fontweight='bold',
+                              va='center', annotation_clip=False)
+            end_labels.append((best[-1], ann))
+    ax.set_xlim(0, max(len(r.history) for r in order) * 1.12)
     ax.set_xlabel('Generation', fontsize=12)
-    ax.set_ylabel(r'$\chi^2$', fontsize=12)
+    _chi2_axis(ax, results, plt)
+    ax.figure.canvas.draw()
+    _spread_labels(ax, end_labels)
     ax.set_title(f'{model.label} — genetic fitness convergence', fontsize=12,
                  fontweight='bold')
     ax.grid(True, alpha=0.3); ax.legend(fontsize=9)
@@ -1836,7 +2077,7 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
         if f4:
             say(f"Genetic convergence + final estimate: {f4}")
         for a in animate_genetic_evolution(list(results.values()), model,
-                                           outdir, formats=ANIM_FORMATS):
+                                           outdir, formats=ANIM_FORMATS, layout=ANIM_LAYOUT):
             say(f"Animation: {a}")
 
     return results
@@ -2053,6 +2294,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "'gif' (no necesita ffmpeg y se inserta directo en "
                         "diapositivas); 'mp4' pesa menos pero exige ffmpeg; "
                         "'both' guarda los dos; 'none' no anima.")
+    p.add_argument('--anim-layout', type=str, default='overlay',
+                   choices=('overlay', 'facets'),
+                   help="'overlay' pone todos los rungs en un panel (se ve que "
+                        "convergen juntos, pero las nubes se tapan); 'facets' "
+                        "da un panel a cada uno (todos visibles, sin "
+                        "comparacion directa).")
     p.add_argument('--anim-fps', type=int, default=8,
                    help='cuadros por segundo de la animacion (por defecto 8)')
     # [NOISE] Segundo eje de ablacion. `--noise none` (por defecto) reproduce
@@ -2227,7 +2474,7 @@ def run_genetic_sweep_all(models, qga_levels, methods, dataset, prior, ga,
                 # [ANIM] Todos los rungs en la MISMA animacion: es donde se ve
                 # cual converge antes y cual se queda atascado.
                 for a in animate_genetic_evolution(
-                        all_res, post.model, model_dir, formats=ANIM_FORMATS):
+                        all_res, post.model, model_dir, formats=ANIM_FORMATS, layout=ANIM_LAYOUT):
                     say(f"  animacion: {a}")
             status[model_name] = 'ok'
             say(f"[{i}/{len(models)}] {model_name}: DONE -> {model_dir}/")
@@ -2314,12 +2561,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # [GPU] Publish the device choice module-wide so the QGA's simulator uses
     # it. --gpu requests the GPU; with no GPU present we fall back to CPU.
-    global USE_GPU, ANIM_FORMATS
+    global USE_GPU, ANIM_FORMATS, ANIM_LAYOUT
     USE_GPU = bool(getattr(args, 'gpu', False))
     do_profile = bool(getattr(args, 'profile', False))
     ANIM_FORMATS = {'gif': ('gif',), 'mp4': ('mp4',),
                     'both': ('gif', 'mp4'),
                     'none': ()}[getattr(args, 'anim', 'gif')]
+    ANIM_LAYOUT = getattr(args, 'anim_layout', 'overlay')
 
     # [NOISE] Publicar el peldano ANTES de construir ningun QGA: el simulador
     # nace en __init__ y los circuitos se transpilan una sola vez contra el.

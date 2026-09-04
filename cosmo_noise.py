@@ -632,9 +632,94 @@ def noisy_qubits_fitting_in(mem_mb: float, quantum_training: bool = True,
     return best
 
 
+# ── [B-TIME] Techo por TIEMPO del genetico con ruido ────────────────────────
+#
+# La memoria NO es el limitante del QGA con ruido: una rho suelta a 14 qubits
+# son 4.3 GB, que caben de sobra en cualquier nodo util. El limitante es el
+# tiempo, y crece como ~4^n porque cada evaluacion propaga una matriz de
+# densidad de 4^n elementos.
+#
+# Medido en la campana 2026-09-03 (pop=500, ruido readout, nodo de 63 GiB,
+# leido de los logs por marca de tiempo entre generaciones):
+#
+#     10 qubits (n_bits=5, d=2)  ->     73 s/generacion
+#     12 qubits (n_bits=6, d=2)  ->   1425 s/generacion   (23.8 min)
+#     14 qubits (n_bits=7, d=2)  ->  no habia registrado ni la generacion 0
+#                                    tras 7 h de reloj
+#
+# Los dos primeros puntos fijan un crecimiento de x4.42 por qubit, que
+# extrapolado a 14 da 27810 s/generacion (7.7 h) — consistente con la tercera
+# observacion, que asi queda de validacion y no de ajuste.
+#
+# Con ese ritmo, 500 generaciones a 14 qubits son ~4 MESES. El plan de esa
+# campana las acepto porque el techo se derivaba solo de la RAM, y la tarea
+# quedo colgada bloqueando ademas las figuras de resumen de toda la corrida
+# (el runner no las escribe hasta que la lista entera termina).
+#
+# Esto NO reintroduce la constante dura que se quito en [REV]. Aquel techo era
+# malo por dos razones distintas: estaba calibrado en una maquina de 7 GB, y se
+# aplicaba a los SAMPLERS, donde el que manda de verdad es el lote de
+# parameter-shift, o sea memoria. Aqui el limite es de tiempo — que no se
+# relaja con mas RAM — esta calibrado con medidas del nodo real, y no es una
+# constante: sale de un presupuesto de reloj por tarea que el usuario fija.
+GENETIC_NOISY_REF_QUBITS = 10
+GENETIC_NOISY_REF_SEC_PER_GEN = 73.0
+GENETIC_NOISY_GROWTH_PER_QUBIT = 4.42
+
+#: Presupuesto de reloj por tarea genetica ruidosa, en horas. Es el valor por
+#: defecto de `--noisy-task-hours`; dos dias deja pasar 12 qubits y corta 13.
+DEFAULT_NOISY_TASK_HOURS = 48.0
+
+
+def genetic_noisy_seconds_per_gen(n_qubits: int) -> float:
+    """Segundos por generacion del QGA con ruido, a `n_qubits`.
+
+    Extrapolacion de las dos mediciones de la campana 2026-09-03 (ver el
+    bloque [B-TIME] de arriba). Es un orden de magnitud, no una promesa: sirve
+    para decidir si una celda tarda horas o meses, que es la unica pregunta que
+    hay que contestar al planificar.
+
+    AVISO de alcance: las mediciones son con `--noise readout`, que es el
+    canal mas barato — se aplica analiticamente sobre diag(rho). Los niveles
+    `full` y los backends calibrados (FakeBrisbane) meten errores de puerta,
+    o sea mas operadores de Kraus por compuerta, y corren MAS LENTO que lo que
+    predice esta funcion. Con esos niveles en la barrida, baja
+    `--noisy-task-hours` para compensar, o cuenta con que el reloj real supere
+    al presupuesto.
+    """
+    d = int(n_qubits) - GENETIC_NOISY_REF_QUBITS
+    return GENETIC_NOISY_REF_SEC_PER_GEN * (GENETIC_NOISY_GROWTH_PER_QUBIT ** d)
+
+
+def genetic_noisy_time_ceiling(generations: int,
+                               budget_hours: float = DEFAULT_NOISY_TASK_HOURS
+                               ) -> int:
+    """Mayor ancho cuyo QGA con ruido cabe en `budget_hours` de reloj.
+
+    Args:
+        generations: generaciones que se van a correr.
+        budget_hours: presupuesto de reloj por tarea, en horas.
+
+    Returns:
+        Techo de qubits; al menos 1, para que un presupuesto absurdo no
+        produzca un plan vacio sin explicacion.
+    """
+    budget_s = max(float(budget_hours), 0.0) * 3600.0
+    g = max(int(generations), 1)
+    best = 1
+    for n in range(1, 31):
+        if genetic_noisy_seconds_per_gen(n) * g <= budget_s:
+            best = n
+        else:
+            break
+    return best
+
+
 def noisy_qubit_ceiling(requested: Optional[int] = None,
                         mem_mb: Optional[float] = None,
-                        quantum_training: bool = True) -> int:
+                        quantum_training: bool = True,
+                        generations: Optional[int] = None,
+                        budget_hours: float = DEFAULT_NOISY_TASK_HOURS) -> int:
     """Techo de qubits admisible para una tarea con ruido.
 
     [REV] Antes devolvia una constante dura, argumentando que el limitante era
@@ -653,6 +738,11 @@ def noisy_qubit_ceiling(requested: Optional[int] = None,
             superior; nunca concede mas de lo que cabe en memoria.
         mem_mb: memoria disponible por tarea. None usa `DEFAULT_NOISY_QUBITS`.
         quantum_training: reservar sitio para el lote de parameter-shift.
+            False es la ruta del genetico, donde ademas se aplica el techo por
+            tiempo de [B-TIME].
+        generations: generaciones previstas. Solo se usa con
+            `quantum_training=False`; sin ella no se aplica el techo temporal.
+        budget_hours: presupuesto de reloj por tarea para ese techo.
 
     Returns:
         Techo efectivo de qubits.
@@ -661,6 +751,12 @@ def noisy_qubit_ceiling(requested: Optional[int] = None,
         ceiling = DEFAULT_NOISY_QUBITS
     else:
         ceiling = noisy_qubits_fitting_in(mem_mb, quantum_training)
+    # [B-TIME] El QGA con ruido no lo frena la memoria sino el reloj: a 14
+    # qubits caben 4.3 GB de rho en cualquier nodo, pero son ~7.7 h por
+    # generacion. Sin este techo el plan acepta celdas de meses.
+    if not quantum_training and generations is not None:
+        ceiling = min(ceiling,
+                      genetic_noisy_time_ceiling(generations, budget_hours))
     if requested is not None:
         ceiling = min(int(requested), ceiling)
     return ceiling
