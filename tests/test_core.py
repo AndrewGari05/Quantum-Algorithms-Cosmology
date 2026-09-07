@@ -210,3 +210,113 @@ if __name__ == "__main__":
             print(f"ERROR {fn.__name__}: {type(e).__name__}: {e}")
     print(f"\n{len(fns) - failed}/{len(fns)} passed")
     sys.exit(1 if failed else 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Correcciones de la revision adversarial de cosmo_core.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_b_bounds_el_mejor_ajuste_vive_dentro_del_prior():
+    """[B-BOUNDS] `fit_statistics` no puede devolver un punto con posterior 0.
+
+    El refinamiento era Nelder-Mead sin cotas sobre chi2, que no ve el prior.
+    Como chi2 es finito fuera de la caja, el simplex se salia: 5 de las 15
+    combinaciones modelo x dataset devolvian un "mejor ajuste" fuera del
+    soporte, una de ellas con H0 = 6.3e-5 km/s/Mpc. El chi2 apenas cambiaba,
+    asi que el numero se veia sano.
+    """
+    import numpy as np
+    import cosmo_core as C
+    malos = []
+    for name in ('lcdm', 'wcdm', 'cpl', 'pede', 'gede'):
+        for ds in ('CC+BAO', 'Pantheon', 'CC+BAO+Pantheon'):
+            P = C.Posterior(C.MODELS[name], ds)
+            r = C.fit_statistics(P, C.MODELS[name].fiducial)
+            if not np.isfinite(P.log_prior(r['theta_best'])):
+                malos.append(f"{name}/{ds}: {r['theta_best']}")
+    assert not malos, "mejor ajuste fuera del prior en:\n  " + "\n  ".join(malos)
+
+
+def test_b_gridseed_la_ventana_es_reproducible():
+    """[B-GRIDSEED] Misma semilla, misma rejilla — o la QPU y el simulador no
+    son comparables.
+
+    El prefit tomaba del RNG global: el ancho en Om variaba un 54 % entre
+    llamadas identicas, y dependia de cuantos numeros hubiera consumido antes
+    otra parte del programa. Como cosmo_modular_quantum y qpu_cosmo_samplers
+    llaman cada uno por su cuenta, cada uno se quedaba con OTRA rejilla, y el
+    KL de ambos se comparaba sobre discretizaciones distintas.
+    """
+    import numpy as np
+    import cosmo_core as C
+    P = C.Posterior(C.MODELS['lcdm'], 'CC+BAO')
+    w0 = C.estimate_grid_window(P)
+    for _ in range(3):
+        assert C.estimate_grid_window(P) == w0
+    # y no debe depender del estado del RNG global
+    C.RNG.normal(size=13)
+    assert C.estimate_grid_window(P) == w0
+    # semillas distintas SI dan ventanas distintas (si no, no seria aleatorio)
+    assert C.estimate_grid_window(P, seed=7) != w0
+    # seed=None recupera el comportamiento viejo, no reproducible
+    vs = {tuple(map(tuple, C.estimate_grid_window(P, seed=None)))
+          for _ in range(4)}
+    assert len(vs) > 1
+
+
+def test_b_clip_un_modelo_no_fisico_se_rechaza():
+    """[B-CLIP] E^2 <= 0 debe dar -inf, no un chi2 grande pero finito.
+
+    Antes `H()` hacia clip a 1e-12 y devolvia H = 1e-6*H0, de donde salia un
+    log-posterior finito. Peor: la rama de supernovas SI rechazaba, asi que el
+    mismo theta tenia posterior finito con CC+BAO e -inf con
+    CC+BAO+Pantheon. Latente hoy (los 5 modelos tienen E^2 > 0 en su caja),
+    pero deja de serlo en cuanto se anada curvatura.
+    """
+    import numpy as np
+    import cosmo_core as C
+    m = C.CosmoModel(
+        name='toy_ok', label='toy con curvatura negativa',
+        param_names=['Om', 'H0'], param_latex=[r'$\Omega_m$', r'$H_0$'],
+        bounds=[(0.18, 0.50), (60.0, 82.0)],
+        sample_box=[(0.18, 0.50), (60.0, 82.0)],
+        fiducial=np.array([0.3, 70.0]),
+        E2=lambda z, th: th[0] * (1 + z) ** 3 - 2.0 * (1 + z) ** 2 + (1 - th[0]))
+    th = np.array([0.3, 70.0])
+    assert np.min(m.E2(np.array([0.0, 1.0, 2.0]), th)) < 0
+    for ds in ('CC+BAO', 'CC+BAO+Pantheon'):
+        P = C.Posterior(m, ds)
+        assert not np.isfinite(P.log_prob(th)), f"{ds}: no se rechazo"
+        assert not np.isfinite(P.log_prob_batch(th[None, :])[0]), \
+            f"{ds}: la ruta vectorizada no coincide con la escalar"
+
+
+def test_b_priortype_no_acepta_cualquier_cadena():
+    """[B-PRIORTYPE] Un prior mal escrito caia en plano sin avisar.
+
+    Una corrida etiquetada 'gaussian' en el CSV que en realidad uso prior
+    plano es irrecuperable despues.
+    """
+    import pytest as _pytest
+    import cosmo_core as C
+    for ok in ('flat', 'gaussian'):
+        C.Posterior(C.MODELS['lcdm'], 'CC+BAO', prior_type=ok)
+    for malo in ('Gaussian', 'planck', 'gauss', ''):
+        with _pytest.raises(ValueError, match='prior_type'):
+            C.Posterior(C.MODELS['lcdm'], 'CC+BAO', prior_type=malo)
+
+
+def test_escalar_y_lote_coinciden_en_puntos_fisicos():
+    """La correccion de [B-CLIP] no puede haber movido ningun numero real."""
+    import numpy as np
+    import cosmo_core as C
+    rng = np.random.default_rng(0)
+    for name in ('lcdm', 'wcdm', 'cpl', 'pede', 'gede'):
+        M = C.MODELS[name]
+        P = C.Posterior(M, 'CC+BAO+Pantheon')
+        lo = np.array([b[0] for b in M.bounds])
+        hi = np.array([b[1] for b in M.bounds])
+        g = lo + (hi - lo) * rng.uniform(0.2, 0.8, size=(12, M.n_params))
+        a = np.array([P.log_prob(t) for t in g])
+        b = P.log_prob_batch(g)
+        assert np.allclose(a, b, rtol=1e-10, atol=1e-8), name

@@ -1,61 +1,58 @@
-# =============================================================================
-#  cosmo_modular_quantum.py — Modular hybrid quantum/classical sampler
-# =============================================================================
-#
-#  Version 3 of `lcdm_modular_quantum.py`. Main changes vs v2:
-#
-#  [LANG] Entire codebase (variables, docstrings, comments, CLI, plot
-#         titles, legends and terminal output) is now 100% in English.
-#
-#  [BASE] MANDATORY CLASSICAL BASELINE: whenever a quantum method is run
-#         (any configuration with quantumness > 0), the exact classical
-#         counterpart (Classical MCMC + Classical VI = the 0% preset, i.e.
-#         the SAME code path with every component switched to classical) is
-#         executed automatically with EXACTLY the same parameters (steps,
-#         iterations, chains, burn-in, grid size, shots, RNG seed). This
-#         guarantees a fair benchmark in every single run.
-#
-#  [PLOT] ALL visualizations now OVERLAY classical vs quantum on the same
-#         axes with contrasting colors (blue = classical, red/orange =
-#         quantum) and explicit legends:
-#           * corner plots (2D contours + 1D marginals) via corner.py
-#           * 1D marginal histograms
-#           * KL training curves (Classical VI vs QVMC)
-#           * Gelman-Rubin R̂ diagnostics (Classical MCMC vs QMCMC)
-#           * parameter trace plots (classical and quantum chains together)
-#
-#  [ARCH] Physics lives in `cosmo_core.py` (ΛCDM/wCDM/CPL/PEDE/GEDE models,
-#         CC + Pantheon+ data, priors, χ²). This file ONLY contains the
-#         sampling logic. Injecting a new model = registering its E²(z;θ)
-#         in cosmo_core.MODELS; nothing in this file changes.
-#
-#  [DIM]  All samplers are N-dimensional: they work identically for ΛCDM
-#         (2 parameters) and CPL (4 parameters).
-#
-#  [OPT]  (1) Quantum proposals generated in BLOCKS within a single Aer job
-#         (displacement queue) instead of one job per step.
-#         (2) Parameter-shift evaluates the 2·n_φ shifted circuits in ONE
-#         batched Aer call (1 job/iteration instead of ~84).
-#         (3) The QVMC target is built with vectorized `log_prob_batch`
-#         (4096 states in ~30 ms instead of ~1 s).
-#         (4) The Hadamard test receives already-evaluated log-posteriors
-#         (v1 recomputed them inside, doubling the likelihood cost).
-#
-#  [STAT] χ², reduced χ², AIC, BIC, ESS and R̂ are reported for all methods.
-#
-#  [CLI]  No arguments → interactive menu (default behavior).
-#         With arguments → non-interactive, detailed output to a log file
-#         with progress every `--log-every` (default 500) steps/iterations.
-#         `--steps` and `--qvmc-iter` apply EQUALLY to the classical and
-#         quantum variants (same code path, fair comparison).
-#
-#  Usage:
-#    python cosmo_modular_quantum.py                       # interactive menu
-#    python cosmo_modular_quantum.py --model cpl --preset 45 --steps 2000
-#    python cosmo_modular_quantum.py --model wcdm --benchmark --dataset CC
-#    python cosmo_modular_quantum.py --config '{"proposal":true,...}'
-# =============================================================================
+""" cosmo_modular_quantum.py — Modular hybrid quantum/classical sampler
 
+ Version 3 of `lcdm_modular_quantum.py`. Main changes vs v2:
+
+ [LANG] Entire codebase (variables, docstrings, comments, CLI, plot
+        titles, legends and terminal output) is now 100% in English.
+
+ [BASE] MANDATORY CLASSICAL BASELINE: whenever a quantum method is run
+        (any configuration with quantumness > 0), the exact classical
+        counterpart (Classical MCMC + Classical VI = the 0% preset, i.e.
+        the SAME code path with every component switched to classical) is
+        executed automatically with EXACTLY the same parameters (steps,
+        iterations, chains, burn-in, grid size, shots, RNG seed). This
+        guarantees a fair benchmark in every single run.
+
+ [PLOT] ALL visualizations now OVERLAY classical vs quantum on the same
+        axes with contrasting colors (blue = classical, red/orange =
+        quantum) and explicit legends:
+          * corner plots (2D contours + 1D marginals) via corner.py
+          * 1D marginal histograms
+          * KL training curves (Classical VI vs QVMC)
+          * Gelman-Rubin R̂ diagnostics (Classical MCMC vs QMCMC)
+          * parameter trace plots (classical and quantum chains together)
+
+ [ARCH] Physics lives in `cosmo_core.py` (ΛCDM/wCDM/CPL/PEDE/GEDE models,
+        CC + Pantheon+ data, priors, χ²). This file ONLY contains the
+        sampling logic. Injecting a new model = registering its E²(z;θ)
+        in cosmo_core.MODELS; nothing in this file changes.
+
+ [DIM]  All samplers are N-dimensional: they work identically for ΛCDM
+        (2 parameters) and CPL (4 parameters).
+
+ [OPT]  (1) Quantum proposals generated in BLOCKS within a single Aer job
+        (displacement queue) instead of one job per step.
+        (2) Parameter-shift evaluates the 2·n_φ shifted circuits in ONE
+        batched Aer call (1 job/iteration instead of ~84).
+        (3) The QVMC target is built with vectorized `log_prob_batch`
+        (4096 states in ~30 ms instead of ~1 s).
+        (4) The Hadamard test receives already-evaluated log-posteriors
+        (v1 recomputed them inside, doubling the likelihood cost).
+
+ [STAT] χ², reduced χ², AIC, BIC, ESS and R̂ are reported for all methods.
+
+ [CLI]  No arguments → interactive menu (default behavior).
+        With arguments → non-interactive, detailed output to a log file
+        with progress every `--log-every` (default 500) steps/iterations.
+        `--steps` and `--qvmc-iter` apply EQUALLY to the classical and
+        quantum variants (same code path, fair comparison).
+
+ Usage:
+   python cosmo_modular_quantum.py                       # interactive menu
+   python cosmo_modular_quantum.py --model cpl --preset 45 --steps 2000
+   python cosmo_modular_quantum.py --model wcdm --benchmark --dataset CC
+   python cosmo_modular_quantum.py --config '{"proposal":true,...}'
+"""
 from __future__ import annotations
 
 import argparse
@@ -74,7 +71,6 @@ import matplotlib
 # 'Agg' is now selected ONLY in CLI/batch mode, inside main(), via
 # set_headless_backend(). Interactive importers keep their GUI backend.
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
 from scipy.optimize import minimize
 from tqdm import tqdm
@@ -97,12 +93,14 @@ def set_headless_backend():
 
 from qiskit import QuantumCircuit, transpile
 from qiskit.circuit import ParameterVector
-from qiskit_aer import AerSimulator
+from qiskit_aer import AerSimulator      # noqa: F401  (sonda: el simulador
+# se construye via cosmo_core.make_simulator, pero este import verifica que
+# qiskit-aer esta instalado antes de que falle a mitad de una campana)
 
 import cosmo_core as core
 import cosmo_noise as cnoise
 from cosmo_core import (MODELS, Posterior, RNG, ess_chains, ess_weights,
-                        fit_statistics, fmt_theta, gelman_rubin_max,
+                        fit_statistics, fmt_theta, gelman_rubin_max,  # noqa: F401
                         gpu_available, make_run_dir, make_simulator,
                         resolve_device, setup_logger)
 
@@ -144,6 +142,11 @@ NOISE: "cnoise.NoiseSpec" = cnoise.NoiseSpec.from_level('none')
 #  'auto' (por defecto) elige amplitudes en el peldano ideal y conteos en
 #  cuanto hay ruido, que es lo unico posible.
 PROPOSAL_ROUTE: str = 'auto'
+
+#: [B-PROV] Semilla de la corrida en curso, publicada a nivel de modulo para
+#: que los escritores de CSV puedan anotarla en cada fila sin tener que
+#: recibirla por parametro a traves de seis niveles de llamada.
+RUN_SEED: Optional[int] = None
 
 
 def set_noise(spec: "cnoise.NoiseSpec", proposal_route: str = 'auto') -> None:
@@ -324,6 +327,12 @@ def _reseed(seed: int):
     rng = np.random.default_rng(seed)
     core.RNG = rng
     globals()['RNG'] = rng
+    # [B-PROV] Publicar la semilla base para que las filas del CSV la lleven.
+    # Se guarda solo la primera vez de cada corrida: las llamadas posteriores
+    # usan derivadas (seed+1 para el flujo del QVMC), y lo que interesa anotar
+    # es la semilla que el usuario paso.
+    if globals().get('RUN_SEED') is None:
+        globals()['RUN_SEED'] = int(seed)
 
 
 # =============================================================================
@@ -427,6 +436,20 @@ def compute_quantumness(config: dict) -> float:
     Uniform weighting (option A): every substitution point counts equally.
     This is the fraction of substitution points currently switched to
     quantum — an ablation index, NOT a quantum-resource metric.
+
+    Args:
+        config: que componentes del algoritmo son cuanticos.
+
+    Returns:
+        float
+    Examples:
+        El indice es la fraccion de componentes cuanticos, no una suma de
+        pesos elegidos a mano:
+
+        >>> compute_quantumness({})
+        0.0
+        >>> compute_quantumness({'proposal': True, 'acceptance': True})
+        40.0
     """
     n_total = len(QUANTUM_COMPONENTS)
     n_quantum = sum(1 for k in QUANTUM_COMPONENTS if config.get(k, False))
@@ -439,6 +462,12 @@ def legacy_weighted_index(config: dict) -> float:
     Reproduces the pre-ablation "quantumness %" that used subjective
     per-component weights. Reported, if at all, as a clearly-labelled
     secondary number — never as the primary index.
+
+    Args:
+        config: que componentes del algoritmo son cuanticos.
+
+    Returns:
+        float
     """
     total = sum(_LEGACY_WEIGHTS.values())
     earned = sum(_LEGACY_WEIGHTS[k] for k in _LEGACY_WEIGHTS
@@ -452,13 +481,26 @@ def component_kinds(config: dict) -> dict:
     Lets figures, tables and tests state, per configuration, which active
     substitutions are null cells (must reproduce classical) and which are
     treatment cells (expected to differ).
+
+    Args:
+        config: que componentes del algoritmo son cuanticos.
+
+    Returns:
+        dict
     """
     return {k: QUANTUM_COMPONENTS[k]['kind']
             for k in QUANTUM_COMPONENTS if config.get(k, False)}
 
 
 def quantumness_label(pct: float) -> str:
-    """Human-readable label for a global ablation level (#quantum / 5)."""
+    """Human-readable label for a global ablation level (#quantum / 5).
+
+    Args:
+        pct: porcentaje de quantumness.
+
+    Returns:
+        str
+    """
     n = int(round(pct / 100.0 * len(QUANTUM_COMPONENTS)))
     if n == 0:
         return "Fully Classical (0/5 quantum)"
@@ -488,13 +530,46 @@ _QVMC_ORDER = ['sampling', 'training', 'normalization']
 
 
 def quantumness_qmcmc(config: dict) -> float:
-    """QMCMC-only ablation index: (#active of proposal, acceptance)/2 · 100."""
+    """QMCMC-only ablation index: (#active of proposal, acceptance)/2 · 100.
+
+    Args:
+        config: que componentes del algoritmo son cuanticos.
+
+    Returns:
+        float
+    Examples:
+        La escalera del QMCMC tiene DOS componentes, asi que sus peldanos son
+        0, 50 y 100 %:
+
+        >>> quantumness_qmcmc({})
+        0.0
+        >>> quantumness_qmcmc({'proposal': True})
+        50.0
+        >>> quantumness_qmcmc({'proposal': True, 'acceptance': True})
+        100.0
+    """
     n = sum(1 for c in _QMCMC_ORDER if config.get(c, False))
     return round(100.0 * n / len(_QMCMC_ORDER), 1)
 
 
 def quantumness_qvmc(config: dict) -> float:
-    """QVMC-only ablation index: (#active of sampling, training, norm)/3 · 100."""
+    """QVMC-only ablation index: (#active of sampling, training, norm)/3 · 100.
+
+    Args:
+        config: que componentes del algoritmo son cuanticos.
+
+    Returns:
+        float
+    Examples:
+        La del QVMC tiene TRES, asi que sus peldanos son 0, 33, 67 y 100 %.
+        El salto de 33 a 67 es el que cambia el optimizador (COBYLA ->
+        parameter-shift) y por tanto el unico marcado ALGORITHMIC:
+
+        >>> quantumness_qvmc({'sampling': True})
+        33.3
+        >>> quantumness_qvmc({'sampling': True, 'training': True})
+        66.7
+    """
     n = sum(1 for c in _QVMC_ORDER if config.get(c, False))
     return round(100.0 * n / len(_QVMC_ORDER), 1)
 
@@ -527,6 +602,13 @@ def build_proposal_circuit(n_qubits: int, n_layers: int = 3) -> QuantumCircuit:
     H⊗n → [RY·RZ per qubit + chained CRY]×L → H⊗n → final RY per qubit.
     The angles φ are drawn uniformly for each proposal; the real parts of
     the first n_params amplitudes define the displacement.
+
+    Args:
+        n_qubits: ancho del circuito en qubits.
+        n_layers: capas del circuito. Por defecto 3.
+
+    Returns:
+        QuantumCircuit
     """
     n_params = n_layers * n_qubits * 2 + n_layers * (n_qubits - 1) + n_qubits
     phi = ParameterVector('φ', n_params)
@@ -562,6 +644,15 @@ class QuantumProposalEngine:
 
     def __init__(self, n_phys: int, n_layers: int = 3, batch: int = 256,
                  n_calib: int = 1024):
+        """Motor de propuestas cuanticas para el QMCMC.
+
+        Args:
+            n_phys: parametros fisicos del modelo (el circuito usa max(2, n_phys)
+                qubits, porque con uno solo no hay entrelazamiento que proponer).
+            n_layers: capas del circuito de propuesta.
+            batch: propuestas por trabajo de Aer.
+            n_calib: muestras de calibracion de la escala de la propuesta.
+        """
         self.d = n_phys
         self.n_qubits = max(2, n_phys)
         self.qc = build_proposal_circuit(self.n_qubits, n_layers)
@@ -756,6 +847,13 @@ def hadamard_accept_log(lp_cur: float, lp_prop: float) -> float:
     instead make the acceptance a *distinct* kernel, set A = σ(Δ) here
     (Barker) — it shares the same stationary distribution but mixes
     differently.
+
+    Args:
+        lp_cur: log-posterior del punto actual.
+        lp_prop: log-posterior del punto propuesto.
+
+    Returns:
+        float
     """
     if not np.isfinite(lp_prop):
         return -np.inf
@@ -808,6 +906,13 @@ def hadamard_accept_log_batch(lp_cur: np.ndarray,
     Returns:
         log A for each chain, shape (M,). Out-of-box proposals (non-finite
         lp_prop) return -inf (rejected).
+
+    Args:
+        lp_cur: log-posterior del punto actual.
+        lp_prop: log-posterior del punto propuesto.
+
+    Returns:
+        np.ndarray
     """
     lp_cur = np.asarray(lp_cur, dtype=float)
     lp_prop = np.asarray(lp_prop, dtype=float)
@@ -884,6 +989,18 @@ class QMCMCModular:
                  step_frac: float = 0.06, n_burn: int = 200,
                  n_layers: int = 3, rhat_every: int = 50,
                  stop_on_convergence: bool = True):
+        """QMCMC con componentes cuanticos conmutables.
+
+        Args:
+            post: posterior objetivo.
+            config: que componentes son cuanticos ('proposal', 'acceptance').
+            n_chains: cadenas en paralelo.
+            step_frac: paso de la propuesta como fraccion de la caja.
+            n_burn: pasos de calentamiento descartados.
+            n_layers: capas del circuito de propuesta.
+            rhat_every: cada cuantos pasos se recalcula R-hat.
+            stop_on_convergence: parar al converger en vez de agotar los pasos.
+        """
         self.post = post
         self.model = post.model
         self.config = config
@@ -1068,6 +1185,12 @@ def quantum_amplitude_normalization(P_unnorm: np.ndarray) -> np.ndarray:
     puede degradarse por su culpa. Cualquier degradacion observada entre el
     67% y el 100% viene de otro sitio, y atribuirla a la normalizacion seria
     un error de lectura de la escalera.
+
+    Args:
+        P_unnorm: distribucion sin normalizar.
+
+    Returns:
+        np.ndarray
     """
     n = max(1, min(4, int(np.log2(max(len(P_unnorm), 2)))))
     qc = QuantumCircuit(n + 1)
@@ -1089,6 +1212,15 @@ def estimate_grid_window(post: Posterior, sigma_mult: float = 4.0,
                          n_steps: int = 400, n_chains: int = 4) -> List[tuple]:
     """[B3] Re-exported from cosmo_core so the adaptive grid is shared by the
     simulator and QPU pipelines (single source of truth). See
+
+    Args:
+        post: posterior cosmologico activo (`cosmo_core.Posterior`).
+        sigma_mult: semiancho de la ventana en sigmas. Por defecto 4.0.
+        n_steps: pasos de la cadena. Por defecto 400.
+        n_chains: numero de cadenas en paralelo. Por defecto 4.
+
+    Returns:
+        List[tuple]
     `cosmo_core.estimate_grid_window` for the full docstring."""
     return core.estimate_grid_window(post, sigma_mult=sigma_mult,
                                      n_steps=n_steps, n_chains=n_chains)
@@ -1119,10 +1251,44 @@ class QVMCModular:
                  n_qubits_per_param: int = 3, n_layers: int = 3,
                  n_shots: int = 2000, lr_train: float = 0.05,
                  grid_window=None, adaptive_grid: bool = True,
-                 grid_sigma: float = None):
+                 grid_sigma: float = None, budget_mode: str = 'circuits'):
+        """QVMC sobre una rejilla discreta, con componentes conmutables.
+
+        Args:
+            post: posterior objetivo.
+            config: componentes cuanticos ('sampling', 'training', 'normalization').
+            n_qubits_per_param: qubits por parametro (rejilla de 2^nqpp por eje).
+            n_layers: capas del ansatz.
+            n_shots: disparos por circuito al muestrear.
+            lr_train: tasa de aprendizaje del SGD con parameter-shift.
+            grid_window: ventana por parametro ya calculada; None la estima.
+            adaptive_grid: centrar y ampliar la rejilla sobre el posterior.
+            grid_sigma: semiancho en sigmas; None lo deduce del tamano de rejilla.
+            budget_mode: 'circuits' (por defecto) iguala el presupuesto de
+                entrenamiento en evaluaciones de circuito entre la rama clasica y
+                la cuantica; 'iters' reproduce el sesgo historico. Ver [B-BUDGET].
+
+        Raises:
+            ValueError: budget_mode desconocido.
+        """
         self.post = post
         self.model = post.model
         self.config = config
+        # [B-BUDGET] Como se reparte el presupuesto de entrenamiento entre la
+        # rama cuantica y la clasica. Ver el comentario largo en `train`.
+        #   'circuits' (por defecto) — las dos ramas reciben el MISMO numero de
+        #       evaluaciones de circuito. Es la comparacion honesta.
+        #   'iters'    — cada rama recibe `max_iter` iteraciones, que cuestan
+        #       1 + 2*n_phi circuitos en la cuantica y 1 en la clasica. Es el
+        #       comportamiento de todas las campanas anteriores a 2026-09-04;
+        #       se conserva SOLO para reproducirlas.
+        if budget_mode not in ('circuits', 'iters'):
+            raise ValueError(
+                f"budget_mode desconocido: {budget_mode!r}. "
+                f"Validos: 'circuits', 'iters'")
+        self.budget_mode = budget_mode
+        self._circuits_per_iter = 1
+        self._cobyla_budget = None
         self.nqpp = n_qubits_per_param
         self.d = self.model.n_params
         self.n_qubits = self.d * n_qubits_per_param
@@ -1181,21 +1347,57 @@ class QVMCModular:
         return table
 
     def decode(self, bitstring: str) -> np.ndarray:
-        """θ corresponding to a measured bitstring (counts key)."""
+        """θ corresponding to a measured bitstring (counts key).
+
+        Args:
+            bitstring: cadena de bits medida.
+
+        Returns:
+            np.ndarray
+        """
         return self.theta_table[int(bitstring, 2)]
 
     # ── target ───────────────────────────────────────────────────────────────
     def build_target(self) -> np.ndarray:
-        """Target posterior P on the grid. [OPT] one vectorized pass."""
+        """Target posterior P on the grid. [OPT] one vectorized pass.
+
+        [B-EMPTY] Si la rejilla no toca NINGUN punto con soporte del prior, P
+        sale toda a cero y no hay objetivo que aproximar. Las dos ramas fallaban
+        distinto y ninguna avisaba bien: la clasica hacia `P / P.sum()` y
+        devolvia nan con un RuntimeWarning; la cuantica, con su guarda
+        `+1e-15`, devolvia un vector de ceros **sin ningun aviso**.
+
+        Aguas abajo eso no explota: `P_s = (P + eps) / suma` se vuelve
+        uniforme, asi que el KL degenera en `log n - H(Q)`, que es un numero
+        PEQUENO Y ATRACTIVO. Medido, una corrida sobre una rejilla sin soporte
+        terminaba entera y reportaba Om = -4.45, H0 = -95.1 y KL = 0.022 —
+        mejor KL que cualquier corrida legitima de la campana — sin un solo
+        error. Y era el rung del 100 % el que mejor escondia la senal.
+
+        La probabilidad de llegar aqui por la ruta normal es baja, porque
+        `estimate_grid_window` recorta a las cotas del modelo. Pero es
+        exactamente la clase de fallo silencioso que ya ha mordido seis veces
+        en este proyecto, asi que ahora levanta.
+        """
         log_p = self.post.log_prob_batch(self.theta_table)
         valid = np.isfinite(log_p)
         P = np.zeros(self.n_states)
         if np.any(valid):
             log_p[valid] -= np.max(log_p[valid])
             P[valid] = np.exp(log_p[valid])
+        total = float(P.sum())
+        if not np.isfinite(total) or total <= 0.0:
+            raise ValueError(
+                "[B-EMPTY] La rejilla del QVMC no contiene ningun punto con "
+                "soporte del prior: el objetivo sale identicamente cero y el "
+                "KL resultante no significa nada (degenera en log n - H(Q), "
+                "que sale enganosamente pequeno). Revisa la ventana de la "
+                "rejilla (`grid_window`) contra `model.bounds`, o baja "
+                "`nqpp`. Ventana usada: "
+                f"{[(round(a, 6), round(b, 6)) for a, b in self.grid_window]}")
         if self.config.get('normalization', False):
             return quantum_amplitude_normalization(P)
-        return P / P.sum()
+        return P / total
 
     # ── ansatz ───────────────────────────────────────────────────────────────
     def _build_ansatz(self):
@@ -1295,6 +1497,13 @@ class QVMCModular:
         t0 = time.time()
 
         def record(it, kl, Q):
+            """Anota una iteracion del entrenamiento en el historial.
+
+            Args:
+                it: numero de iteracion.
+                kl: divergencia KL en esta iteracion.
+                Q: distribucion del ansatz.
+            """
             theta_mean = Q @ self.theta_table
             history.append({'it': it, 'kl': kl, 'theta_mean': theta_mean})
             if logger and (it % log_every == 0 or it == max_iter - 1):
@@ -1323,6 +1532,9 @@ class QVMCModular:
             #       the "creep-up" pathology from the reported result.
             lr0 = self.lr_train
             decay = 0.02 * max(1.0, n_p / 42.0)        # (2) scale with #angles
+            # [B-BUDGET] Coste real por iteracion de ESTA rama: una evaluacion
+            # de KL en phi mas las 2*n_phi desplazadas del parameter-shift.
+            self._circuits_per_iter = 1 + 2 * n_p
             grad_cap = 1.0                              # (1) max gradient norm
             best_kl, best_phi = np.inf, phi.copy()      # (3) best-so-far
             it_r = range(max_iter)
@@ -1382,6 +1594,14 @@ class QVMCModular:
             it_count = [0]
 
             def cost(ph):
+                """Coste que optimiza COBYLA: el KL de la distribucion en `ph`.
+
+                Args:
+                    ph: vector de angulos del ansatz.
+
+                Returns:
+                    Ver la descripcion de arriba.
+                """
                 kl, Qs = self._kl_batch(ph, qc_t, P_target, return_q=True)
                 record(it_count[0], float(kl[0]), Qs[0])
                 _sanity('QVMC.train', 'classical',
@@ -1391,8 +1611,43 @@ class QVMCModular:
                     pbar.update(1)
                 return float(kl[0])
 
+            # [B-BUDGET] Presupuesto EN EVALUACIONES DE CIRCUITO, no en
+            # "iteraciones".
+            #
+            # El bug: `max_iter` se pasaba igual a las dos ramas, pero una
+            # iteracion NO cuesta lo mismo en cada una. La rama cuantica gasta
+            # 1 + 2*n_phi circuitos por iteracion (el KL en phi mas las
+            # desplazadas del parameter-shift); COBYLA gasta exactamente 1.
+            # O sea que con el mismo --qvmc-iter la rama cuantica recibia
+            # entre 57x (lcdm, nqpp=2) y 225x (cpl, nqpp=4) mas trabajo.
+            #
+            # Medido, lcdm/CC+BAO/nqpp=2, semilla 43:
+            #     parameter-shift, 40 iter -> 2281 circuitos, KL = 1.425
+            #     COBYLA,          40 iter ->   41 circuitos, KL = 1.783
+            #     COBYLA,        2281 iter -> 2282 circuitos, KL = 0.00063
+            #
+            # A presupuesto igualado el optimizador clasico gana por tres
+            # ordenes de magnitud, o sea que la comparacion nominal estaba
+            # sesgada A FAVOR de lo cuantico. Eso es justo lo que este
+            # proyecto NO puede permitirse: la afirmacion central es fidelidad,
+            # no ventaja, y una ventaja aparente que sale de contar mal el
+            # trabajo es peor que no medir nada.
+            #
+            # Por defecto (`budget_mode='circuits'`) las dos ramas reciben el
+            # MISMO numero de evaluaciones de circuito. `budget_mode='iters'`
+            # reproduce el comportamiento viejo, que es lo que usaron todas
+            # las campanas anteriores a 2026-09-04.
+            if self.budget_mode == 'circuits':
+                cobyla_iter = int(max_iter) * (1 + 2 * n_p)
+            else:
+                cobyla_iter = int(max_iter)
+            # [B-COBYLA-CLAMP] SciPy sube maxiter hasta n_vars+2 y avisa; se
+            # hace explicito para que el conteo declarado sea el real.
+            cobyla_iter = max(cobyla_iter, n_p + 2)
+            self._circuits_per_iter = 1
+            self._cobyla_budget = cobyla_iter
             res = minimize(cost, phi, method='COBYLA',
-                           options={'maxiter': max_iter, 'rhobeg': 0.3})
+                           options={'maxiter': cobyla_iter, 'rhobeg': 0.3})
             if pbar:
                 pbar.close()
             phi_opt = res.x
@@ -1414,7 +1669,16 @@ class QVMCModular:
     # ── sampling ─────────────────────────────────────────────────────────────
     def sample(self, phi_opt: np.ndarray, qc: QuantumCircuit,
                n_chains: int = 3):
-        """Sample from the trained circuit: quantum shots or classical inverse."""
+        """Sample from the trained circuit: quantum shots or classical inverse.
+
+        Args:
+            phi_opt: angulos optimos tras el entrenamiento.
+            qc: circuito cuantico.
+            n_chains: numero de cadenas en paralelo. Por defecto 3.
+
+        Returns:
+            Ver la descripcion de arriba.
+        """
         bound = qc.assign_parameters(phi_opt)
         all_chains = []
         if self.config.get('sampling', False):
@@ -1432,8 +1696,33 @@ class QVMCModular:
                 counts = self.sim.run(bound_t, shots=self.n_shots,
                                       seed_simulator=1000 + c * 137
                                       ).result().get_counts()
-                S = np.array([self.decode(bs) for bs in counts])
-                W = np.array(list(counts.values()), dtype=float) / self.n_shots
+                # [B-ESSCOMP] La rama cuantica devolvia la representacion
+                # COMPRIMIDA (una fila por cadena de bits distinta, con su
+                # conteo como peso) mientras que la clasica devuelve una fila
+                # POR DISPARO. Las dos describen exactamente la misma muestra,
+                # pero el ESS de Kish, (sum w)^2 / sum w^2, no es invariante
+                # bajo esa compresion: sobre la forma comprimida mide cuantas
+                # CELDAS DE LA REJILLA se ocuparon, no cuantas muestras hay.
+                #
+                # Medido con 3 cadenas x 2000 disparos, lcdm nqpp=3, misma
+                # phi_opt y KL identico hasta la sexta cifra en ambas ramas:
+                #
+                #     Classical VI  filas=6000  ESS reportado = 6000.00
+                #     QVMC 33%      filas= 185  ESS reportado =  100.74
+                #     ...expandiendo los conteos a una fila por disparo,
+                #        las DOS dan 6000.00
+                #
+                # O sea que la caida de 60x era puramente de representacion, y
+                # aparecia en el CSV publicado como si el muestreo cuantico
+                # costara 60 veces el tamano efectivo de muestra — en una
+                # celda etiquetada FAITHFUL, donde por construccion no debe
+                # haber diferencia. Se expande a una fila por disparo para que
+                # las dos ramas sean comparables.
+                bitstrings = list(counts.keys())
+                mult = np.array([counts[b] for b in bitstrings], dtype=int)
+                S_compact = np.array([self.decode(bs) for bs in bitstrings])
+                S = np.repeat(S_compact, mult, axis=0)
+                W = np.ones(len(S), dtype=float) / float(len(S))
                 all_chains.append((S, W))
         else:
             _sanity('QVMC.sample', 'classical',
@@ -1462,7 +1751,22 @@ class QVMCModular:
     def run(self, max_iter: int = 300, n_chains: int = 3, logger=None,
             log_every: int = 500, progress: bool = True,
             tag: str = "QVMC") -> dict:
-        """Full pipeline: target → training → sampling → moments."""
+        """Full pipeline: target → training → sampling → moments.
+
+        Args:
+            max_iter: tope de iteraciones. Por defecto 300.
+            n_chains: numero de cadenas en paralelo. Por defecto 3.
+            logger: destino de los mensajes; None imprime por pantalla. Por
+                defecto None.
+            log_every: cada cuantos pasos se emite una linea de progreso. Por
+                defecto 500.
+            progress: mostrar barra de progreso. Por defecto True.
+            tag: etiqueta corta que va al nombre de archivo y a los mensajes.
+                Por defecto 'QVMC'.
+
+        Returns:
+            dict
+        """
         P_target = self.build_target()
         phi_opt, qc, hist = self.train(P_target, max_iter, logger,
                                        log_every, progress, tag=tag)
@@ -1473,9 +1777,18 @@ class QVMCModular:
         mu = np.array([np.average(S[:, p], weights=W) for p in range(self.d)])
         sd = np.array([np.sqrt(np.average((S[:, p] - mu[p])**2, weights=W))
                        for p in range(self.d)])
+        # [B-BUDGET][B-PROV] Se reporta el trabajo REALMENTE gastado, no el
+        # nominal: es lo unico que hace auditable la comparacion entre la rama
+        # clasica y la cuantica.
+        n_iters = len(hist) if hist else 0
+        circuits = (n_iters * getattr(self, '_circuits_per_iter', 1)
+                    if self.config.get('training', False)
+                    else (self._cobyla_budget or n_iters))
         return {'S': S, 'W': W, 'history': hist, 'mu': mu, 'sd': sd,
                 'kl_final': hist[-1]['kl'] if hist else np.nan,
-                'ess': ess_weights(W)}
+                'ess': ess_weights(W),
+                'budget_mode': self.budget_mode,
+                'circuits_train': int(circuits)}
 
 
 # =============================================================================
@@ -1488,9 +1801,15 @@ def run_config(post: Posterior, config: dict, n_steps_mcmc: int = 300,
                n_burn: Optional[int] = None, logger=None,
                log_every: int = 500, verbose: bool = True,
                stop_on_convergence: bool = False,
-               seed: Optional[int] = None) -> dict:
+               seed: Optional[int] = None,
+               budget_mode: str = 'circuits') -> dict:
     """Run QMCMC + QVMC with one configuration and compute ALL estimators:
     χ², reduced χ², AIC, BIC, ESS, acceptance, R̂, KL.
+
+    [B-BUDGET] `budget_mode` decide como se iguala el presupuesto de
+    entrenamiento del QVMC entre la rama clasica y la cuantica; ver
+    `QVMCModular.__init__`. Por defecto se igualan en EVALUACIONES DE
+    CIRCUITO, no en iteraciones.
 
     Fair-comparison note: `n_steps_mcmc` and `max_iter_qvmc` apply equally
     to the classical and quantum variants of each method (same code path
@@ -1508,6 +1827,32 @@ def run_config(post: Posterior, config: dict, n_steps_mcmc: int = 300,
     preceding QMCMC left behind — which differs between a quantum config and
     its classical baseline — so the two VI runs did not actually share their
     initialization despite the same-seed claim.
+
+    Args:
+        post: posterior cosmologico activo (`cosmo_core.Posterior`).
+        config: que componentes del algoritmo son cuanticos.
+        n_steps_mcmc: pasos del MCMC. Por defecto 300.
+        max_iter_qvmc: iteraciones del entrenamiento variacional. Por defecto
+            200.
+        n_chains_mcmc: cadenas del MCMC. Por defecto 6.
+        n_chains_qvmc: cadenas de muestreo del QVMC. Por defecto 3.
+        nqpp: qubits por parametro (rejilla de 2^nqpp por eje). Por defecto 3.
+        n_shots: disparos por circuito. Por defecto 2000.
+        n_burn: pasos de calentamiento que se descartan. Por defecto None.
+        logger: destino de los mensajes; None imprime por pantalla. Por
+            defecto None.
+        log_every: cada cuantos pasos se emite una linea de progreso. Por
+            defecto 500.
+        verbose: imprimir progreso. Por defecto True.
+        stop_on_convergence: parar al converger en vez de agotar los pasos.
+            Por defecto False.
+        seed: semilla del generador aleatorio. Por defecto None.
+        budget_mode: 'circuits' iguala el presupuesto en evaluaciones de
+            circuito; 'iters' reproduce el sesgo historico. Ver [B-BUDGET].
+            Por defecto 'circuits'.
+
+    Returns:
+        dict
     """
     q_pct = compute_quantumness(config)
     label = config.get('label', f"{q_pct:.0f}% — {quantumness_label(q_pct)}")
@@ -1534,7 +1879,8 @@ def run_config(post: Posterior, config: dict, n_steps_mcmc: int = 300,
 
     if seed is not None:
         _reseed(seed + 1)                   # [M1] QVMC stream, QMCMC-independent
-    qvmc = QVMCModular(post, config, n_qubits_per_param=nqpp, n_shots=n_shots)
+    qvmc = QVMCModular(post, config, n_qubits_per_param=nqpp, n_shots=n_shots,
+                       budget_mode=budget_mode)
     q = qvmc.run(max_iter=max_iter_qvmc, n_chains=n_chains_qvmc,
                  logger=logger, log_every=log_every, progress=(logger is None),
                  tag=vi_tag)
@@ -1597,6 +1943,16 @@ def run_comparison(post: Posterior, config: dict, seed: int = 42,
         dict with keys:
             'quantum'  — result of the requested config (None if 0%)
             'classical'— result of the classical baseline
+
+    Args:
+        post: posterior cosmologico activo (`cosmo_core.Posterior`).
+        config: que componentes del algoritmo son cuanticos.
+        seed: semilla del generador aleatorio. Por defecto 42.
+        logger: destino de los mensajes; None imprime por pantalla. Por
+            defecto None.
+
+    Returns:
+        dict
     """
     q_pct = compute_quantumness(config)
     say = logger.info if logger else print
@@ -1659,6 +2015,15 @@ def plot_kl_overlay(res_q: dict, res_c: dict, outdir: str, tag: str):
     Blue = Classical VI (baseline), orange = QVMC at the requested
     quantumness. Both curves share the same iteration budget by
     construction (requirement 2).
+
+    Args:
+        res_q: resultado de la corrida cuantica.
+        res_c: resultado de la corrida clasica de referencia.
+        outdir: carpeta donde escribir la salida.
+        tag: etiqueta corta que va al nombre de archivo y a los mensajes.
+
+    Returns:
+        Ver la descripcion de arriba.
     """
     fig, ax = plt.subplots(figsize=(8, 5.2))
     for res, col, lab in ((res_c, C_CLASSICAL, 'Classical VI (0%)'),
@@ -1683,6 +2048,15 @@ def plot_kl_overlay(res_q: dict, res_c: dict, outdir: str, tag: str):
 
 def plot_rhat_overlay(res_q: dict, res_c: dict, outdir: str, tag: str):
     """Gelman-Rubin convergence (R̂−1 vs steps) of Classical MCMC vs QMCMC
+
+    Args:
+        res_q: resultado de la corrida cuantica.
+        res_c: resultado de la corrida clasica de referencia.
+        outdir: carpeta donde escribir la salida.
+        tag: etiqueta corta que va al nombre de archivo y a los mensajes.
+
+    Returns:
+        Ver la descripcion de arriba.
     OVERLAID on one axis. Blue = classical, red = quantum."""
     fig, ax = plt.subplots(figsize=(8, 5.2))
     for res, col, lab in ((res_c, C_CLASSICAL, 'Classical MCMC (0%)'),
@@ -1718,6 +2092,22 @@ def plot_corner_overlay(flat_c: np.ndarray, flat_q: np.ndarray, model,
     [NEW] Requirement 3: blue = classical baseline, red/orange = quantum.
     Shared axis ranges are computed from the union of both sample sets so
     the contours are directly comparable.
+
+    Args:
+        flat_c: muestras clasicas aplanadas.
+        flat_q: muestras cuanticas aplanadas.
+        model: modelo cosmologico (`cosmo_core.CosmoModel`).
+        outdir: carpeta donde escribir la salida.
+        tag: etiqueta corta que va al nombre de archivo y a los mensajes.
+        title: titulo de la figura.
+        labels: etiquetas para la leyenda. Por defecto ('Classical',
+            'Quantum').
+        q_color: color de la serie cuantica. Por defecto C_QUANTUM.
+        weights_c: pesos de las muestras clasicas. Por defecto None.
+        weights_q: pesos de las muestras cuanticas. Por defecto None.
+
+    Returns:
+        Ver la descripcion de arriba.
     """
     d = model.n_params
     # Common ranges from the union of both sample sets (1–99 percentiles,
@@ -1734,6 +2124,7 @@ def plot_corner_overlay(flat_c: np.ndarray, flat_q: np.ndarray, model,
     # calls would silently draw BOTH diagonal histograms in the classical
     # color. A fresh kwargs dict per call keeps each overlay's color.
     def _kw(ls='solid'):
+        """Argumentos comunes de corner para las figuras 1-a-1."""
         return dict(labels=model.param_latex, bins=35, range=rng_,
                     plot_datapoints=False, plot_density=False, smooth=1.0,
                     levels=(0.393, 0.865),    # 1σ and 2σ for 2D Gaussians
@@ -1840,6 +2231,7 @@ def plot_corner_multi(datasets, colors, labels, model, outdir: str, tag: str,
     SIGMA_LEVELS = (0.393, 0.865, 0.989)          # 1, 2 y 3 sigma en 2D
 
     def _kw(ls, col):
+        """Argumentos de corner con relleno por sigmas, en un color dado."""
         return dict(labels=model.param_latex, bins=35, range=rng_,
                     plot_datapoints=False, plot_density=False, smooth=1.0,
                     levels=SIGMA_LEVELS,
@@ -1877,6 +2269,16 @@ def plot_marginals_overlay(res_q: dict, res_c: dict, post: Posterior,
     Row 0: Classical MCMC (blue) vs QMCMC (red).
     Row 1: Classical VI (blue) vs QVMC (orange).
     Plus an H(z) posterior-predictive panel overlaying all four means.
+
+    Args:
+        res_q: resultado de la corrida cuantica.
+        res_c: resultado de la corrida clasica de referencia.
+        post: posterior cosmologico activo (`cosmo_core.Posterior`).
+        outdir: carpeta donde escribir la salida.
+        tag: etiqueta corta que va al nombre de archivo y a los mensajes.
+
+    Returns:
+        Ver la descripcion de arriba.
     """
     model = post.model
     d = model.n_params
@@ -1957,6 +2359,16 @@ def plot_traces_overlay(res_q: dict, res_c: dict, model, outdir: str,
     chains in red (one line per chain).
     Right column: E_Q[θ] during variational training — Classical VI in
     blue, QVMC in orange.
+
+    Args:
+        res_q: resultado de la corrida cuantica.
+        res_c: resultado de la corrida clasica de referencia.
+        model: modelo cosmologico (`cosmo_core.CosmoModel`).
+        outdir: carpeta donde escribir la salida.
+        tag: etiqueta corta que va al nombre de archivo y a los mensajes.
+
+    Returns:
+        Ver la descripcion de arriba.
     """
     d = model.n_params
     qpct = res_q['quantumness']
@@ -2011,6 +2423,14 @@ def plot_comparison_figures(comp: dict, post: Posterior, outdir: str) -> list:
     """Generate the FULL overlay figure set for one quantum-vs-classical
     comparison (requirement 3): corner plots (MCMC and variational
     families), 1D marginals, KL curves, R̂ diagnostics and traces.
+
+    Args:
+        comp: resultado de `run_comparison`.
+        post: posterior cosmologico activo (`cosmo_core.Posterior`).
+        outdir: carpeta donde escribir la salida.
+
+    Returns:
+        list
     """
     res_q, res_c = comp['quantum'], comp['classical']
     model = post.model
@@ -2062,7 +2482,8 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
                            n_chains_mcmc: int = 6, n_chains_qvmc: int = 3,
                            n_shots: int = 2000,
                            csv_paths: Optional[list] = None,
-                           dataset_label: str = "", prior_type: str = "") -> dict:
+                           dataset_label: str = "", prior_type: str = "",
+                           budget_mode: str = 'circuits') -> dict:
     """Run TWO independent, monotonic per-method quantumness ladders.
 
     This is the canonical benchmark: it sweeps each sampler along ITS OWN
@@ -2076,6 +2497,30 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
     acceptance, the quantum acceptance rung reproduces the classical result
     exactly — which is the point: it demonstrates the quantum method
     *replicates* the classical one component by component.
+
+    Args:
+        post: posterior cosmologico activo (`cosmo_core.Posterior`).
+        n_steps_mcmc: pasos del MCMC.
+        max_iter_qvmc: iteraciones del entrenamiento variacional.
+        nqpp: qubits por parametro (rejilla de 2^nqpp por eje).
+        outdir: carpeta donde escribir la salida.
+        seed: semilla del generador aleatorio. Por defecto 42.
+        logger: destino de los mensajes; None imprime por pantalla. Por
+            defecto None.
+        log_every: cada cuantos pasos se emite una linea de progreso. Por
+            defecto 500.
+        n_chains_mcmc: cadenas del MCMC. Por defecto 6.
+        n_chains_qvmc: cadenas de muestreo del QVMC. Por defecto 3.
+        n_shots: disparos por circuito. Por defecto 2000.
+        csv_paths: rutas de los CSV donde escribir la fila. Por defecto None.
+        dataset_label: nombre del dataset, tal como va al CSV. Por defecto ''.
+        prior_type: 'flat' o 'gaussian'. Por defecto ''.
+        budget_mode: 'circuits' iguala el presupuesto en evaluaciones de
+            circuito; 'iters' reproduce el sesgo historico. Ver [B-BUDGET].
+            Por defecto 'circuits'.
+
+    Returns:
+        dict
     """
     say = logger.info if logger else print
     model = post.model
@@ -2118,7 +2563,7 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
         _reseed(seed)
         tag = 'C-VI' if pct == 0 else f'QVMC{pct:.0f}'
         qv = QVMCModular(post, cfg, n_qubits_per_param=nqpp, n_shots=n_shots,
-                         grid_window=shared_window)
+                         grid_window=shared_window, budget_mode=budget_mode)
         _t0 = time.time()
         res = qv.run(max_iter=max_iter_qvmc, n_chains=n_chains_qvmc,
                      logger=logger, log_every=log_every,
@@ -2128,9 +2573,15 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
                           'W': res['W'], 'history': res['history'],
                           'mu': res['mu'], 'std': res['sd'],
                           'kl_final': res['kl_final'], 'ess': res['ess'],
+                          # [B-BUDGET][B-PROV] el trabajo realmente gastado,
+                          # para que la comparacion entre rungs sea auditable
+                          'budget_mode': res.get('budget_mode', ''),
+                          'circuits_train': res.get('circuits_train', ''),
+                          'seed': seed,
                           'elapsed': time.time() - _t0, **fs})
         say(f"  QVMC  {pct:5.1f}%  mean={fmt_theta(model, res['mu'])}"
-            f"  KL={res['kl_final']:.4f}")
+            f"  KL={res['kl_final']:.4f}  "
+            f"circuitos={res.get('circuits_train', '?')}")
 
     meta = dict(n_steps=n_steps_mcmc, n_iter=max_iter_qvmc, nqpp=nqpp)
     plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta)
@@ -2164,7 +2615,18 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
 
 
 def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
-    """All per-method ladder figures (family overlay, diagnostics, 1-to-1)."""
+    """All per-method ladder figures (family overlay, diagnostics, 1-to-1).
+
+    Args:
+        qmcmc_runs: corridas de la familia QMCMC.
+        qvmc_runs: corridas de la familia QVMC.
+        model: modelo cosmologico (`cosmo_core.CosmoModel`).
+        outdir: carpeta donde escribir la salida.
+        meta: metadatos de la corrida para el pie de figura.
+
+    Returns:
+        Ver la descripcion de arriba.
+    """
     name = model.name
     steps, iters, nqpp = meta['n_steps'], meta['n_iter'], meta['nqpp']
 
@@ -2180,6 +2642,12 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
                      for lo, hi in model.sample_box])
 
     def _jitter(S):
+        """Reparte las muestras dentro de su celda de rejilla.
+
+        Sin esto, un corner de una distribucion discreta se ve como una malla de
+        puntos y no como una nube: el ruido uniforme de media celda recupera la
+        forma sin mover ninguna estadistica.
+        """
         return S + RNG.uniform(-0.5, 0.5, size=S.shape) * cell
 
     # ── QMCMC family corner: classical + every QMCMC rung ────────────────────
@@ -2280,6 +2748,7 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
     flat_axes = axes.flatten()
 
     def _trend(ax, getter, ylabel, title, err=None, fid=None):
+        """Dibuja una tendencia a lo largo del eje de quantumness."""
         ax.plot(mp, [getter(r) for r in mq], 'o-', color=C_QUANTUM, lw=2,
                 ms=6, label='QMCMC')
         ax.plot(vp, [getter(r) for r in vq], 's-', color=C_QUANTUM2, lw=2,
@@ -2357,6 +2826,7 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
 
     def _param_cells(r):
         # "value±std" for every parameter, with sensible precision per column.
+        """Celdas 'valor±sigma' de una fila de la tabla resumen."""
         cells = []
         for i in range(npar):
             prec = 4 if i == 0 else (2 if pnames[i] == 'H0' else 4)
@@ -2390,6 +2860,49 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
 # 7.  INTERACTIVE MENU (default behavior with no arguments)
 # =============================================================================
 
+# [B-PROV] Columnas de PROCEDENCIA. Sin ellas, dos filas con la misma clave
+# (Method, model, dataset, prior, nqpp) pero numeros distintos son
+# indistinguibles en el CSV: una puede venir de una corrida ideal y otra de una
+# ruidosa, y el archivo no lo dice. Eso hace el eje de ruido ENTERO
+# irreconstruible desde los resultados, y de paso rompe la lectura de la celda
+# FAITHFUL: `QMCMC 50% == QMCMC 100%` se cumple bit a bit en unos grupos de
+# filas y no en otros, porque los que difieren son ruidosos y ahi la
+# equivalencia legitimamente no aplica — pero no habia forma de saberlo.
+#
+# `cosmo_noise.NoiseSpec.metadata()` ya devolvia exactamente esto y no se
+# llamaba desde ningun sitio del repositorio.
+CSV_PROVENANCE_FIELDS = ['noise', 'proposal_route', 'seed', 'budget_mode',
+                         'circuits_train', 'chi2_grid']
+
+
+def csv_provenance(side: dict) -> dict:
+    """Valores de procedencia de una fila del CSV.
+
+    Se leen del estado global del modulo (que es donde el CLI deja el nivel de
+    ruido y la ruta de lectura) y del propio resultado, para que una fila diga
+    por si sola en que condiciones se obtuvo.
+
+    Args:
+        side: dict con las estadisticas de una fila del CSV.
+
+    Returns:
+        dict
+    """
+    return {
+        'noise': getattr(NOISE, 'label', 'none'),
+        'proposal_route': PROPOSAL_ROUTE,
+        'seed': str(side.get('seed', RUN_SEED if RUN_SEED is not None else '')),
+        'budget_mode': str(side.get('budget_mode', '')),
+        'circuits_train': str(side.get('circuits_train', '')),
+        # [B-REFINE] chi2 del mejor punto de la REJILLA, antes del refinamiento
+        # local. Solo lo llena el genetico: es el unico numero suyo que
+        # distingue un rung de otro, porque el refinador lleva a los cuatro al
+        # mismo minimo continuo.
+        'chi2_grid': (f"{side['chi2_grid']:.4f}"
+                      if isinstance(side.get('chi2_grid'), float)
+                      and np.isfinite(side['chi2_grid']) else ''),
+    }
+
 def csv_fields_for_model(model) -> list:
     """The CSV column schema for a given model: one mean/std pair per parameter.
 
@@ -2400,12 +2913,19 @@ def csv_fields_for_model(model) -> list:
     Used for the PER-RUN CSV (one model per run → named, fully readable
     columns). The cumulative cross-run file uses `csv_fields_generic()` instead,
     because there different models with different parameters share one file.
+
+    Args:
+        model: modelo cosmologico (`cosmo_core.CosmoModel`).
+
+    Returns:
+        list
     """
     fields = ['Method']
     for p in model.param_names:
         fields += [f'{p}_mean', f'{p}_std']
     fields += ['Time_s', 'nqpp', 'chi2', 'n_data', 'chi2_red', 'AIC', 'BIC',
                'acceptance', 'final_KL', 'ESS', 'dataset', 'prior']
+    fields += CSV_PROVENANCE_FIELDS                      # [B-PROV]
     return fields
 
 
@@ -2427,6 +2947,7 @@ def csv_fields_generic() -> list:
         fields += [f'p{i}_mean', f'p{i}_std']
     fields += ['Time_s', 'nqpp', 'chi2', 'n_data', 'chi2_red', 'AIC', 'BIC',
                'acceptance', 'final_KL', 'ESS', 'dataset', 'prior']
+    fields += CSV_PROVENANCE_FIELDS                      # [B-PROV]
     return fields
 
 
@@ -2436,6 +2957,18 @@ def csv_row_generic(side: dict, model, method_label: str, is_mcmc: bool,
 
     The parameter values go into p1..pN slots and `params` names them, so the
     row is self-describing regardless of model.
+
+    Args:
+        side: dict con las estadisticas de una fila del CSV.
+        model: modelo cosmologico (`cosmo_core.CosmoModel`).
+        method_label: etiqueta del metodo tal como va al CSV.
+        is_mcmc: True si la fila viene de un muestreador MCMC.
+        nqpp: qubits por parametro (rejilla de 2^nqpp por eje).
+        dataset_label: nombre del dataset, tal como va al CSV.
+        prior_type: 'flat' o 'gaussian'.
+
+    Returns:
+        dict
     """
     mu, sd = side['mu'], side['std']
     row = {'Method': method_label, 'model': model.name,
@@ -2461,6 +2994,7 @@ def csv_row_generic(side: dict, model, method_label: str, is_mcmc: bool,
     row['ESS'] = f"{side.get('ess', float('nan')):.1f}"
     row['dataset'] = dataset_label
     row['prior'] = prior_type
+    row.update(csv_provenance(side))                     # [B-PROV]
     return row
 
 
@@ -2471,6 +3005,18 @@ def csv_row_for_side(side: dict, model, method_label: str, is_mcmc: bool,
     `side` must carry 'mu' and 'std' arrays of length model.n_params plus the
     scalar diagnostics (chi2, chi2_red, AIC, BIC, ess, and acceptance OR
     kl_final depending on the family).
+
+    Args:
+        side: dict con las estadisticas de una fila del CSV.
+        model: modelo cosmologico (`cosmo_core.CosmoModel`).
+        method_label: etiqueta del metodo tal como va al CSV.
+        is_mcmc: True si la fila viene de un muestreador MCMC.
+        nqpp: qubits por parametro (rejilla de 2^nqpp por eje).
+        dataset_label: nombre del dataset, tal como va al CSV.
+        prior_type: 'flat' o 'gaussian'.
+
+    Returns:
+        dict
     """
     pnames = model.param_names
     mu, sd = side['mu'], side['std']
@@ -2492,6 +3038,7 @@ def csv_row_for_side(side: dict, model, method_label: str, is_mcmc: bool,
     row['ESS'] = f"{side.get('ess', float('nan')):.1f}"
     row['dataset'] = dataset_label
     row['prior'] = prior_type
+    row.update(csv_provenance(side))                     # [B-PROV]
     return row
 
 
@@ -2573,6 +3120,16 @@ def append_results_csv(result_side: dict, model, dataset_label: str,
 
     This writes the NAMED per-run schema only; the cumulative file is handled
     by `write_run_and_cumulative` from main().
+
+    Args:
+        result_side: dict con las estadisticas de la corrida.
+        model: modelo cosmologico (`cosmo_core.CosmoModel`).
+        dataset_label: nombre del dataset, tal como va al CSV.
+        prior_type: 'flat' o 'gaussian'.
+        family_mcmc: resultados de la familia MCMC.
+        family_vi: resultados de la familia variacional.
+        nqpp: qubits por parametro (rejilla de 2^nqpp por eje).
+        csv_path: ruta del CSV donde escribir.
     """
     fields = csv_fields_for_model(model)
     rows = [
@@ -2614,6 +3171,10 @@ def sanity_check_routing(model_name: str = 'lcdm', nqpp: int = 2):
     3. PER-COMPONENT ROUTING TABLE — for every preset, prints which engine
        (Qiskit/Aer vs NumPy/SciPy) each component resolves to, plus a live
        trace of the first few evaluations inside the loops.
+
+    Args:
+        model_name: nombre del modelo. Por defecto 'lcdm'.
+        nqpp: qubits por parametro (rejilla de 2^nqpp por eje). Por defecto 2.
     """
     global SANITY_CHECK
     print("\n" + "=" * 70)
@@ -2767,6 +3328,15 @@ def interactive_menu() -> dict:
     # ── BENCHMARK: per-method quantumness ladders, user-chosen sizes ─────────
     if mode == 'benchmark':
         def ask_int_b(prompt, default):
+            """Lee un entero del menu del benchmark, con valor por defecto.
+
+            Args:
+                prompt: texto que se muestra al usuario.
+                default: valor que se usa si la entrada es vacia o invalida.
+
+            Returns:
+                Ver la descripcion de arriba.
+            """
             r = input(f"  {prompt} [Enter={default}]: ").strip()
             return int(r) if r.isdigit() else default
         print("\n  → Benchmark = per-method quantumness ladders.")
@@ -2807,6 +3377,15 @@ def interactive_menu() -> dict:
               "parameters for a fair benchmark.")
 
     def ask_int(prompt, default):
+        """Lee un entero del menu interactivo, con valor por defecto.
+
+        Args:
+            prompt: texto que se muestra al usuario.
+            default: valor que se usa si la entrada es vacia o invalida.
+
+        Returns:
+            Ver la descripcion de arriba.
+        """
         r = input(f"  {prompt} [Enter={default}]: ").strip()
         return int(r) if r.isdigit() else default
 
@@ -2877,7 +3456,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--steps', type=int, default=1000,
                    help='MCMC steps — applies equally to classical and quantum')
     p.add_argument('--qvmc-iter', type=int, default=300,
-                   help='Variational iterations — applies equally to classical and quantum')
+                   help='Iteraciones variacionales del rung CUANTICO. El rung '
+                        'clasico recibe el presupuesto EQUIVALENTE EN '
+                        'CIRCUITOS, no el mismo numero de iteraciones — ver '
+                        '--budget-mode.')
+    p.add_argument('--budget-mode', type=str, default='circuits',
+                   choices=('circuits', 'iters'),
+                   help="[B-BUDGET] Como se iguala el presupuesto de "
+                        "entrenamiento entre el rung clasico (COBYLA) y el "
+                        "cuantico (parameter-shift). 'circuits' (por defecto) "
+                        "da a los dos el MISMO numero de evaluaciones de "
+                        "circuito: una iteracion cuantica cuesta 1+2*n_phi "
+                        "circuitos y una clasica cuesta 1, asi que con el "
+                        "mismo --qvmc-iter la rama cuantica recibia entre 57x "
+                        "y 225x mas trabajo, y la comparacion salia sesgada A "
+                        "FAVOR de lo cuantico. 'iters' reproduce ese "
+                        "comportamiento viejo, que es el de todas las "
+                        "campanas anteriores al 2026-09-04; usalo SOLO para "
+                        "reproducirlas, nunca para una comparacion nueva.")
     p.add_argument('--burn', type=int, default=None,
                    help='Burn-in (default: 10%% of --steps)')
     p.add_argument('--nqpp', type=int, default=3,
@@ -2949,7 +3545,7 @@ def _print_summary_block(title: str, model, st: dict, extra: str,
 
 def run_sweep_all(models, dataset, prior, steps, qvmc_iter, nqpp, chains,
                   shots, seed, master_dir, logger, log_every,
-                  no_csv=False, no_plot=False):
+                  no_csv=False, no_plot=False, budget_mode='circuits'):
     """Run the full quantumness benchmark for EVERY requested model in one go.
 
     This is the HPC "launch once, get everything" mode. For each model it runs
@@ -3008,7 +3604,8 @@ def run_sweep_all(models, dataset, prior, steps, qvmc_iter, nqpp, chains,
                 post, n_steps_mcmc=steps, max_iter_qvmc=qvmc_iter, nqpp=nqpp,
                 outdir=model_dir, seed=seed, logger=logger,
                 log_every=log_every, n_chains_mcmc=chains, n_shots=shots,
-                csv_paths=csv_paths, dataset_label=dataset, prior_type=prior)
+                csv_paths=csv_paths, dataset_label=dataset, prior_type=prior,
+                budget_mode=budget_mode)
             status[model_name] = 'ok'
             say(f"[{i}/{len(models)}] {model_name}: DONE -> {model_dir}/")
         except Exception as exc:                      # keep the batch alive
@@ -3151,7 +3748,8 @@ def main():
         run_sweep_all(
             sweep_models, args.dataset, args.prior, args.steps, args.qvmc_iter,
             args.nqpp, args.chains, args.shots, args.seed, master_dir, logger,
-            args.log_every, no_csv=args.no_csv, no_plot=args.no_plot)
+            args.log_every, no_csv=args.no_csv, no_plot=args.no_plot,
+            budget_mode=getattr(args, 'budget_mode', 'circuits'))
         _finish_profile(profiler, master_dir, logger.info,
                         f"sweep-all | {len(sweep_models)} models | "
                         f"steps={args.steps} iters={args.qvmc_iter}")
@@ -3244,7 +3842,9 @@ def main():
                                outdir=args.outdir, seed=args.seed,
                                logger=logger, log_every=args.log_every,
                                csv_paths=csv_paths, dataset_label=dataset,
-                               prior_type=prior)
+                               prior_type=prior,
+                               budget_mode=getattr(args, 'budget_mode',
+                                                   'circuits'))
         _finish_profile(profiler, args.outdir, say,
                         f"{model.label} benchmark | steps={steps} "
                         f"iters={qvmc_iter} nqpp={nqpp}")

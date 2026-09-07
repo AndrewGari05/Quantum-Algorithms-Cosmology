@@ -1,31 +1,28 @@
-# =============================================================================
-#  cosmo_profiling.py — Resource profiling (CPU/GPU memory, wall time, GPU-hours)
-# =============================================================================
-#
-#  PURPOSE.  To plan and justify the compute footprint of the pipeline on an
-#  HPC cluster (Nicte-Ha at IBERO, and the new RTX PRO 6000 / NVIDIA cluster),
-#  every run can now be PROFILED: peak host (RAM) memory, peak device (VRAM)
-#  memory when a GPU is used, wall-clock time, and the derived GPU-hours.
-#
-#  WHAT IT PRODUCES.
-#    * A background sampler thread records (t, RSS_MB, VRAM_MB, host_%, gpu_%)
-#      at a fixed cadence with negligible overhead.
-#    * A summary dict: peak RSS, peak VRAM, wall time, GPU-hours, mean GPU util.
-#    * A figure `resource_usage_<tag>.png` with two stacked panels:
-#        - memory (host RSS and, if present, device VRAM) vs time,
-#        - utilization (host CPU% and GPU%) vs time,
-#      annotated with the peaks and the GPU-hours, saved next to the run's
-#      other outputs (works headless — uses whatever backend is active).
-#
-#  DEPENDENCIES.  `psutil` for host memory/CPU (already a common dependency).
-#  GPU metrics use NVIDIA's NVML through `pynvml` if installed, else a parse of
-#  `nvidia-smi`; if neither is available the GPU panel is simply omitted, so the
-#  profiler NEVER breaks a CPU-only run (e.g. on Nicte-Ha without GPUs).
-#
-#  This module is import-safe everywhere and has no project dependencies, so it
-#  can be reused by cosmo_modular_quantum.py and cosmo_genetic_optimizers.py.
-# =============================================================================
+""" cosmo_profiling.py — Resource profiling (CPU/GPU memory, wall time, GPU-hours)
 
+ PURPOSE.  To plan and justify the compute footprint of the pipeline on an
+ HPC cluster (Nicte-Ha at IBERO, and the new RTX PRO 6000 / NVIDIA cluster),
+ every run can now be PROFILED: peak host (RAM) memory, peak device (VRAM)
+ memory when a GPU is used, wall-clock time, and the derived GPU-hours.
+
+ WHAT IT PRODUCES.
+   * A background sampler thread records (t, RSS_MB, VRAM_MB, host_%, gpu_%)
+     at a fixed cadence with negligible overhead.
+   * A summary dict: peak RSS, peak VRAM, wall time, GPU-hours, mean GPU util.
+   * A figure `resource_usage_<tag>.png` with two stacked panels:
+       - memory (host RSS and, if present, device VRAM) vs time,
+       - utilization (host CPU% and GPU%) vs time,
+     annotated with the peaks and the GPU-hours, saved next to the run's
+     other outputs (works headless — uses whatever backend is active).
+
+ DEPENDENCIES.  `psutil` for host memory/CPU (already a common dependency).
+ GPU metrics use NVIDIA's NVML through `pynvml` if installed, else a parse of
+ `nvidia-smi`; if neither is available the GPU panel is simply omitted, so the
+ profiler NEVER breaks a CPU-only run (e.g. on Nicte-Ha without GPUs).
+
+ This module is import-safe everywhere and has no project dependencies, so it
+ can be reused by cosmo_modular_quantum.py and cosmo_genetic_optimizers.py.
+"""
 from __future__ import annotations
 
 import os
@@ -59,6 +56,7 @@ class _GPUMonitor:
     """
 
     def __init__(self):
+        """Detecta si hay GPU legible, primero por NVML y si no por nvidia-smi."""
         self.available = False
         self._backend = None
         self._handle = None
@@ -66,6 +64,7 @@ class _GPUMonitor:
         self._init_nvml() or self._init_smi()
 
     def _init_nvml(self) -> bool:
+        """Intenta inicializar pynvml. True si hay al menos una GPU visible."""
         try:
             import pynvml
             pynvml.nvmlInit()
@@ -80,6 +79,7 @@ class _GPUMonitor:
             return False
 
     def _init_smi(self) -> bool:
+        """Respaldo por `nvidia-smi` cuando pynvml no esta disponible."""
         if shutil.which('nvidia-smi') is None:
             return False
         try:
@@ -146,6 +146,7 @@ class _GPUMonitor:
             return 0.0, 0.0
 
     def close(self):
+        """Cierra NVML si se llego a inicializar. Seguro de llamar varias veces."""
         if self._backend == 'nvml' and self._pynvml is not None:
             try:
                 self._pynvml.nvmlShutdown()
@@ -223,6 +224,13 @@ class ResourceProfiler:
 
     def __init__(self, tag: str = 'run', device: str = 'CPU',
                  interval: float = 0.25):
+        """Perfilador de recursos de un proceso y sus hijos.
+
+        Args:
+            tag: etiqueta que va al nombre de los archivos de salida.
+            device: 'CPU' o 'GPU', solo para etiquetar el informe.
+            interval: segundos entre muestras.
+        """
         self.tag = tag
         self.device = device
         self.interval = float(interval)
@@ -236,6 +244,7 @@ class ResourceProfiler:
 
     def _loop(self):
         # Prime cpu_percent (first call returns 0.0 by design).
+        """Bucle del hilo de muestreo: RSS, CPU y memoria de GPU."""
         if self._proc is not None:
             self._proc.cpu_percent(None)
         while not self._stop.is_set():
@@ -286,6 +295,14 @@ class ResourceProfiler:
 
         Uses the Matplotlib backend already active (Agg on HPC), so it is safe
         headless. Returns the PNG path, or None if there were no samples.
+
+        Args:
+            result: `GAResult` de una corrida del genetico.
+            outdir: carpeta donde escribir la salida.
+            title_extra: texto extra para el titulo. Por defecto ''.
+
+        Returns:
+            Optional[str]
         """
         if result.n_samples == 0:
             return None
@@ -340,7 +357,14 @@ class ResourceProfiler:
 
 
 def summarize(result: ProfileResult) -> str:
-    """One-line human summary for logs/console."""
+    """One-line human summary for logs/console.
+
+    Args:
+        result: `GAResult` de una corrida del genetico.
+
+    Returns:
+        str
+    """
     s = (f"[profile] {result.tag}: wall={result.wall_s:.1f}s  "
          f"peak_RSS={result.peak_rss_mb:.0f}MB  device={result.device}")
     if result.device == 'GPU':

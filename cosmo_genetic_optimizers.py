@@ -1,75 +1,71 @@
-# =============================================================================
-#  cosmo_genetic_optimizers.py — Classical & Quantum Genetic Algorithms (CGA/QGA)
-# =============================================================================
-#
-#  PHASE 2 of the project: GLOBAL OPTIMIZATION FOR THE MAP.
-#
-#  This module adds two GLOBAL optimizers that locate the Maximum A Posteriori
-#  (MAP) of the cosmological posterior — to be used BEFORE or IN PARALLEL with
-#  the MCMC/VI samplers of `cosmo_modular_quantum.py`:
-#
-#    * CGA — Classical Genetic Algorithm, written from scratch (NO black-box
-#            library such as DEAP/PyGAD), fully vectorized with NumPy.
-#    * QGA — Quantum Genetic Algorithm built with Qiskit, with a MODULAR
-#            "quantumness" system: quantum initialization, quantum mutation
-#            and quantum crossover can each be toggled on/off independently.
-#
-#  [ARCH] STRICT REUSE OF THE EXISTING PHYSICS.
-#         The fitness is NOTHING but the cosmological posterior already
-#         structured in `cosmo_core.py`. We never re-derive a χ²: we call the
-#         SAME `Posterior.log_prob` / `Posterior.log_prob_batch` (CC + Pantheon+
-#         likelihoods, analytic M_abs marginalization, box/Gaussian priors) and
-#         the SAME `fit_statistics` (χ², χ²_red, AIC, BIC). The genetic fitness
-#         is  f(θ) = log P(θ | data) = −½ χ²(θ) + log prior(θ),  so MAXIMIZING
-#         the genetic fitness ≡ MINIMIZING χ² under the prior ≡ finding the MAP.
-#         Adding a new model (VC, …) requires ZERO changes here: it inherits
-#         straight from `cosmo_core.MODELS`.
-#
-#  [QUANT] The "quantumness" of the QGA reuses the same philosophy as the
-#         sampler module: a weighted 0–100 % score over independently
-#         switchable quantum components, so a 0 % QGA is bit-compatible with
-#         the CGA code path and serves as the mandatory classical baseline.
-#
-#  [GUI]  LIVE VISUALIZATION (interactive mode ONLY): a two-panel Matplotlib
-#         window updated every generation —
-#           * Phase-space panel  : population scatter converging to the MAP
-#                                   in (Ωm, H0) [or the first two parameters].
-#           * Fitness panel      : best χ² and mean χ² vs generation.
-#         with dynamic text (generation, best χ², current physical values).
-#
-#  [PLOT] After evolution, the result plugs into the EXISTING visualization
-#         pipeline: fitness-weighted corner plot of the final population, and
-#         an OVERLAY option that superimposes the genetic MAP + final spread
-#         on top of the MCMC/VI corner plots (reusing `plot_corner_multi`).
-#
-#  [CSV]  The MAP and its final χ² are appended to `resultados_config.csv`
-#         under "Method" = "CGA" / "QGA (q=NN%)", matching the schema written
-#         by `lcdm_quantum_samplers_personal.py` so all runs share one table.
-#
-#  [CLI]  argparse extended with the genetic methods and hyperparameters
-#           --methods cga qga    --generations N    --population-size N    …
-#         CRITICAL RULE: when launched from the CLI with arguments
-#         (batch / HPC mode) the live animation is DISABLED automatically and
-#         the generational progress is written to the LOG every N generations.
-#
-#  Usage:
-#    python cosmo_genetic_optimizers.py                       # interactive menu
-#    python cosmo_genetic_optimizers.py --methods cga --model lcdm --generations 80
-#    python cosmo_genetic_optimizers.py --methods cga qga --dataset CC+Pantheon+ \
-#           --population-size 200 --generations 120 --qga-preset 67
-# =============================================================================
+""" cosmo_genetic_optimizers.py — Classical & Quantum Genetic Algorithms (CGA/QGA)
 
+ PHASE 2 of the project: GLOBAL OPTIMIZATION FOR THE MAP.
+
+ This module adds two GLOBAL optimizers that locate the Maximum A Posteriori
+ (MAP) of the cosmological posterior — to be used BEFORE or IN PARALLEL with
+ the MCMC/VI samplers of `cosmo_modular_quantum.py`:
+
+   * CGA — Classical Genetic Algorithm, written from scratch (NO black-box
+           library such as DEAP/PyGAD), fully vectorized with NumPy.
+   * QGA — Quantum Genetic Algorithm built with Qiskit, with a MODULAR
+           "quantumness" system: quantum initialization, quantum mutation
+           and quantum crossover can each be toggled on/off independently.
+
+ [ARCH] STRICT REUSE OF THE EXISTING PHYSICS.
+        The fitness is NOTHING but the cosmological posterior already
+        structured in `cosmo_core.py`. We never re-derive a χ²: we call the
+        SAME `Posterior.log_prob` / `Posterior.log_prob_batch` (CC + Pantheon+
+        likelihoods, analytic M_abs marginalization, box/Gaussian priors) and
+        the SAME `fit_statistics` (χ², χ²_red, AIC, BIC). The genetic fitness
+        is  f(θ) = log P(θ | data) = −½ χ²(θ) + log prior(θ),  so MAXIMIZING
+        the genetic fitness ≡ MINIMIZING χ² under the prior ≡ finding the MAP.
+        Adding a new model (VC, …) requires ZERO changes here: it inherits
+        straight from `cosmo_core.MODELS`.
+
+ [QUANT] The "quantumness" of the QGA reuses the same philosophy as the
+        sampler module: a weighted 0–100 % score over independently
+        switchable quantum components, so a 0 % QGA is bit-compatible with
+        the CGA code path and serves as the mandatory classical baseline.
+
+ [GUI]  LIVE VISUALIZATION (interactive mode ONLY): a two-panel Matplotlib
+        window updated every generation —
+          * Phase-space panel  : population scatter converging to the MAP
+                                  in (Ωm, H0) [or the first two parameters].
+          * Fitness panel      : best χ² and mean χ² vs generation.
+        with dynamic text (generation, best χ², current physical values).
+
+ [PLOT] After evolution, the result plugs into the EXISTING visualization
+        pipeline: fitness-weighted corner plot of the final population, and
+        an OVERLAY option that superimposes the genetic MAP + final spread
+        on top of the MCMC/VI corner plots (reusing `plot_corner_multi`).
+
+ [CSV]  The MAP and its final χ² are appended to `resultados_config.csv`
+        under "Method" = "CGA" / "QGA (q=NN%)", matching the schema written
+        by `lcdm_quantum_samplers_personal.py` so all runs share one table.
+
+ [CLI]  argparse extended with the genetic methods and hyperparameters
+          --methods cga qga    --generations N    --population-size N    …
+        CRITICAL RULE: when launched from the CLI with arguments
+        (batch / HPC mode) the live animation is DISABLED automatically and
+        the generational progress is written to the LOG every N generations.
+
+ Usage:
+   python cosmo_genetic_optimizers.py                       # interactive menu
+   python cosmo_genetic_optimizers.py --methods cga --model lcdm --generations 80
+   python cosmo_genetic_optimizers.py --methods cga qga --dataset CC+Pantheon+ \
+          --population-size 200 --generations 120 --qga-preset 67
+"""
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import sys
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -81,7 +77,6 @@ import numpy as np
 #     calls ensure_interactive_backend() to guarantee a real GUI window.
 import matplotlib
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 
 # [A5] Scope warning suppression to benign library categories only; let
 # numerical RuntimeWarnings (overflow/invalid) surface — they signal real
@@ -202,6 +197,12 @@ def ensure_interactive_backend() -> bool:
     backend = matplotlib.get_backend().lower()
 
     def _works() -> bool:
+        """True si matplotlib puede abrir de verdad una ventana.
+
+        No basta con mirar variables de entorno: en un nodo de HPC pueden estar
+        puestas y no haber servidor grafico. Se abre una figura de 1x1 y se
+        cierra; si el toolkit falta o no hay display, levanta y devolvemos False.
+        """
         # A real smoke test: open a 1x1 figure and close it. If the toolkit is
         # missing or there is no display, this raises and we move on.
         try:
@@ -354,14 +355,40 @@ QGA_PRESETS: Dict[int, dict] = {
 
 
 def compute_qga_quantumness(config: dict) -> float:
-    """QGA ablation index: 100 · (#quantum operators)/3 (uniform weighting)."""
+    """QGA ablation index: 100 · (#quantum operators)/3 (uniform weighting).
+
+    Args:
+        config: que componentes del algoritmo son cuanticos.
+
+    Returns:
+        float
+    Examples:
+        Tres operadores conmutables, asi que los peldanos son 0, 33, 67 y
+        100 %. El de 0 % es la celda FAITHFUL: debe reproducir al CGA bit a
+        bit, y eso es un test de correccion falsable, no una expectativa.
+
+        >>> compute_qga_quantumness({})
+        0.0
+        >>> compute_qga_quantumness({'q_init': True})
+        33.3
+        >>> compute_qga_quantumness({'q_init': True, 'q_mutation': True,
+        ...                          'q_crossover': True})
+        100.0
+    """
     n_total = len(QGA_COMPONENTS)
     n_quantum = sum(1 for k in QGA_COMPONENTS if config.get(k, False))
     return round(100.0 * n_quantum / n_total, 1)
 
 
 def legacy_qga_weighted_index(config: dict) -> float:
-    """Historical hand-weighted QGA index (heuristic; CSV continuity only)."""
+    """Historical hand-weighted QGA index (heuristic; CSV continuity only).
+
+    Args:
+        config: que componentes del algoritmo son cuanticos.
+
+    Returns:
+        float
+    """
     total = sum(_LEGACY_QGA_WEIGHTS.values())
     earned = sum(_LEGACY_QGA_WEIGHTS[k] for k in _LEGACY_QGA_WEIGHTS
                  if config.get(k, False))
@@ -423,6 +450,13 @@ class GeneticBase:
 
     def __init__(self, post: Posterior, ga: GAConfig,
                  rng: Optional[np.random.Generator] = None):
+        """Algoritmo genetico clasico sobre el posterior.
+
+        Args:
+            post: posterior objetivo.
+            ga: hiperparametros (poblacion, generaciones, elitismo, mutacion).
+            rng: generador ya sembrado; None crea uno con `ga.seed`.
+        """
         self.post = post
         self.model = post.model
         self.d = self.model.n_params
@@ -449,6 +483,12 @@ class GeneticBase:
         entry point the samplers use: `Posterior.log_prob_batch` (CC + Pantheon+
         likelihoods, prior, box mask). Out-of-box individuals get −inf and are
         naturally purged by selection.
+
+        Args:
+            pop: poblacion actual, de forma (P, d).
+
+        Returns:
+            np.ndarray
         """
         return self.post.log_prob_batch(pop)
 
@@ -459,6 +499,12 @@ class GeneticBase:
         With a Gaussian prior this is χ² + prior penalty; we still label the
         fitness panel "χ²" because under the default flat prior it is the
         genuine χ², and the offset is irrelevant for monitoring convergence.
+
+        Args:
+            logp: log-posterior.
+
+        Returns:
+            np.ndarray
         """
         return -2.0 * logp
 
@@ -475,6 +521,14 @@ class GeneticBase:
 
         Draws (n, k) random contenders and keeps, per row, the one with the
         highest fitness. Fully vectorized — no Python loop over individuals.
+
+        Args:
+            pop: poblacion actual, de forma (P, d).
+            fit: log-posterior de cada individuo de la poblacion.
+            n: tamano de la muestra o del torneo.
+
+        Returns:
+            np.ndarray
         """
         k = self.ga.tournament_k
         idx = self.rng.integers(0, len(pop), size=(n, k))
@@ -491,6 +545,13 @@ class GeneticBase:
         a random convex blend  α·a + (1−α)·b  (BLX-style, α∼U(0,1) per gene).
         Otherwise the child copies parent A. Operates on the whole batch at
         once.
+
+        Args:
+            parents_a: primer conjunto de padres.
+            parents_b: segundo conjunto de padres.
+
+        Returns:
+            np.ndarray
         """
         P, d = parents_a.shape
         do = self.rng.uniform(0, 1, size=P) < self.ga.crossover_rate
@@ -501,7 +562,14 @@ class GeneticBase:
 
     # ── classical mutation (CGA; QGA may override) ───────────────────────────
     def mutate_classical(self, pop: np.ndarray) -> np.ndarray:
-        """Per-gene Gaussian mutation scaled by each box width, vectorized."""
+        """Per-gene Gaussian mutation scaled by each box width, vectorized.
+
+        Args:
+            pop: poblacion actual, de forma (P, d).
+
+        Returns:
+            np.ndarray
+        """
         P, d = pop.shape
         mask = self.rng.uniform(0, 1, size=(P, d)) < self.ga.mutation_rate
         sigma = self.ga.mutation_scale * self.width            # (d,)
@@ -526,9 +594,15 @@ class GAResult:
     Attributes:
         method: 'CGA' or 'QGA'.
         quantumness: 0–100 % (0 for CGA).
-        theta_map: Best individual found (the MAP estimate).
-        chi2_map: χ² at the MAP (from `fit_statistics`, locally refined).
-        stats: Full `fit_statistics` dict at the MAP (χ², χ²_red, AIC, BIC…).
+        theta_map: MAP tras el refinamiento local continuo. Es lo comparable
+            contra los samplers, pero [B-REFINE] NO distingue un rung de otro:
+            el refinador converge al mismo minimo desde cualquier celda.
+        chi2_map: χ² en `theta_map` (refinado).
+        stats: dict completo de `fit_statistics` en el MAP (χ², χ²_red, AIC, BIC…).
+        theta_grid: [B-REFINE] mejor individuo de la REJILLA, SIN refinar. Es lo
+            que el genetico encontro de verdad, y el unico de los dos que
+            distingue los peldanos de la escalera.
+        chi2_grid: χ² en `theta_grid`.
         final_pop: (P, d) last-generation population.
         final_fit: (P,) log-posterior fitness of the last population.
         final_weights: (P,) normalized fitness weights (for weighted corner).
@@ -554,6 +628,18 @@ class GAResult:
     label: str = ''
     pop_history: List[np.ndarray] = field(default_factory=list)
     fit_history: List[np.ndarray] = field(default_factory=list)
+    # [B-REFINE] Al final y con valor por defecto para no romper ningun
+    # constructor existente. `None` significa "no se registro", y entonces se
+    # cae al MAP refinado, que es lo unico disponible.
+    theta_grid: Optional[np.ndarray] = None
+    chi2_grid: float = float('nan')
+
+    def __post_init__(self):
+        """Rellena la rejilla con el MAP si el llamador no la dio."""
+        if self.theta_grid is None:
+            self.theta_grid = np.asarray(self.theta_map, dtype=float)
+        if not np.isfinite(self.chi2_grid):
+            self.chi2_grid = float(self.chi2_map)
 
 
 def _fitness_weights(fit: np.ndarray) -> np.ndarray:
@@ -589,12 +675,30 @@ class GeneticEvolver(GeneticBase):
 
     # Subclasses override these three to switch an operator to quantum.
     def do_init(self) -> np.ndarray:
+        """Poblacion inicial. En el CGA es la clasica; el QGA la sobreescribe."""
         return self.init_population()
 
     def do_crossover(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Cruce de dos padres. Punto de sustitucion de la escalera cuantica.
+
+        Args:
+            a: primer padre del cruce.
+            b: segundo padre del cruce.
+
+        Returns:
+            np.ndarray
+        """
         return self.crossover_classical(a, b)
 
     def do_mutate(self, pop: np.ndarray) -> np.ndarray:
+        """Mutacion de la poblacion. Punto de sustitucion de la escalera.
+
+        Args:
+            pop: poblacion actual, de forma (P, d).
+
+        Returns:
+            np.ndarray
+        """
         return self.mutate_classical(pop)
 
     # ── the main evolutionary loop ───────────────────────────────────────────
@@ -684,9 +788,35 @@ class GeneticEvolver(GeneticBase):
                     print(msg)
 
         # ── finalize: refine the MAP with the SAME fit_statistics as samplers
+        #
+        # [B-REFINE] OJO con lo que significa el chi2 que sale de aqui.
+        #
+        # El genetico devuelve un punto de la REJILLA. Despues, este bloque lo
+        # refina localmente con `fit_statistics(refine=True)`, que es un
+        # optimizador continuo. Ese refinamiento **borra la diferencia entre
+        # rungs**: medido con lcdm/CC+BAO, n_bits=4, 8 generaciones, los cuatro
+        # peldanos aterrizan en celdas de rejilla DISTINTAS,
+        #
+        #     q=  0%   [0.26496, 70.3148]   chi2 = 27.6502
+        #     q= 33%   [0.25769, 70.6918]   chi2 = 27.4717
+        #     q= 67%   [0.27000, 70.3125]   chi2 = 28.3992
+        #     q=100%   [0.27000, 70.3125]   chi2 = 28.3992
+        #
+        # o sea con un rango de 0.93 en chi2 entre el mejor y el peor rung —
+        # pero tras refinar los cuatro dan chi2 = 27.469109, IDENTICO a la
+        # sexta cifra. Eso explica por que en las campanas publicadas el chi2
+        # del genetico sale byte a byte igual en CGA y en los cuatro rungs del
+        # QGA: no es que los operadores cuanticos reproduzcan al clasico, es
+        # que el refinador converge al mismo minimo desde donde sea.
+        #
+        # Refinar NO es un error — el chi2/AIC/BIC refinado es el que hay que
+        # comparar contra los samplers, y por eso se conserva. El error seria
+        # leer esas columnas como si midieran al genetico. Las que SI lo miden
+        # son las de la rejilla, que a partir de ahora tambien se reportan.
         best_i = int(np.argmax(fit))
-        theta_map = pop[best_i].copy()
-        stats = fit_statistics(self.post, theta_map, refine=True)
+        theta_grid = pop[best_i].copy()
+        chi2_grid = float(self.post.chi2(theta_grid)[0])
+        stats = fit_statistics(self.post, theta_grid, refine=True)
         theta_map = np.asarray(stats['theta_best'], dtype=float)
         weights = _fitness_weights(fit)
         elapsed = time.time() - t0
@@ -695,6 +825,11 @@ class GeneticEvolver(GeneticBase):
             f"MAP: {fmt_theta(self.model, theta_map)} | "
             f"χ²={stats['chi2']:.3f}  χ²_red={stats['chi2_red']:.3f}  "
             f"AIC={stats['AIC']:.2f}  BIC={stats['BIC']:.2f}")
+        # [B-REFINE] Lo que encontro el genetico ANTES de refinar. Es el unico
+        # numero de esta linea que distingue un rung de otro.
+        say(f"[{self.method_name}]   mejor de la rejilla (SIN refinar): "
+            f"{fmt_theta(self.model, theta_grid)} | χ²={chi2_grid:.3f} "
+            f"(el refinamiento lo mejoro en {chi2_grid - stats['chi2']:+.3f})")
 
         if live and gui is not None:
             snap = None
@@ -710,6 +845,7 @@ class GeneticEvolver(GeneticBase):
         return GAResult(
             method=self.method_name, quantumness=self.quantumness,
             theta_map=theta_map, chi2_map=float(stats['chi2']), stats=stats,
+            theta_grid=theta_grid, chi2_grid=chi2_grid,
             final_pop=pop, final_fit=fit, final_weights=weights,
             history=history, elapsed=elapsed, config=dict(self.config),
             label=self._label(),
@@ -777,7 +913,9 @@ try:
     from qiskit import QuantumCircuit, transpile
     from qiskit.circuit import ParameterVector
     from qiskit.circuit.library import UnitaryGate
-    from qiskit_aer import AerSimulator
+    from qiskit_aer import AerSimulator            # noqa: F401  (sonda de
+    # disponibilidad: si este import falla, _QISKIT_OK queda en False y todo
+    # el modulo cae a la ruta clasica)
 except Exception:                                       # pragma: no cover
     _QISKIT_OK = False
 
@@ -802,6 +940,21 @@ class QGA(GeneticEvolver):
     def __init__(self, post: Posterior, ga: GAConfig, config: dict,
                  n_bits: int = 6, rng: Optional[np.random.Generator] = None,
                  shots: int = 1, crossover_alpha: float = 0.5):
+        """Algoritmo genetico con operadores cuanticos conmutables.
+
+        Args:
+            post: posterior objetivo.
+            ga: hiperparametros del genetico.
+            config: que operadores son cuanticos ('init', 'crossover', 'mutation').
+            n_bits: qubits por parametro (rejilla de 2^n_bits por eje).
+            rng: generador compartido con el CGA, para que la celda faithful
+                (q=0%) reproduzca al clasico bit a bit.
+            shots: disparos por circuito.
+            crossover_alpha: mezcla del cruce cuantico.
+
+        Raises:
+            RuntimeError: si Qiskit o qiskit-aer no estan instalados.
+        """
         super().__init__(post, ga, rng)
         if not _QISKIT_OK:
             raise RuntimeError(
@@ -973,7 +1126,14 @@ class QGA(GeneticEvolver):
 
     # ── operator 2: quantum mutation ─────────────────────────────────────────
     def do_mutate(self, pop: np.ndarray) -> np.ndarray:
-        """Coherent RY mutation on gene-qubits (or classical if disabled)."""
+        """Coherent RY mutation on gene-qubits (or classical if disabled).
+
+        Args:
+            pop: poblacion actual, de forma (P, d).
+
+        Returns:
+            np.ndarray
+        """
         if not self.config.get('q_mutation', False):
             return self.mutate_classical(pop)
 
@@ -1040,7 +1200,15 @@ class QGA(GeneticEvolver):
 
     # ── operator 3: quantum crossover ────────────────────────────────────────
     def do_crossover(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        """Entangling crossover of parent pairs (or classical if disabled)."""
+        """Entangling crossover of parent pairs (or classical if disabled).
+
+        Args:
+            a: primer padre del cruce.
+            b: segundo padre del cruce.
+
+        Returns:
+            np.ndarray
+        """
         if not self.config.get('q_crossover', False):
             return self.crossover_classical(a, b)
 
@@ -1109,6 +1277,14 @@ class LiveGA:
 
     def __init__(self, model, method_name: str, quantumness: float,
                  pause: float = 0.05):
+        """Ventana en vivo de la evolucion del genetico.
+
+        Args:
+            model: modelo cosmologico activo.
+            method_name: 'CGA' o 'QGA', para el titulo.
+            quantumness: porcentaje de componentes cuanticos.
+            pause: segundos entre refrescos.
+        """
         self.model = model
         self.method = method_name
         self.qpct = quantumness
@@ -1176,7 +1352,16 @@ class LiveGA:
 
     def update(self, gen: int, pop: np.ndarray, fit: np.ndarray,
                theta_best: np.ndarray, best_chi2: float, mean_chi2: float):
-        """Refresh both panels with the current generation (no-op if closed)."""
+        """Refresh both panels with the current generation (no-op if closed).
+
+        Args:
+            gen: numero de generacion.
+            pop: poblacion actual, de forma (P, d).
+            fit: log-posterior de cada individuo de la poblacion.
+            theta_best: mejor punto de esta generacion.
+            best_chi2: mejor chi2 de la poblacion.
+            mean_chi2: chi2 medio de la poblacion.
+        """
         if self.closed:
             return
         finite = np.isfinite(fit)
@@ -1218,7 +1403,14 @@ class LiveGA:
 
     def finalize(self, theta_map: np.ndarray, chi2_map: float,
                  save_path: Optional[str] = None):
-        """Mark the final MAP, optionally save a snapshot, keep window open."""
+        """Mark the final MAP, optionally save a snapshot, keep window open.
+
+        Args:
+            theta_map: estimacion puntual (MAP).
+            chi2_map: chi2 en el MAP.
+            save_path: ruta donde guardar la figura; None no la guarda. Por
+                defecto None.
+        """
         if not self.closed:
             self._best_pt.set_data(
                 [theta_map[0]],
@@ -1263,6 +1455,16 @@ def plot_population_corner(result: GAResult, model, outdir: str,
     sampler figures exactly. The single dataset is the last-generation
     population, weighted by the softmax fitness weights, with the MAP overplotted
     as a marker via corner's truth lines.
+
+    Args:
+        result: `GAResult` de una corrida del genetico.
+        model: modelo cosmologico (`cosmo_core.CosmoModel`).
+        outdir: carpeta donde escribir la salida.
+        tag: etiqueta corta que va al nombre de archivo y a los mensajes. Por
+            defecto None.
+
+    Returns:
+        str
     """
     os.makedirs(outdir, exist_ok=True)
     tag = tag or f"{model.name}_{result.method.lower()}_q{int(result.quantumness):03d}"
@@ -1352,6 +1554,7 @@ def plot_genetic_convergence(results, model, outdir: str,
     # realidad es el resultado. Se detecta y se anota en la leyenda, y se
     # dibuja con grosor decreciente para que la de abajo asome como halo.
     def _traj(r):
+        """Trayectoria (n_gen, d) del mejor individuo de un rung."""
         return np.array([h['theta_best'] for h in r.history], float)
 
     coincide = {}
@@ -1362,6 +1565,7 @@ def plot_genetic_convergence(results, model, outdir: str,
                 coincide.setdefault(order[b].label, []).append(order[a].label)
 
     def _label(r):
+        """Etiqueta del rung, con la marca ≡ si coincide con otro bit a bit."""
         same = coincide.get(r.label)
         return f"{r.label}  ≡ {same[0]}" if same else r.label
 
@@ -1708,6 +1912,14 @@ def animate_genetic_evolution(results, model, outdir: str,
     title = fig.suptitle('', fontsize=13, fontweight='bold')
 
     def draw(k):
+        """Dibuja el cuadro k de la animacion (generacion frames[k]).
+
+        Args:
+            k: indice del cuadro o del elemento.
+
+        Returns:
+            Ver la descripcion de arriba.
+        """
         g = frames[k]
         finals = []
         for r in usable:
@@ -1865,6 +2077,16 @@ def plot_fitness_curve(results: Sequence[GAResult], outdir: str,
 
     Overlays several runs (e.g. CGA vs QGA at various quantumness levels) so
     convergence speed and final χ² are directly comparable.
+
+    Args:
+        results: resultados de todos los rungs.
+        outdir: carpeta donde escribir la salida.
+        model: modelo cosmologico (`cosmo_core.CosmoModel`).
+        tag: etiqueta corta que va al nombre de archivo y a los mensajes. Por
+            defecto None.
+
+    Returns:
+        str
     """
     os.makedirs(outdir, exist_ok=True)
     tag = tag or f"{model.name}_fitness"
@@ -1927,6 +2149,8 @@ def _ga_side(result: GAResult, post: Posterior) -> dict:
     st = result.stats
     return {
         'mu': mu, 'std': std, 'elapsed': result.elapsed,
+        # [B-REFINE] El chi2 de la rejilla es el unico que distingue rungs.
+        'chi2_grid': float(getattr(result, 'chi2_grid', float('nan'))),
         'chi2': st['chi2'], 'n_data': st['n_data'],
         'chi2_red': st['chi2_red'], 'AIC': st['AIC'], 'BIC': st['BIC'],
         'ess': ess_weights(w),
@@ -1953,6 +2177,21 @@ def append_results_csv(result: GAResult, post: Posterior,
 
     "Method" is 'CGA' or 'QGA (q=NN%)'. The qubits-per-parameter (n_bits) is
     written in the nqpp column for a QGA, '—' for the classical CGA.
+
+    Args:
+        result: `GAResult` de una corrida del genetico.
+        post: posterior cosmologico activo (`cosmo_core.Posterior`).
+        dataset_label: nombre del dataset, tal como va al CSV.
+        prior_type: 'flat' o 'gaussian'.
+        run_csv: CSV de esta corrida, dentro de su propia carpeta. Por defecto
+            'resultados_config.csv'.
+        cumulative_csv: CSV acumulado compartido entre corridas. Por defecto
+            'resultados_config.csv'.
+        n_bits: bits por parametro en la codificacion del genetico. Por
+            defecto None.
+
+    Returns:
+        str
     """
     side = _ga_side(result, post)
     model = post.model
@@ -1975,7 +2214,6 @@ def append_results_csv(result: GAResult, post: Posterior,
                     for (s, lbl, mc, nq) in side_rows]
         _cmq()._write_csv_rows(gen_rows, gen_fields, cumulative_csv)
     return run_csv
-    return csv_path
 
 
 # =============================================================================
@@ -2000,7 +2238,8 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
                 logger=None, log_every: int = 10, shots: int = 1,
                 make_plots: bool = True, write_csv: bool = True,
                 sampler_overlay: Optional[dict] = None,
-                cumulative_csv: str = "resultados_config.csv"
+                cumulative_csv: str = "resultados_config.csv",
+                save_state: bool = True
                 ) -> Dict[str, GAResult]:
     """Run the requested genetic optimizers and wire results into the pipeline.
 
@@ -2022,6 +2261,9 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
         sampler_overlay: optional dict for the all-in-one overlay (see
             `plot_overlay_with_samplers`). If provided, an overlay corner is
             also produced for each genetic result.
+        save_state: escribir `ga_state.npz` con la poblacion final y la
+            historia, para poder redibujar las figuras despues sin repetir la
+            optimizacion ([B-NOSTATE]).
 
     Returns:
         dict mapping method name -> GAResult.
@@ -2068,6 +2310,17 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
                     res, sampler_overlay, model, outdir)
                 say(f"[{res.method}] all-in-one overlay: {f2}")
 
+    # [B-NOSTATE] El estado se guarda SIEMPRE, haya figuras o no, y antes de
+    # dibujarlas: si el proceso muere renderizando (matplotlib con poca RAM,
+    # un GIF grande), los datos ya estan en disco y las figuras se rehacen con
+    # --replot en segundos.
+    if save_state:
+        state_path = save_ga_state(
+            list(results.values()), model, outdir,
+            extra={'dataset': dataset_label, 'prior': prior_type,
+                   'n_bits': n_bits, 'noise': getattr(NOISE, 'label', 'none')})
+        say(f"Estado del genetico guardado: {state_path}")
+
     if make_plots and len(results) > 1:
         # Con un solo metodo no hay nada que comparar: en --sweep-all la figura
         # conjunta la genera el llamador con todos los rungs acumulados.
@@ -2081,6 +2334,213 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
             say(f"Animation: {a}")
 
     return results
+
+
+# =============================================================================
+# 6b.  PERSISTENCIA DEL ESTADO DEL GENETICO
+# =============================================================================
+#
+# [B-NOSTATE] Por que existe esto.
+#
+# Las figuras del genetico (`plot_genetic_convergence`, `plot_fitness_curve`,
+# `animate_genetic_evolution`) se dibujan a partir de la POBLACION FINAL y de
+# la HISTORIA por generacion. Nada de eso se guardaba en disco: al terminar la
+# tarea, los arreglos morian con el proceso y solo sobrevivian el CSV y los
+# PNG ya renderizados.
+#
+# La consecuencia se descubrio al corregir [B-GAPLOT]: una figura tenia mal la
+# barra de error, y para volver a dibujarla bien HABIA QUE REPETIR LA CAMPANA
+# ENTERA. En una corrida donde una celda ruidosa a 12 qubits tarda dos dias,
+# eso convierte "cambiame el color de esta curva" en una semana de computo.
+#
+# El formato es deliberadamente aburrido y sin `pickle`: un `.npz` comprimido
+# con los arreglos y un bloque JSON con los escalares. `pickle` guardaria el
+# objeto entero en una linea, pero se rompe al cambiar de version de numpy o
+# al renombrar una clase, y estos archivos tienen que seguir abriendose dentro
+# de dos anos, cuando toque rehacer una figura para la defensa.
+#
+# Coste: ~1-3 MB por tarea comprimido. La poblacion por generacion se guarda
+# en float32 porque solo alimenta la animacion; la poblacion final, su fitness
+# y sus pesos se guardan en float64 porque de ellos salen los numeros del CSV.
+
+#: Version del formato. Sube si cambia el esquema, para que el lector avise en
+#: vez de fallar de forma rara.
+GA_STATE_VERSION = 1
+
+#: Nombre por defecto del archivo de estado dentro de la carpeta de la tarea.
+GA_STATE_FILENAME = "ga_state.npz"
+
+
+def save_ga_state(results: Sequence['GAResult'], model, outdir: str,
+                  filename: str = GA_STATE_FILENAME,
+                  extra: Optional[dict] = None) -> str:
+    """Guarda todo lo necesario para redibujar las figuras del genetico.
+
+    Args:
+        results: los `GAResult` de todos los rungs de esta configuracion.
+        model: `CosmoModel` activo (se guarda solo su identidad, no el objeto).
+        outdir: carpeta de la tarea.
+        filename: nombre del archivo.
+        extra: metadatos libres (dataset, n_bits, nivel de ruido, semilla...).
+
+    Returns:
+        Ruta del archivo escrito.
+    """
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, filename)
+
+    arrays: Dict[str, np.ndarray] = {}
+    meta: Dict[str, object] = {
+        'version': GA_STATE_VERSION,
+        'model': model.name,
+        'model_label': model.label,
+        'param_names': list(model.param_names),
+        'n_results': len(results),
+        'saved_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'results': [],
+    }
+    if extra:
+        meta['extra'] = {k: (v if isinstance(v, (int, float, str, bool,
+                                                 type(None))) else str(v))
+                         for k, v in extra.items()}
+
+    for i, r in enumerate(results):
+        p = f'r{i}_'
+        arrays[p + 'theta_map'] = np.asarray(r.theta_map, dtype=np.float64)
+        arrays[p + 'theta_grid'] = np.asarray(
+            getattr(r, 'theta_grid', r.theta_map), dtype=np.float64)
+        arrays[p + 'final_pop'] = np.asarray(r.final_pop, dtype=np.float64)
+        arrays[p + 'final_fit'] = np.asarray(r.final_fit, dtype=np.float64)
+        arrays[p + 'final_weights'] = np.asarray(r.final_weights,
+                                                 dtype=np.float64)
+        # historia: se aplana a arreglos paralelos para no depender de dicts
+        hist = list(r.history or [])
+        arrays[p + 'hist_gen'] = np.array([h['gen'] for h in hist], dtype=int)
+        arrays[p + 'hist_best_chi2'] = np.array(
+            [h.get('best_chi2', np.nan) for h in hist], dtype=np.float64)
+        arrays[p + 'hist_mean_chi2'] = np.array(
+            [h.get('mean_chi2', np.nan) for h in hist], dtype=np.float64)
+        arrays[p + 'hist_theta_best'] = (
+            np.array([h['theta_best'] for h in hist], dtype=np.float64)
+            if hist else np.zeros((0, model.n_params)))
+        # [ANIM] float32: solo alimenta la animacion, y a la mitad de tamano
+        if r.pop_history:
+            arrays[p + 'pop_history'] = np.asarray(r.pop_history,
+                                                   dtype=np.float32)
+        if r.fit_history:
+            arrays[p + 'fit_history'] = np.asarray(r.fit_history,
+                                                   dtype=np.float32)
+        meta['results'].append({
+            'method': r.method,
+            'quantumness': float(r.quantumness),
+            'label': r.label,
+            'chi2_map': float(r.chi2_map),
+            'chi2_grid': float(getattr(r, 'chi2_grid', r.chi2_map)),
+            'elapsed': float(r.elapsed),
+            'stats': {k: (float(v) if isinstance(v, (int, float, np.floating))
+                          else str(v))
+                      for k, v in (r.stats or {}).items()},
+            'config': {k: str(v) for k, v in (r.config or {}).items()},
+            'has_pop_history': bool(r.pop_history),
+        })
+
+    arrays['meta_json'] = np.array(json.dumps(meta, ensure_ascii=False))
+    np.savez_compressed(path, **arrays)
+    return path
+
+
+def load_ga_state(path: str) -> Tuple[List['GAResult'], dict]:
+    """Reconstruye los `GAResult` guardados por `save_ga_state`.
+
+    Los objetos devueltos bastan para volver a llamar a
+    `plot_genetic_convergence`, `plot_fitness_curve` y
+    `animate_genetic_evolution` sin repetir la optimizacion.
+
+    Args:
+        path: ruta del `.npz`.
+
+    Returns:
+        `(results, meta)` — la lista de resultados y el bloque de metadatos.
+
+    Raises:
+        ValueError: si el archivo viene de un esquema mas nuevo.
+    """
+    z = np.load(path, allow_pickle=False)
+    meta = json.loads(str(z['meta_json']))
+    ver = int(meta.get('version', 0))
+    if ver > GA_STATE_VERSION:
+        raise ValueError(
+            f"{path} usa el formato de estado v{ver}, y este codigo entiende "
+            f"hasta v{GA_STATE_VERSION}. Actualiza cosmo_genetic_optimizers.py")
+
+    results: List[GAResult] = []
+    for i, rm in enumerate(meta['results']):
+        p = f'r{i}_'
+        gens = z[p + 'hist_gen']
+        thb = z[p + 'hist_theta_best']
+        bch = z[p + 'hist_best_chi2']
+        mch = z[p + 'hist_mean_chi2']
+        history = [{'gen': int(gens[k]), 'theta_best': thb[k],
+                    'best_chi2': float(bch[k]), 'mean_chi2': float(mch[k])}
+                   for k in range(len(gens))]
+        results.append(GAResult(
+            method=rm['method'],
+            quantumness=rm['quantumness'],
+            theta_map=z[p + 'theta_map'],
+            chi2_map=rm['chi2_map'],
+            stats=rm.get('stats', {}),
+            # [B-REFINE] Estados guardados antes de que existieran estos campos
+            # no los traen: se cae al MAP refinado, que es lo unico que hay.
+            theta_grid=(z[p + 'theta_grid'] if (p + 'theta_grid') in z.files
+                        else z[p + 'theta_map']),
+            chi2_grid=float(rm.get('chi2_grid', rm['chi2_map'])),
+            final_pop=z[p + 'final_pop'],
+            final_fit=z[p + 'final_fit'],
+            final_weights=z[p + 'final_weights'],
+            history=history,
+            elapsed=rm['elapsed'],
+            config=rm.get('config', {}),
+            label=rm['label'],
+            pop_history=(list(z[p + 'pop_history'].astype(np.float64))
+                         if (p + 'pop_history') in z.files else []),
+            fit_history=(list(z[p + 'fit_history'].astype(np.float64))
+                         if (p + 'fit_history') in z.files else []),
+        ))
+    return results, meta
+
+
+def replot_from_state(path: str, outdir: Optional[str] = None,
+                      animate: bool = True) -> List[str]:
+    """Redibuja TODAS las figuras del genetico desde un estado guardado.
+
+    Es el punto de la persistencia: cambiar una figura deja de costar una
+    campana entera.
+
+    Args:
+        path: ruta del `ga_state.npz`.
+        outdir: donde escribir; por defecto, junto al estado.
+        animate: si False, se salta el GIF (que es lo mas lento).
+
+    Returns:
+        Rutas de las figuras generadas.
+    """
+    results, meta = load_ga_state(path)
+    model = MODELS[meta['model']]
+    outdir = outdir or os.path.dirname(os.path.abspath(path))
+    os.makedirs(outdir, exist_ok=True)
+
+    out: List[str] = []
+    f = plot_fitness_curve(results, outdir, model)
+    if f:
+        out.append(f)
+    f = plot_genetic_convergence(results, model, outdir)
+    if f:
+        out.append(f)
+    if animate:
+        out.extend(animate_genetic_evolution(results, model, outdir,
+                                             formats=ANIM_FORMATS,
+                                             layout=ANIM_LAYOUT))
+    return out
 
 
 # =============================================================================
@@ -2151,6 +2611,15 @@ def interactive_menu() -> dict:
         qcfg = dict(QGA_PRESETS.get(qi, QGA_PRESETS[100]))
 
     def ask_int(prompt, default):
+        """Lee un entero del menu interactivo; vuelve al default si no es valido.
+
+        Args:
+            prompt: texto que se muestra al usuario.
+            default: valor que se usa si la entrada es vacia o invalida.
+
+        Returns:
+            Ver la descripcion de arriba.
+        """
         raw = input(f"\n{prompt} [{default}]: ").strip()
         try:
             return int(raw) if raw else default
@@ -2280,6 +2749,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--log-every', type=int, default=10,
                    help='Generational logging cadence (default: 10)')
     p.add_argument('--no-plot', action='store_true', help='Skip all figures')
+    # [B-NOSTATE] Redibujar sin repetir la optimizacion.
+    p.add_argument('--replot', type=str, default=None, metavar='GA_STATE.NPZ',
+                   help='NO optimiza: carga un ga_state.npz guardado por una '
+                        'corrida anterior y vuelve a generar TODAS sus '
+                        'figuras. Sirve para arreglar una figura sin repetir '
+                        'la campana — que antes era la unica via, porque la '
+                        'poblacion final no se guardaba en disco. Combinalo '
+                        'con --outdir para escribir en otro sitio y con '
+                        '--anim none para saltarte el GIF.')
+    p.add_argument('--no-state', action='store_true',
+                   help='No escribir ga_state.npz (ahorra ~1-3 MB por tarea a '
+                        'cambio de que cualquier cambio futuro en una figura '
+                        'exija repetir la corrida).')
     p.add_argument('--no-csv', action='store_true',
                    help='Do not append to resultados_config.csv')
     p.add_argument('--no-live', action='store_true',
@@ -2392,7 +2874,7 @@ def _resolve_qga_config(args) -> dict:
 
 def run_genetic_sweep_all(models, qga_levels, methods, dataset, prior, ga,
                           n_bits, shots, master_dir, logger, log_every,
-                          no_csv=False, no_plot=False):
+                          no_csv=False, no_plot=False, save_state=True):
     """Run CGA + QGA (across the quantumness ladder) for EVERY model in one go.
 
     HPC "launch once, get everything" mode for the genetic optimizers. For each
@@ -2451,7 +2933,8 @@ def run_genetic_sweep_all(models, qga_levels, methods, dataset, prior, ga,
                     dataset_label=dataset, prior_type=prior, outdir=model_dir,
                     live=False, logger=logger, log_every=log_every,
                     shots=shots, make_plots=not no_plot, write_csv=not no_csv,
-                    cumulative_csv=cumulative_master).values())
+                    cumulative_csv=cumulative_master,
+                    save_state=False).values())
 
             # QGA at each requested quantumness preset.
             if 'qga' in methods:
@@ -2463,7 +2946,21 @@ def run_genetic_sweep_all(models, qga_levels, methods, dataset, prior, ga,
                         outdir=model_dir, live=False, logger=logger,
                         log_every=log_every, shots=shots,
                         make_plots=not no_plot, write_csv=not no_csv,
-                        cumulative_csv=cumulative_master).values())
+                        cumulative_csv=cumulative_master,
+                        save_state=False).values())
+
+            # [B-NOSTATE] Un solo estado con TODOS los rungs de esta
+            # configuracion. En --sweep-all cada rung se corre con su propia
+            # llamada a run_genetic, asi que si cada una escribiera su estado
+            # se pisarian entre si y el ultimo ganaria; el estado util es el
+            # que permite redibujar la escalera completa.
+            if save_state and all_res:
+                sp = save_ga_state(
+                    all_res, post.model, model_dir,
+                    extra={'dataset': dataset, 'prior': prior,
+                           'n_bits': n_bits,
+                           'noise': getattr(NOISE, 'label', 'none')})
+                say(f"  estado del genetico: {sp}")
 
             if not no_plot and len(all_res) > 1:
                 f = plot_genetic_convergence(all_res, post.model, model_dir)
@@ -2503,6 +3000,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     argument we are in batch/HPC mode -> the live animation is DISABLED and the
     generational progress goes to the log file every --log-every generations.
     Without arguments we enter the interactive menu and the live GUI is shown.
+
+    Args:
+        argv: argumentos de linea de comandos; None usa `sys.argv`. Por
+            defecto None.
+
+    Returns:
+        int
     """
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -2514,6 +3018,32 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if getattr(args, 'self_test', False):
         return self_test()
+
+    # [B-NOSTATE] --replot no optimiza nada: rehace las figuras de una corrida
+    # ya hecha. Va antes que cualquier validacion de argumentos de la
+    # optimizacion, porque ninguno de esos aplica aqui.
+    if getattr(args, 'replot', None):
+        global ANIM_FORMATS, ANIM_LAYOUT
+        ANIM_FORMATS = {'gif': ('gif',), 'mp4': ('mp4',),
+                        'both': ('gif', 'mp4'),
+                        'none': ()}.get(getattr(args, 'anim', 'gif'), ('gif',))
+        ANIM_LAYOUT = getattr(args, 'anim_layout', 'overlay')
+        try:
+            figs = replot_from_state(
+                args.replot,
+                outdir=(args.outdir if args.outdir != 'results' else None),
+                animate=bool(ANIM_FORMATS))
+        except FileNotFoundError:
+            sys.stderr.write(f"No existe el estado: {args.replot}\n")
+            return 2
+        except ValueError as e:
+            sys.stderr.write(f"{e}\n")
+            return 2
+        for f in figs:
+            print(f"  regenerada: {f}")
+        if not figs:
+            print("  (el estado no contenia rungs suficientes para figuras)")
+        return 0
 
     # CLI mode = any argument present (other than the bare program name).
     raw_args = sys.argv[1:] if argv is None else argv
@@ -2561,7 +3091,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # [GPU] Publish the device choice module-wide so the QGA's simulator uses
     # it. --gpu requests the GPU; with no GPU present we fall back to CPU.
-    global USE_GPU, ANIM_FORMATS, ANIM_LAYOUT
+    global USE_GPU
     USE_GPU = bool(getattr(args, 'gpu', False))
     do_profile = bool(getattr(args, 'profile', False))
     ANIM_FORMATS = {'gif': ('gif',), 'mp4': ('mp4',),
@@ -2622,7 +3152,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         run_genetic_sweep_all(
             sweep_models, qga_levels, methods, args.dataset, args.prior, ga,
             args.n_bits, args.shots, master_dir, logger, args.log_every,
-            no_csv=args.no_csv, no_plot=args.no_plot)
+            no_csv=args.no_csv, no_plot=args.no_plot,
+            save_state=not getattr(args, 'no_state', False))
         if profiler is not None:
             import cosmo_profiling as _prof
             result = profiler.stop()
@@ -2733,7 +3264,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         n_bits=n_bits, dataset_label=dataset, prior_type=prior,
         outdir=args.outdir, live=live, logger=logger,
         log_every=args.log_every, shots=args.shots,
-        make_plots=not args.no_plot, write_csv=not args.no_csv)
+        make_plots=not args.no_plot, write_csv=not args.no_csv,
+        save_state=not getattr(args, 'no_state', False))
 
     if profiler is not None:
         import cosmo_profiling as _prof

@@ -108,3 +108,98 @@ if __name__ == "__main__":
             print(f"ERROR {fn.__name__}: {type(e).__name__}: {e}")
     print(f"\n{len(fns) - failed}/{len(fns)} passed")
     sys.exit(1 if failed else 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [B-CREG] El parseo del resultado REAL de SamplerV2
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Esta es la superficie que el gemelo simulado (`qpu_noisy_simulation.py`) NO
+# cubre: sustituye `QPUConnection` entera, asi que el codigo que lee el
+# `PubResult` de vuelta nunca se ejecutaba. Aqui se ejerce de verdad, usando
+# SamplerV2 en modo local contra FakeBrisbane — que devuelve un PubResult
+# genuino, con la misma forma que el del hardware.
+
+import numpy as np
+import pytest
+
+
+def _conexion_local(shots=256):
+    """QPUConnection minima que apunta a SamplerV2 sobre un backend falso."""
+    import logging
+    q = pytest.importorskip('qpu_cosmo_samplers')
+    fp = pytest.importorskip('qiskit_ibm_runtime.fake_provider')
+    rt = pytest.importorskip('qiskit_ibm_runtime')
+    q._import_runtime()
+    be = fp.FakeBrisbane()
+    conn = q.QPUConnection.__new__(q.QPUConnection)
+    conn.sampler = rt.SamplerV2(mode=be)
+    conn.dry_run = False
+    conn.shots = shots
+    conn.log = logging.getLogger('test-qpu')
+    conn.timer = q.TimingEstimator()
+    return conn, be
+
+
+def _pm(be):
+    from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+    return generate_preset_pass_manager(optimization_level=1, backend=be)
+
+
+@pytest.mark.qiskit
+def test_b_creg_se_leen_los_conteos_de_un_pubresult_real():
+    """[B-CREG] El resultado real de SamplerV2 se parsea sin reventar.
+
+    Con el creg llamado 'meas' (el de los circuitos del proyecto) y tambien
+    con uno con OTRO nombre, donde la expresion anterior
+    `getattr(data,'meas',None) or getattr(data,'c',None)` devolvia None y
+    reventaba con un AttributeError opaco — DESPUES de que el trabajo se
+    hubiera ejecutado y cobrado en la QPU.
+    """
+    from qiskit import QuantumCircuit
+    from qiskit.circuit import ParameterVector, ClassicalRegister
+    conn, be = _conexion_local()
+    pm = _pm(be)
+    for nombre in ('meas', 'lectura'):
+        qc = QuantumCircuit(3)
+        p = ParameterVector('p', 3)
+        for i in range(3):
+            qc.ry(p[i], i)
+        if nombre == 'meas':
+            qc.measure_all()
+        else:
+            cr = ClassicalRegister(3, 'lectura')
+            qc.add_register(cr)
+            qc.measure(range(3), cr)
+        outs = conn.run_pub(pm.run(qc),
+                            np.array([[0.1, 0.2, 0.3], [2.9, 3.0, 3.1]]),
+                            shots=256)
+        assert len(outs) == 2, f"creg {nombre!r}: se esperaban 2 lotes"
+        for o in outs:
+            assert sum(o.values()) == 256
+
+
+@pytest.mark.qiskit
+def test_b_creg_el_lote_k_corresponde_a_la_fila_k():
+    """[B-CREG] Los resultados llegan EN ORDEN de los parametros enviados.
+
+    Si el orden no se preservara, cada punto de la cadena se evaluaria con los
+    parametros de otro y la corrida entera seria basura sin fallar. Se usa
+    ry(0) -> |0> y ry(pi) -> |1>, que deja una firma inconfundible por fila.
+    """
+    from qiskit import QuantumCircuit
+    from qiskit.circuit import ParameterVector
+    conn, be = _conexion_local(512)
+    qc = QuantumCircuit(2)
+    p = ParameterVector('p', 2)
+    qc.ry(p[0], 0)
+    qc.ry(p[1], 1)
+    qc.measure_all()
+    vals = np.array([[0, 0], [np.pi, 0], [0, np.pi], [np.pi, np.pi]], float)
+    esperado = ['00', '01', '10', '11']
+    outs = conn.run_pub(_pm(be).run(qc), vals, shots=512)
+    for k, (o, e) in enumerate(zip(outs, esperado)):
+        dominante = max(o, key=o.get)
+        assert dominante == e, (
+            f"fila {k}: salio {dominante!r}, se esperaba {e!r} — los "
+            f"resultados NO llegan en el orden de los parametros")

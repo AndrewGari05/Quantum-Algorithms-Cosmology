@@ -17,7 +17,8 @@ import tempfile
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
 
 import cosmo_noise as cn                                     # noqa: E402
 
@@ -1298,3 +1299,467 @@ def test_b_time_flag_expuesto_en_el_cli():
     ns = p.parse_args(['--noisy-task-hours', '12'])
     assert ns.noisy_task_hours == 12.0
     assert p.parse_args([]).noisy_task_hours == cn.DEFAULT_NOISY_TASK_HOURS
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [B-NOSTATE] El estado del genetico tiene que sobrevivir al proceso
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Origen: al corregir [B-GAPLOT] se descubrio que las figuras del genetico no
+# se pueden regenerar, porque la poblacion final solo vivia en memoria. Para
+# arreglar el color de una curva habia que repetir la campana entera — dias de
+# computo por un cambio cosmetico.
+
+def _ga_result_sintetico(seed=0, n=200, d=2, gens=6):
+    """Un GAResult con datos realistas, sin correr la optimizacion."""
+    ge = pytest.importorskip('cosmo_genetic_optimizers')
+    rng = np.random.default_rng(seed)
+    pop = np.column_stack([rng.normal(0.28, 0.02, n), rng.normal(69.6, 1.5, n)])
+    fit = -0.5 * (((pop[:, 0] - 0.276) / 0.0015) ** 2
+                  + ((pop[:, 1] - 69.60) / 0.11) ** 2)
+    hist = [{'gen': g, 'theta_best': np.array([0.2763 + 1e-5 * g, 69.59]),
+             'best_chi2': 1064.6 - 0.01 * g, 'mean_chi2': 1100.0 - g}
+            for g in range(gens)]
+    return ge.GAResult(
+        method='QGA', quantumness=67.0, theta_map=np.array([0.2763, 69.5949]),
+        chi2_map=1064.61, stats={'chi2': 1064.61, 'n_data': 1099},
+        final_pop=pop, final_fit=fit,
+        final_weights=ge._fitness_weights(fit), history=hist,
+        elapsed=12.5, config={'mutation': 'quantum'}, label='QGA (q=67%)',
+        pop_history=[pop + 0.001 * g for g in range(gens)],
+        fit_history=[fit for _ in range(gens)])
+
+
+def test_b_nostate_ida_y_vuelta_exacta():
+    """[B-NOSTATE] Lo que se guarda es lo que se lee, sin perdida donde importa.
+
+    La poblacion final, su fitness y sus pesos alimentan las estadisticas que
+    van al CSV, asi que tienen que volver EXACTAS (float64). La historia de
+    poblaciones solo alimenta la animacion y se guarda en float32 a proposito.
+    """
+    ge = pytest.importorskip('cosmo_genetic_optimizers')
+    core = pytest.importorskip('cosmo_core')
+    orig = [_ga_result_sintetico(seed=s, ) for s in (0, 1)]
+    with tempfile.TemporaryDirectory() as td:
+        p = ge.save_ga_state(orig, core.MODELS['lcdm'], td)
+        assert os.path.exists(p)
+        back, meta = ge.load_ga_state(p)
+
+    assert len(back) == len(orig)
+    assert meta['model'] == 'lcdm'
+    for a, b in zip(orig, back):
+        assert b.label == a.label and b.method == a.method
+        assert b.quantumness == a.quantumness
+        # exactos: de aqui salen los numeros publicados
+        assert np.array_equal(a.final_pop, b.final_pop)
+        assert np.array_equal(a.final_fit, b.final_fit)
+        assert np.array_equal(a.final_weights, b.final_weights)
+        assert np.array_equal(a.theta_map, b.theta_map)
+        # historia
+        assert len(b.history) == len(a.history)
+        for ha, hb in zip(a.history, b.history):
+            assert ha['gen'] == hb['gen']
+            assert np.allclose(ha['theta_best'], hb['theta_best'])
+            assert ha['best_chi2'] == pytest.approx(hb['best_chi2'])
+
+
+def test_b_nostate_la_estadistica_del_csv_se_reconstruye():
+    """[B-NOSTATE] Tras el viaje por disco, el CSV saldria identico.
+
+    Es la propiedad que de verdad importa: el estado sirve para redibujar, y
+    la figura tiene que seguir coincidiendo con la tabla ([B-GAPLOT]).
+    """
+    ge = pytest.importorskip('cosmo_genetic_optimizers')
+    core = pytest.importorskip('cosmo_core')
+    orig = [_ga_result_sintetico(seed=3)]
+
+    def stats(r):
+        finite = np.isfinite(r.final_fit)
+        pop, w = r.final_pop[finite], np.asarray(r.final_weights)[finite]
+        mu = np.average(pop, weights=w, axis=0)
+        sd = np.sqrt(np.average((pop - mu) ** 2, weights=w, axis=0))
+        return mu, sd
+
+    with tempfile.TemporaryDirectory() as td:
+        p = ge.save_ga_state(orig, core.MODELS['lcdm'], td)
+        back, _ = ge.load_ga_state(p)
+    mu0, sd0 = stats(orig[0])
+    mu1, sd1 = stats(back[0])
+    assert np.array_equal(mu0, mu1), "la media ponderada cambio al guardar"
+    assert np.array_equal(sd0, sd1), "la desviacion ponderada cambio al guardar"
+
+
+def test_b_nostate_replot_no_necesita_la_optimizacion():
+    """[B-NOSTATE] Se pueden rehacer las figuras solo desde el archivo."""
+    ge = pytest.importorskip('cosmo_genetic_optimizers')
+    core = pytest.importorskip('cosmo_core')
+    import matplotlib
+    matplotlib.use('Agg')
+    rs = [_ga_result_sintetico(seed=s) for s in (0, 1)]
+    rs[0].label, rs[0].quantumness = 'CGA', 0.0
+    with tempfile.TemporaryDirectory() as td:
+        p = ge.save_ga_state(rs, core.MODELS['lcdm'], td)
+        figs = ge.replot_from_state(p, animate=False)
+        assert figs, "no se regenero ninguna figura"
+        for f in figs:
+            assert os.path.exists(f) and os.path.getsize(f) > 1000
+
+
+def test_b_nostate_formato_futuro_avisa_en_vez_de_fallar_raro():
+    """[B-NOSTATE] Un archivo de una version mas nueva da un error legible."""
+    ge = pytest.importorskip('cosmo_genetic_optimizers')
+    core = pytest.importorskip('cosmo_core')
+    import json as _json
+    with tempfile.TemporaryDirectory() as td:
+        p = ge.save_ga_state([_ga_result_sintetico()], core.MODELS['lcdm'], td)
+        z = dict(np.load(p, allow_pickle=False))
+        meta = _json.loads(str(z['meta_json']))
+        meta['version'] = ge.GA_STATE_VERSION + 5
+        z['meta_json'] = np.array(_json.dumps(meta))
+        np.savez_compressed(p, **z)
+        with pytest.raises(ValueError, match='formato'):
+            ge.load_ga_state(p)
+
+
+def test_b_nostate_sin_pickle():
+    """[B-NOSTATE] Se carga con allow_pickle=False, o no dura dos anos."""
+    ge = pytest.importorskip('cosmo_genetic_optimizers')
+    core = pytest.importorskip('cosmo_core')
+    with tempfile.TemporaryDirectory() as td:
+        p = ge.save_ga_state([_ga_result_sintetico()], core.MODELS['lcdm'], td)
+        np.load(p, allow_pickle=False)     # no debe levantar
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [B-BUDGET] La comparacion clasico vs cuantico tiene que costar lo mismo
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Origen: revision adversarial de cosmo_modular_quantum.py. `max_iter` se
+# pasaba igual a las dos ramas del entrenamiento del QVMC, pero una iteracion
+# cuantica cuesta 1 + 2*n_phi evaluaciones de circuito (el KL en phi mas las
+# desplazadas del parameter-shift) y una clasica cuesta 1. Con el mismo
+# --qvmc-iter la rama cuantica recibia entre 57x y 225x mas trabajo, y la
+# comparacion salia sesgada A FAVOR de lo cuantico — que es el peor resultado
+# posible para un proyecto cuya afirmacion central es fidelidad, no ventaja.
+
+def _cuenta_circuitos(v, max_iter):
+    """Corre un QVMC contando cuantas evaluaciones de circuito gasta."""
+    n = [0]
+    orig = v._kl_batch
+
+    def patched(ph, *a, **k):
+        n[0] += len(np.atleast_2d(ph))
+        return orig(ph, *a, **k)
+
+    v._kl_batch = patched
+    r = v.run(max_iter=max_iter, n_chains=1, progress=False)
+    return n[0], r
+
+
+def test_b_budget_las_dos_ramas_gastan_lo_mismo():
+    """[B-BUDGET] A presupuesto igualado, ambas ramas usan circuitos similares."""
+    mq = pytest.importorskip('cosmo_modular_quantum')
+    core = pytest.importorskip('cosmo_core')
+    import matplotlib
+    matplotlib.use('Agg')
+    post = core.Posterior(core.MODELS['lcdm'], 'CC+BAO')
+    kw = dict(n_qubits_per_param=2, n_shots=300)
+    n_cla, _ = _cuenta_circuitos(
+        mq.QVMCModular(post, config={}, budget_mode='circuits', **kw), 20)
+    n_qua, _ = _cuenta_circuitos(
+        mq.QVMCModular(post, config={'training': True},
+                       budget_mode='circuits', **kw), 20)
+    assert 0.5 < n_cla / n_qua < 2.0, (
+        f"presupuestos muy distintos: clasico {n_cla}, cuantico {n_qua}")
+
+
+def test_b_budget_el_modo_viejo_si_estaba_sesgado():
+    """[B-BUDGET] Regresion: con 'iters' la asimetria existe y es enorme.
+
+    Sin esto, el test de arriba pasaria tambien con un codigo que acertara por
+    casualidad. Aqui se fija que el sesgo concreto que se corrigio era real.
+    """
+    mq = pytest.importorskip('cosmo_modular_quantum')
+    core = pytest.importorskip('cosmo_core')
+    import matplotlib
+    matplotlib.use('Agg')
+    post = core.Posterior(core.MODELS['lcdm'], 'CC+BAO')
+    kw = dict(n_qubits_per_param=2, n_shots=300)
+    n_cla, _ = _cuenta_circuitos(
+        mq.QVMCModular(post, config={}, budget_mode='iters', **kw), 20)
+    n_qua, _ = _cuenta_circuitos(
+        mq.QVMCModular(post, config={'training': True},
+                       budget_mode='iters', **kw), 20)
+    assert n_qua > 10 * n_cla, (
+        f"se esperaba la asimetria historica; clasico {n_cla}, "
+        f"cuantico {n_qua}")
+
+
+def test_b_budget_se_reporta_el_trabajo_gastado():
+    """[B-BUDGET] El resultado debe declarar su presupuesto y sus circuitos."""
+    mq = pytest.importorskip('cosmo_modular_quantum')
+    core = pytest.importorskip('cosmo_core')
+    import matplotlib
+    matplotlib.use('Agg')
+    post = core.Posterior(core.MODELS['lcdm'], 'CC+BAO')
+    v = mq.QVMCModular(post, config={'training': True},
+                       n_qubits_per_param=2, n_shots=300)
+    r = v.run(max_iter=5, n_chains=1, progress=False)
+    assert r['budget_mode'] == 'circuits'
+    assert isinstance(r['circuits_train'], int) and r['circuits_train'] > 0
+
+
+def test_b_budget_modo_desconocido_se_rechaza():
+    """[B-BUDGET] No se acepta una cadena cualquiera como modo."""
+    mq = pytest.importorskip('cosmo_modular_quantum')
+    core = pytest.importorskip('cosmo_core')
+    post = core.Posterior(core.MODELS['lcdm'], 'CC+BAO')
+    with pytest.raises(ValueError, match='budget_mode'):
+        mq.QVMCModular(post, config={}, budget_mode='lo_que_sea')
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [B-ESSCOMP] El ESS del QVMC no puede depender de como se represente la muestra
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_b_esscomp_el_ess_no_depende_de_la_representacion():
+    """[B-ESSCOMP] La celda FAITHFUL `sampling` no puede parecer una regresion.
+
+    La rama cuantica devolvia la forma COMPRIMIDA (una fila por cadena de bits,
+    peso = conteo) y la clasica una fila por disparo. El ESS de Kish no es
+    invariante bajo esa compresion, asi que el CSV publicaba una caida de 60x
+    en una celda donde por construccion no debe haber diferencia.
+    """
+    mq = pytest.importorskip('cosmo_modular_quantum')
+    core = pytest.importorskip('cosmo_core')
+    import matplotlib
+    matplotlib.use('Agg')
+    post = core.Posterior(core.MODELS['lcdm'], 'CC+BAO')
+    out = {}
+    for lbl, cfg in (('clasico', {}), ('cuantico', {'sampling': True})):
+        v = mq.QVMCModular(post, config=cfg, n_qubits_per_param=3,
+                           n_shots=1000)
+        r = v.run(max_iter=4, n_chains=2, progress=False)
+        out[lbl] = (len(r['S']), r['ess'])
+    (n_c, ess_c), (n_q, ess_q) = out['clasico'], out['cuantico']
+    assert n_c == n_q, f"distinto numero de filas: {n_c} vs {n_q}"
+    assert abs(ess_c - ess_q) / max(ess_c, 1.0) < 0.02, (
+        f"ESS incomparables entre ramas: clasico {ess_c:.1f}, "
+        f"cuantico {ess_q:.1f}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [B-EMPTY] Una rejilla sin soporte debe levantar, no dar un KL bonito
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_b_empty_rejilla_sin_soporte_levanta():
+    """[B-EMPTY] Antes devolvia KL = 0.022 y Om = -4.45 sin un solo error.
+
+    Con la rejilla fuera del prior, P sale toda a cero; el KL degenera en
+    log n - H(Q), que es PEQUENO — o sea que la corrida terminaba entera
+    reportando el mejor KL de la campana sobre parametros absurdos.
+    """
+    mq = pytest.importorskip('cosmo_modular_quantum')
+    core = pytest.importorskip('cosmo_core')
+    post = core.Posterior(core.MODELS['lcdm'], 'CC+BAO')
+    for cfg in ({}, dict(mq.PRESETS[100])):
+        v = mq.QVMCModular(post, config=cfg, n_qubits_per_param=2,
+                           grid_window=[(-100.0, -90.0), (-100.0, -90.0)])
+        with pytest.raises(ValueError, match='B-EMPTY'):
+            v.build_target()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [B-PROV] Una fila del CSV debe decir en que condiciones se obtuvo
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_b_prov_el_csv_lleva_ruido_ruta_semilla_y_presupuesto():
+    """[B-PROV] Sin estas columnas el eje de ruido es irreconstruible.
+
+    Dos filas con la misma clave (Method, model, dataset, prior, nqpp) pero
+    numeros distintos eran indistinguibles: una podia venir de una corrida
+    ideal y otra de una ruidosa, y el archivo no lo decia.
+    """
+    mq = pytest.importorskip('cosmo_modular_quantum')
+    core = pytest.importorskip('cosmo_core')
+    for fields in (mq.csv_fields_for_model(core.MODELS['lcdm']),
+                   mq.csv_fields_generic()):
+        for col in ('noise', 'proposal_route', 'seed', 'budget_mode',
+                    'circuits_train'):
+            assert col in fields, f"falta la columna {col!r}"
+    side = {'mu': np.array([0.3, 70.0]), 'std': np.array([0.01, 0.5]),
+            'chi2': 27.5, 'n_data': 51, 'chi2_red': 0.56, 'AIC': 31.5,
+            'BIC': 35.3, 'ess': 1234.0, 'kl_final': 0.5,
+            'budget_mode': 'circuits', 'circuits_train': 570, 'seed': 7}
+    row = mq.csv_row_for_side(side, core.MODELS['lcdm'], 'QVMC 67%', False,
+                              3, 'CC+BAO', 'flat')
+    assert row['budget_mode'] == 'circuits'
+    assert row['circuits_train'] == '570'
+    assert row['noise'] == mq.NOISE.label
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [B-REFINE] El chi2 del genetico no distingue rungs; el de la rejilla si
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# El genetico devuelve un punto de la REJILLA y despues se refina con un
+# optimizador continuo. Ese refinamiento borra la diferencia entre peldanos:
+# los cuatro convergen al mismo minimo, asi que chi2/chi2_red/AIC/BIC salen
+# identicos a la sexta cifra en CGA y en los cuatro rungs del QGA. Eso explica
+# por que en las campanas publicadas el chi2 del genetico era byte a byte igual
+# en todas las filas: no es fidelidad de los operadores, es el refinador.
+
+def test_b_refine_el_chi2_refinado_no_distingue_rungs():
+    """[B-REFINE] Los cuatro rungs dan el MISMO chi2 tras refinar.
+
+    Es el hecho que hay que conocer para no leer esa columna como si midiera
+    al genetico.
+    """
+    ge = pytest.importorskip('cosmo_genetic_optimizers')
+    core = pytest.importorskip('cosmo_core')
+    import matplotlib
+    matplotlib.use('Agg')
+    post = core.Posterior(core.MODELS['lcdm'], 'CC+BAO')
+    ga = ge.GAConfig(pop_size=30, n_generations=6, seed=42)
+    refinados, rejilla = [], []
+    for pct in (0, 33, 67, 100):
+        r = ge.QGA(post, ga, dict(ge.QGA_PRESETS[pct]), n_bits=4,
+                   rng=np.random.default_rng(42), shots=1
+                   ).evolve(record_population=False)
+        refinados.append(r.chi2_map)
+        rejilla.append(r.chi2_grid)
+    assert max(refinados) - min(refinados) < 1e-6, (
+        f"se esperaba que el refinamiento igualara los rungs: {refinados}")
+    assert max(rejilla) - min(rejilla) > 1e-3, (
+        f"el chi2 de la rejilla deberia distinguirlos: {rejilla}")
+
+
+def test_b_refine_la_celda_faithful_se_cumple_tambien_en_la_rejilla():
+    """[B-REFINE] CGA == QGA(0%) antes de refinar, que es la prueba de verdad.
+
+    Si solo coincidieran despues del refinamiento, la igualdad no diria nada
+    sobre los operadores — la garantizaria el optimizador continuo.
+    """
+    ge = pytest.importorskip('cosmo_genetic_optimizers')
+    core = pytest.importorskip('cosmo_core')
+    import matplotlib
+    matplotlib.use('Agg')
+    post = core.Posterior(core.MODELS['lcdm'], 'CC+BAO')
+    ga = ge.GAConfig(pop_size=30, n_generations=6, seed=42)
+    c = ge.CGA(post, ga, rng=np.random.default_rng(42)
+               ).evolve(record_population=False)
+    q0 = ge.QGA(post, ga, dict(ge.QGA_PRESETS[0]), n_bits=4,
+                rng=np.random.default_rng(42), shots=1
+                ).evolve(record_population=False)
+    assert np.array_equal(c.theta_grid, q0.theta_grid)
+    assert c.chi2_grid == q0.chi2_grid
+    assert np.array_equal(c.final_pop, q0.final_pop)
+
+
+def test_b_refine_el_csv_lleva_el_chi2_de_la_rejilla():
+    """[B-REFINE] La columna que distingue rungs tiene que quedar guardada."""
+    mq = pytest.importorskip('cosmo_modular_quantum')
+    core = pytest.importorskip('cosmo_core')
+    assert 'chi2_grid' in mq.csv_fields_generic()
+    assert 'chi2_grid' in mq.csv_fields_for_model(core.MODELS['lcdm'])
+    side = {'mu': np.array([0.3, 70.0]), 'std': np.array([0.01, 0.5]),
+            'chi2': 27.4691, 'n_data': 51, 'chi2_red': 0.56, 'AIC': 31.5,
+            'BIC': 35.3, 'ess': 300.0, 'chi2_grid': 28.3992}
+    row = mq.csv_row_generic(side, core.MODELS['lcdm'], 'QGA (q=67%)', True,
+                             '4', 'CC+BAO', 'flat')
+    assert row['chi2_grid'] == '28.3992'
+    # una fila de samplers no tiene rejilla propia: la columna queda vacia
+    row2 = mq.csv_row_generic({k: v for k, v in side.items() if k != 'chi2_grid'},
+                              core.MODELS['lcdm'], 'QMCMC 50%', True, '3',
+                              'CC+BAO', 'flat')
+    assert row2['chi2_grid'] == ''
+
+
+def test_b_refine_el_estado_guarda_la_rejilla():
+    """[B-REFINE] `ga_state.npz` debe conservar theta_grid y chi2_grid."""
+    ge = pytest.importorskip('cosmo_genetic_optimizers')
+    core = pytest.importorskip('cosmo_core')
+    r = _ga_result_sintetico()
+    r.theta_grid = np.array([0.2700, 70.3125])
+    r.chi2_grid = 28.3992
+    with tempfile.TemporaryDirectory() as td:
+        p = ge.save_ga_state([r], core.MODELS['lcdm'], td)
+        back, _ = ge.load_ga_state(p)
+    assert np.array_equal(back[0].theta_grid, r.theta_grid)
+    assert back[0].chi2_grid == pytest.approx(r.chi2_grid)
+
+
+def test_b_budgetmismatch_avisa_si_max_task_supera_el_presupuesto():
+    """[B-BUDGETMISMATCH] --max-task-gb > --mem-budget-gb es contradictorio.
+
+    El techo de qubits sale de --max-task-gb, pero el pool admite SIEMPRE al
+    menos una tarea aunque no quepa en el presupuesto agregado (si no, una
+    tarea grande bloquearia la campana para siempre). Con esa combinacion se
+    puede lanzar una tarea que excede el presupuesto entero y la unica senal
+    seria un OOMKill horas despues. Medido: --max-task-gb 40 con
+    --mem-budget-gb 10 concedia 18 qubits, ~22 GB para UNA tarea.
+    """
+    import subprocess
+    import sys
+    base = [sys.executable, os.path.join(REPO, 'cosmo_hpc_runner.py'),
+            '--models', 'lcdm', '--nqpp', '8',
+            '--dataset', 'CC+BAO+Pantheon', '--dry-run']
+    malo = subprocess.run(base + ['--max-task-gb', '40', '--mem-budget-gb', '10'],
+                          capture_output=True, text=True, timeout=300).stdout
+    bueno = subprocess.run(base + ['--max-task-gb', '12', '--mem-budget-gb', '50'],
+                           capture_output=True, text=True, timeout=300).stdout
+    assert 'AVISO' in malo, "no avisa de la combinacion contradictoria"
+    assert 'AVISO' not in bueno, "avisa cuando la configuracion es coherente"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Los ejemplos de los docstrings tienen que EJECUTARSE
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Un ejemplo que no corre es peor que ninguno: envejece en silencio y acaba
+# documentando algo que el codigo ya no hace. Atarlos a la suite los convierte
+# en documentacion que no puede mentir — y de hecho el primero que escribi ya
+# atrapo un error mio (afirmaba H(0) == 70.0 exacto, cuando son
+# 69.99999999999999 por redondeo de punto flotante).
+
+def test_los_ejemplos_de_los_docstrings_corren():
+    """Todos los doctests del proyecto pasan."""
+    import doctest
+    import importlib
+    fallos = []
+    for mod in ('cosmo_core', 'cosmo_noise', 'cosmo_hpc_runner',
+                'cosmo_modular_quantum', 'cosmo_genetic_optimizers'):
+        m = importlib.import_module(mod)
+        res = doctest.testmod(m, verbose=False, report=False)
+        if res.failed:
+            fallos.append(f"{mod}: {res.failed} de {res.attempted}")
+    assert not fallos, "doctests rotos -> " + "; ".join(fallos)
+
+
+def test_hay_ejemplos_en_las_funciones_que_mas_se_llaman():
+    """Las funciones cuyo mal uso ya costo una campana llevan ejemplo.
+
+    No es documentacion decorativa: cada uno de estos ejemplos fija un numero
+    que se midio y que explica por que existe una correccion.
+    """
+    import importlib
+    ESPERADOS = {
+        'cosmo_noise': ['canonical_level', 'param_shift_batch_factor',
+                        'noisy_density_bytes', 'genetic_noisy_seconds_per_gen',
+                        'genetic_noisy_time_ceiling'],
+        'cosmo_hpc_runner': ['dataset_n_data', 'bytes_per_state_samplers',
+                             'estimate_qubits_and_mem'],
+        'cosmo_core': ['canonical_dataset', 'ess_weights', 'gelman_rubin',
+                       'fit_statistics'],
+        'cosmo_modular_quantum': ['compute_quantumness', 'quantumness_qmcmc',
+                                  'quantumness_qvmc'],
+        'cosmo_genetic_optimizers': ['compute_qga_quantumness'],
+    }
+    faltan = []
+    for mod, nombres in ESPERADOS.items():
+        m = importlib.import_module(mod)
+        for n in nombres:
+            d = getattr(m, n).__doc__ or ''
+            if '>>>' not in d:
+                faltan.append(f"{mod}.{n}")
+    assert not faltan, "sin ejemplo ejecutable: " + ", ".join(faltan)

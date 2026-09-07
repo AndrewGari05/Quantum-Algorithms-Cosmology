@@ -1,92 +1,88 @@
 #!/usr/bin/env python3
-# =============================================================================
-#  cosmo_hpc_runner.py — Parallel HPC orchestrator (generic, multi-node)
-# =============================================================================
-#
-#  Designed to run on a SUPERCOMPUTER / compute node: it auto-detects the cores
-#  and RAM available on whatever node it lands on and distributes the work
-#  accordingly. Nothing is hard-wired to a specific machine.
-#
-#  WHAT IT DOES
-#  ------------
-#  Runs the project's two pipelines IN PARALLEL:
-#
-#      1) cosmo_modular_quantum.py    (QMCMC + QVMC, quantumness ladder)
-#      2) cosmo_genetic_optimizers.py (CGA + QGA, global optimization / MAP)
-#
-#  without modifying a single line of those scripts: it invokes their existing,
-#  tested CLI (--sweep-all --sweep-models <model>), ONE MODEL PER PROCESS, so
-#  that each (script x model) combination is an independent task running in its
-#  own Python interpreter.
-#
-#  WHY multiprocessing (subprocess) AND NOT multithreading
-#  -------------------------------------------------------
-#  * Python's GIL serializes all pure-Python code (the MCMC loop, the GA
-#    generational loop, circuit construction). Threads give you NO real
-#    parallelism for that part. Separate processes = separate GILs = real
-#    parallelism + crash isolation (if one model blows up, the rest continue).
-#  * The heavy compute (NumPy/BLAS and Qiskit-Aer in C++) is ALREADY
-#    multi-threaded internally via OpenMP. The real HPC risk is not "too few
-#    threads", it is OVERSUBSCRIPTION: if you launch W processes and each lets
-#    its BLAS/Aer grab all 80 cores, you end up with W*80 threads fighting over
-#    80 cores -> cache thrashing and the "parallel" version runs SLOWER.
-#
-#  THE KEY: PARTITION THE CORES
-#  ----------------------------
-#  This orchestrator fixes, BEFORE starting each subprocess, the number of
-#  internal BLAS/OpenMP/Aer threads via environment variables (OMP_NUM_THREADS,
-#  etc.). With J concurrent processes and T threads each, it enforces J*T ~=
-#  total cores. Those env vars are read when NumPy/Qiskit are imported, which is
-#  why they must be set in a NEW interpreter (subprocess), not in threads of the
-#  same process.
-#
-#  WHAT IT RETURNS
-#  ---------------
-#  It measures, per task and in aggregate: wall time and peak RAM of the process
-#  TREE (child process + its descendants), prints it as a table and saves it to
-#  master_profile.csv / .json. It also passes --profile to each child so each
-#  one produces its own resource_usage_*.png / profile_*.json. When a child
-#  wrote a profile_*.json, the orchestrator reports the MEASURED memory from
-#  cosmo_profiling rather than its own sampled estimate.
-#
-#  TYPICAL USE ON A COMPUTE NODE
-#  -----------------------------
-#      # auto-detects the node's cores/RAM
-#      python cosmo_hpc_runner.py \
-#          --dataset CC+BAO+Pantheon+ \
-#          --steps 15000 --qvmc-iter 3000 --nqpp 3 \
-#          --generations 120 --population-size 200 --n-bits 6 \
-#          --threads-per-worker 8
-#
-#  GRID SWEEP (convergence study)
-#  ------------------------------
-#      # one task per nqpp in {2,3,4,5} per model (QVMC/QMCMC):
-#      python cosmo_hpc_runner.py --nqpp-sweep 2 5 --only-samplers \
-#          --models lcdm wcdm --dataset CC+BAO+Pantheon+
-#      # and for the genetic optimizer (QGA), sweep the grid size n_bits:
-#      python cosmo_hpc_runner.py --nbits-sweep 3 6 --only-genetic --models lcdm
-#
-#  REMEMBER: nqpp does NOT depend on the core count, it depends on RAM and on d
-#  (the number of parameters): the grid costs 2^(nqpp*d). Combinations exceeding
-#  --max-qubits are clamped down per model (or skipped with --strict-qubits);
-#  raise --max-qubits only if the RAM can take it
-#  (18q~=3.5GB . 20q~=14GB . 22q~=56GB . 24q~=224GB).
-#
-#  Samplers only / genetic only:  --only-samplers  /  --only-genetic
-#  Dry run (see what it would launch without running):  --dry-run
-# =============================================================================
+""" cosmo_hpc_runner.py — Parallel HPC orchestrator (generic, multi-node)
 
+ Designed to run on a SUPERCOMPUTER / compute node: it auto-detects the cores
+ and RAM available on whatever node it lands on and distributes the work
+ accordingly. Nothing is hard-wired to a specific machine.
+
+ WHAT IT DOES
+ ------------
+ Runs the project's two pipelines IN PARALLEL:
+
+     1) cosmo_modular_quantum.py    (QMCMC + QVMC, quantumness ladder)
+     2) cosmo_genetic_optimizers.py (CGA + QGA, global optimization / MAP)
+
+ without modifying a single line of those scripts: it invokes their existing,
+ tested CLI (--sweep-all --sweep-models <model>), ONE MODEL PER PROCESS, so
+ that each (script x model) combination is an independent task running in its
+ own Python interpreter.
+
+ WHY multiprocessing (subprocess) AND NOT multithreading
+ -------------------------------------------------------
+ * Python's GIL serializes all pure-Python code (the MCMC loop, the GA
+   generational loop, circuit construction). Threads give you NO real
+   parallelism for that part. Separate processes = separate GILs = real
+   parallelism + crash isolation (if one model blows up, the rest continue).
+ * The heavy compute (NumPy/BLAS and Qiskit-Aer in C++) is ALREADY
+   multi-threaded internally via OpenMP. The real HPC risk is not "too few
+   threads", it is OVERSUBSCRIPTION: if you launch W processes and each lets
+   its BLAS/Aer grab all 80 cores, you end up with W*80 threads fighting over
+   80 cores -> cache thrashing and the "parallel" version runs SLOWER.
+
+ THE KEY: PARTITION THE CORES
+ ----------------------------
+ This orchestrator fixes, BEFORE starting each subprocess, the number of
+ internal BLAS/OpenMP/Aer threads via environment variables (OMP_NUM_THREADS,
+ etc.). With J concurrent processes and T threads each, it enforces J*T ~=
+ total cores. Those env vars are read when NumPy/Qiskit are imported, which is
+ why they must be set in a NEW interpreter (subprocess), not in threads of the
+ same process.
+
+ WHAT IT RETURNS
+ ---------------
+ It measures, per task and in aggregate: wall time and peak RAM of the process
+ TREE (child process + its descendants), prints it as a table and saves it to
+ master_profile.csv / .json. It also passes --profile to each child so each
+ one produces its own resource_usage_*.png / profile_*.json. When a child
+ wrote a profile_*.json, the orchestrator reports the MEASURED memory from
+ cosmo_profiling rather than its own sampled estimate.
+
+ TYPICAL USE ON A COMPUTE NODE
+ -----------------------------
+     # auto-detects the node's cores/RAM
+     python cosmo_hpc_runner.py \
+         --dataset CC+BAO+Pantheon+ \
+         --steps 15000 --qvmc-iter 3000 --nqpp 3 \
+         --generations 120 --population-size 200 --n-bits 6 \
+         --threads-per-worker 8
+
+ GRID SWEEP (convergence study)
+ ------------------------------
+     # one task per nqpp in {2,3,4,5} per model (QVMC/QMCMC):
+     python cosmo_hpc_runner.py --nqpp-sweep 2 5 --only-samplers \
+         --models lcdm wcdm --dataset CC+BAO+Pantheon+
+     # and for the genetic optimizer (QGA), sweep the grid size n_bits:
+     python cosmo_hpc_runner.py --nbits-sweep 3 6 --only-genetic --models lcdm
+
+ REMEMBER: nqpp does NOT depend on the core count, it depends on RAM and on d
+ (the number of parameters): the grid costs 2^(nqpp*d). Combinations exceeding
+ --max-qubits are clamped down per model (or skipped with --strict-qubits);
+ raise --max-qubits only if the RAM can take it
+ (18q~=3.5GB . 20q~=14GB . 22q~=56GB . 24q~=224GB).
+
+ Samplers only / genetic only:  --only-samplers  /  --only-genetic
+ Dry run (see what it would launch without running):  --dry-run
+"""
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import cosmo_noise as cnoise
@@ -192,6 +188,14 @@ def bytes_per_state_samplers(n_data: Optional[int] = None) -> float:
 
     Returns:
         Bytes por estado, margen de seguridad incluido.
+    Examples:
+        El coste por estado depende del DATASET, no es una constante — ese fue
+        el bug [B-MEM]. Con 51 puntos un estado cuesta 16 kB; con 1099, 84 kB:
+
+        >>> round(bytes_per_state_samplers(51) / 1024)
+        16
+        >>> round(bytes_per_state_samplers(1099) / 1024)
+        83
     """
     n = DEFAULT_PLAN_N_DATA if n_data is None else int(n_data)
     return ((BYTES_PER_STATE_SAMPLERS_FIXED
@@ -199,7 +203,26 @@ def bytes_per_state_samplers(n_data: Optional[int] = None) -> float:
 
 
 def dataset_n_data(dataset: Optional[str]) -> int:
-    """N_data del dataset para planificar, con fallback conservador."""
+    """N_data del dataset para planificar, con fallback conservador.
+
+    Args:
+        dataset: nombre del dataset (o alias) cuyo tamano se busca.
+
+    Returns:
+        int
+    Examples:
+        >>> dataset_n_data('CC+BAO')
+        51
+        >>> dataset_n_data('CC+BAO+Pantheon')
+        1099
+
+        Un dataset desconocido usa el mayor de la tabla, que es la direccion
+        segura: sobreestimar cuesta una tarea menos en paralelo, subestimar
+        cuesta un OOMKill.
+
+        >>> dataset_n_data('CC+BAO+DESI') == DEFAULT_PLAN_N_DATA
+        True
+    """
     if not dataset:
         return DEFAULT_PLAN_N_DATA
     return DATASET_N_DATA.get(dataset, DEFAULT_PLAN_N_DATA)
@@ -249,6 +272,14 @@ def bytes_per_state(kind: str = 'nqpp', n_data: Optional[int] = None) -> float:
 
     El genetico no toca la verosimilitud sobre la rejilla, asi que su coste no
     depende del dataset; el de samplers si — ver [B-MEM] arriba.
+
+    Args:
+        kind: pipeline: 'nqpp' (samplers) o 'n_bits' (genetico). Por defecto
+            'nqpp'.
+        n_data: numero de puntos de datos del dataset. Por defecto None.
+
+    Returns:
+        float
     """
     if kind == 'n_bits':
         return float(BYTES_PER_STATE_GENETIC)
@@ -369,6 +400,13 @@ def detected_memory_mb() -> float:
 
 @dataclass
 class Task:
+    """Una tarea de la campana: que ejecutar, con que argumentos y cuanto pesa.
+
+    Agrupa todo lo que el planificador necesita saber ANTES de lanzarla
+    (memoria estimada, qubits, nivel de ruido) y lo que se sabe DESPUES
+    (codigo de salida, RSS pico, tiempos), para que `master_profile.csv`
+    salga de un solo sitio.
+    """
     name: str                       # human-readable label
     script: str                     # cosmo_modular_quantum.py | cosmo_genetic_optimizers.py
     argv: List[str]                 # CLI arguments (without 'python' or the script)
@@ -395,6 +433,7 @@ class Task:
 
     @property
     def wall_s(self) -> float:
+        """Segundos de reloj de la tarea, o 0.0 si aun no ha terminado."""
         if self.t_start and self.t_end:
             return self.t_end - self.t_start
         return 0.0
@@ -425,6 +464,27 @@ def estimate_qubits_and_mem(total_q: int, kind: str = 'nqpp',
             necesitando su grid ademas de rho.
         n_data: puntos de datos del dataset activo; `None` usa el mayor de
             `DATASET_N_DATA` (conservador). Se ignora con kind='n_bits'.
+    Examples:
+        A 18 qubits con CC+BAO+Pantheon una tarea pesa ~22 GB (se midieron
+        19.6); con CC+BAO, ~4.6 GB (se midieron 4.0):
+
+        >>> round(estimate_qubits_and_mem(18, 'nqpp', n_data=1099) / 1024, 1)
+        22.1
+        >>> round(estimate_qubits_and_mem(18, 'nqpp', n_data=51) / 1024, 1)
+        4.5
+
+        Y a 20 qubits — la tarea `cpl/nqpp5` que fue OOMKilled — son 88 GB,
+        que es lo que el modelo viejo estimaba en 14:
+
+        >>> round(estimate_qubits_and_mem(20, 'nqpp', n_data=1099) / 1024)
+        88
+
+        El genetico no evalua la verosimilitud sobre la rejilla, asi que su
+        coste no depende del dataset:
+
+        >>> (estimate_qubits_and_mem(20, 'n_bits', n_data=51)
+        ...  == estimate_qubits_and_mem(20, 'n_bits', n_data=1099))
+        True
     """
     per_state = bytes_per_state(kind, n_data)
     mb = (2 ** total_q) * per_state / 1e6 + PROCESS_BASELINE_MB
@@ -446,6 +506,15 @@ def qubits_fitting_in(mem_mb: float, kind: str = 'nqpp',
 
     `n_data` solo importa para 'nqpp': el coste por estado de los samplers
     crece con el tamano del dataset ([B-MEM]).
+
+    Args:
+        mem_mb: memoria disponible, en MB.
+        kind: pipeline: 'nqpp' (samplers) o 'n_bits' (genetico). Por defecto
+            'nqpp'.
+        n_data: numero de puntos de datos del dataset. Por defecto None.
+
+    Returns:
+        int
     """
     usable = mem_mb - PROCESS_BASELINE_MB
     if usable <= 0:
@@ -523,6 +592,19 @@ def grid_values_for_model(single: int, sweep: Optional[List[int]], d: int,
 
     For a sweep [LO, HI] the upper bound is trimmed to fit_max per model; if not
     even LO fits, the model produces no tasks (with a notice).
+
+    Args:
+        single: valor unico pedido por el usuario.
+        sweep: rango pedido, o None.
+        d: numero de parametros libres del modelo.
+        q_ceiling: techo de qubits por tarea.
+        strict: no recortar; fallar si no cabe.
+        notices: lista donde se acumulan los avisos del recorte por modelo.
+        kind: pipeline: 'nqpp' (samplers) o 'n_bits' (genetico).
+        model: modelo cosmologico (`cosmo_core.CosmoModel`).
+
+    Returns:
+        List[int]
     """
     fit_max = max(1, q_ceiling // d)            # largest grid that fits for this d
     if sweep:
@@ -747,6 +829,12 @@ def child_env(threads_per_worker: int) -> Dict[str, str]:
     Qiskit's rayon WHEN THEY ARE IMPORTED. That is why they must be set in the
     new interpreter's environment (subprocess), not after importing NumPy. This
     is the safety belt against oversubscription.
+
+    Args:
+        threads_per_worker: hilos que se asignan a cada subproceso.
+
+    Returns:
+        Dict[str, str]
     """
     env = os.environ.copy()
     t = str(max(1, threads_per_worker))
@@ -762,6 +850,12 @@ def child_env(threads_per_worker: int) -> Dict[str, str]:
 def proc_tree_rss_mb(pid: int) -> float:
     """Resident memory (MB) of the process + descendants. psutil if present,
     else /proc as a fallback (Linux). Returns 0 if the process is already
+
+    Args:
+        pid: identificador del proceso raiz del arbol.
+
+    Returns:
+        float
     gone."""
     if _PSUTIL:
         try:
@@ -790,6 +884,17 @@ def run_pool(tasks: List[Task], max_parallel: int, threads_per_worker: int,
              poll: float = 0.5, max_qubits_genetic: Optional[int] = None
              ) -> None:
     """Run the tasks with at most `max_parallel` in flight, honoring an
+
+    Args:
+        tasks: lista de tareas de la campana.
+        max_parallel: tareas simultaneas como maximo.
+        threads_per_worker: hilos que se asignan a cada subproceso.
+        mem_budget_mb: presupuesto agregado de memoria, en MB.
+        max_qubits: tope de qubits por tarea.
+        project_dir: carpeta del proyecto donde viven los scripts.
+        poll: segundos entre sondeos del estado de los hijos. Por defecto 0.5.
+        max_qubits_genetic: tope de qubits para las tareas geneticas. Por
+            defecto None.
     aggregate RAM budget, and sample each tree's peak RSS."""
     pending = list(tasks)
     running: List[Task] = []
@@ -797,6 +902,7 @@ def run_pool(tasks: List[Task], max_parallel: int, threads_per_worker: int,
     procs: Dict[int, subprocess.Popen] = {}
 
     def admitted_mem() -> float:
+        """Memoria estimada (MB) de las tareas actualmente en ejecucion."""
         return sum(t.est_mem_mb for t in running)
 
     print(f"\n{'='*74}\nPLAN: {len(tasks)} tasks | "
@@ -937,6 +1043,13 @@ def _tail(path: str, n: int = 12) -> None:
 # =============================================================================
 
 def report(tasks: List[Task], master_dir: str, t_wall0: float) -> None:
+    """Imprime el resumen final de la campana: estado, tiempo y RSS por tarea.
+
+    Args:
+        tasks: lista de tareas de la campana.
+        master_dir: carpeta raiz de la campana.
+        t_wall0: marca de tiempo del inicio de la campana.
+    """
     total_wall = time.time() - t_wall0
     print(f"\n{'='*74}\nSUMMARY - total wall time: "
           f"{total_wall/60:.1f} min\n{'='*74}")
@@ -1035,6 +1148,7 @@ PARAM_LATEX = {'Om': r'$\Omega_m$', 'H0': r'$H_0$', 'w': r'$w$',
 
 
 def _to_float(s) -> float:
+    """float(s) tolerante: devuelve nan en vez de levantar si no se puede."""
     try:
         return float(s)
     except (TypeError, ValueError):
@@ -1042,6 +1156,7 @@ def _to_float(s) -> float:
 
 
 def _find_result_csvs(master_dir: str) -> List[str]:
+    """Todos los CSV de resultados bajo `master_dir`, sin duplicados."""
     import glob
     found, seen, out = [], set(), []
     for pat in ('resultados_TODOS_los_modelos.csv', 'resultados_config.csv'):
@@ -1053,6 +1168,7 @@ def _find_result_csvs(master_dir: str) -> List[str]:
 
 
 def _infer_model(path: str) -> str:
+    """Nombre del modelo deducido de la ruta de la carpeta de la tarea."""
     for part in path.split(os.sep):
         if part.startswith(('samplers_', 'genetic_')):
             return part.split('_')[1]
@@ -1124,6 +1240,11 @@ def _read_master_profile_rss(master_dir: str):
 
 
 def _is_grid_method(method: str) -> bool:
+    """True si el metodo vive sobre la rejilla (QVMC o VI clasico).
+
+    Se usa para no mezclar en una figura metodos con rejilla y sin ella: el
+    nqpp solo significa algo para los primeros.
+    """
     m = method.lower()
     return ('vmc' in m) or ('vi' in m) or ('varia' in m)
 
@@ -1315,6 +1436,7 @@ def generate_noise_comparison_plots(master_dir: str,
     # dibuja por tanto en unidades ABSOLUTAS, que es lo que tiene sentido para
     # un optimizador cuyo resultado es un punto.
     def _is_genetic(method: str) -> bool:
+        """True si la etiqueta del metodo corresponde al genetico (CGA o QGA)."""
         m = (method or '').upper()
         return m.startswith('CGA') or m.startswith('QGA')
 
@@ -1406,6 +1528,17 @@ def _one_noise_figure(model, rows, levels, outdir, suffix, pull, np, plt,
                  for i, m in enumerate(methods)}
 
         def series(method, key, sub=None):
+            """Serie (valor, error) de un metodo a lo largo del eje de ruido.
+
+            Args:
+                method: nombre del metodo.
+                key: clave de la magnitud a extraer.
+                sub: subindice del parametro dentro de la clave. Por defecto
+                    None.
+
+            Returns:
+                Ver la descripcion de arriba.
+            """
             ys, es = [], []
             for lvl in levels:
                 sel = [r for r in rows if r['method'] == method
@@ -1497,6 +1630,16 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
                                xlabel: str = 'nqpp') -> List[str]:
     """Generate convergence_<model>.png and cost_<model>.png for each model with
     >=2 grid values. Returns the paths created. Does not raise if matplotlib is
+
+    Args:
+        master_dir: carpeta raiz de la campana.
+        outdir: carpeta donde escribir la salida. Por defecto None.
+        only_grid_methods: restringir a los metodos que viven sobre la
+            rejilla. Por defecto False.
+        xlabel: etiqueta del eje x. Por defecto 'nqpp'.
+
+    Returns:
+        List[str]
     missing: it warns and returns []."""
     try:
         import numpy as np
@@ -1520,6 +1663,15 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
     models = sorted({r['model'] for r in records})
 
     def series(model, param):
+        """Agrupa los registros de un (modelo, parametro) por metodo y resolucion.
+
+        Args:
+            model: modelo cosmologico (`cosmo_core.CosmoModel`).
+            param: nombre del parametro.
+
+        Returns:
+            Ver la descripcion de arriba.
+        """
         from collections import defaultdict
         by = defaultdict(list)
         for r in records:
@@ -1647,6 +1799,7 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
 # =============================================================================
 
 def build_parser() -> argparse.ArgumentParser:
+    """Construye el parser de la linea de comandos del orquestador."""
     p = argparse.ArgumentParser(
         prog='cosmo_hpc_runner.py',
         description="Parallel orchestrator for the samplers and genetic "
@@ -1779,6 +1932,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """Punto de entrada: planifica la campana, la ejecuta y genera las figuras.
+
+    Returns:
+        Codigo de salida del proceso (0 si todo fue bien).
+    """
     args = build_parser().parse_args()
     args.profile = not args.no_profile
 
@@ -1894,6 +2052,26 @@ def main() -> int:
     # [AUTO] Report WHY each ceiling is what it is: derived purely from
     # detected RAM (the default, no flag needed), or lowered by an explicit
     # user override.
+    # [B-BUDGETMISMATCH] Un --max-task-gb mayor que --mem-budget-gb es una
+    # contradiccion silenciosa. El planificador acota los qubits con el primero,
+    # pero el pool admite SIEMPRE al menos una tarea aunque no quepa en el
+    # presupuesto agregado (si no, una tarea mas grande que el presupuesto
+    # bloquearia la campana para siempre). O sea que con esta combinacion se
+    # puede lanzar una tarea que excede el presupuesto entero, y la unica senal
+    # seria un OOMKill horas despues.
+    #
+    # Medido: --max-task-gb 40 --mem-budget-gb 10 con CC+BAO+Pantheon concedia
+    # 18 qubits, que son ~22 GB para UNA tarea, contra un presupuesto de 10.
+    if args.max_task_gb and args.max_task_gb * 1024 > mem_budget_mb:
+        print(f"\n  !! AVISO: --max-task-gb ({args.max_task_gb:.0f} GB) es MAYOR "
+              f"que el presupuesto agregado ({mem_budget_mb/1024:.0f} GB).\n"
+              f"     El techo de qubits sale de --max-task-gb, pero el pool "
+              f"admite siempre al menos\n"
+              f"     una tarea aunque no quepa en el presupuesto: puedes lanzar "
+              f"una tarea que se\n"
+              f"     salga y acabar en un OOMKill. Baja --max-task-gb a "
+              f"{mem_budget_mb/1024:.0f} GB o menos, o sube --mem-budget-gb.\n")
+
     src_s = (f"user override --max-qubits={args.max_qubits}"
              if args.max_qubits is not None else
              "auto, derived from detected RAM (no --max-qubits set)")

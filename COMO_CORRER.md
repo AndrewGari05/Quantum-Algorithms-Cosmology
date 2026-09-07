@@ -33,7 +33,7 @@ si `nvidia-smi` ve tarjeta. **Córrelo en cada máquina nueva.**
 > documentación de qiskit-aer para saber qué rueda con GPU corresponde a la
 > versión 0.17.x antes de instalar nada.
 
-El segundo debe dar **90 tests en verde**. Si alguno falla en un nodo nuevo,
+El segundo debe dar **116 tests en verde**. Si alguno falla en un nodo nuevo,
 párate ahí: algo del entorno no coincide.
 
 ## 2. La corrida completa
@@ -49,13 +49,17 @@ nohup python -u cosmo_hpc_runner.py \
     --nqpp-sweep 3 5 \
     --nbits-sweep 4 8 \
     --dataset CC+BAO+Pantheon \
-    --steps 20000 --qvmc-iter 1500 --chains 8 --shots 4096 \
+    --steps 20000 --qvmc-iter 15000 --chains 8 --shots 4096 \
     --generations 120 --population-size 500 \
     --total-cores 14 --mem-budget-gb 50 --max-task-gb 24 \
     --noisy-task-hours 48 \
     --seed 42 \
     > campana.log 2>&1 &
 ```
+
+Para correr en **hardware real de IBM**, el procedimiento completo está en
+`COMO_CORRER_QPU.md` — incluye la prueba de humo de 1 job que conviene mandar
+*antes* que nada.
 
 100 tareas. Para vigilarla: `tail -f campana.log`, y `grep -c OK
 results/hpc_*/master_profile.csv` para contar las que van.
@@ -213,3 +217,22 @@ plana da muestras menos correlacionadas. Repórtalo junto a KL o σ, nunca solo.
 **Las bandas de los corner son 1σ/2σ/3σ**, y en un panel de dos parámetros
 contienen 39.3 / 86.5 / 98.9 %, no 68 / 95 / 99.7. Esos son los de una
 gaussiana en una dimensión.
+
+---
+
+## 6. Rehacer una figura sin repetir la campaña
+
+Cada tarea genética deja ahora un `ga_state.npz` junto a sus figuras, con la
+población final, sus pesos y la historia por generación. Con eso se redibuja
+todo en segundos:
+
+```bash
+python cosmo_genetic_optimizers.py --replot results/hpc_*/genetic_lcdm_*/model_lcdm/ga_state.npz
+```
+
+Antes esto no se podía: la población solo vivía en memoria, así que **cambiar
+un color o corregir un eje obligaba a repetir la corrida entera** — días de
+cómputo por un cambio cosmético. Se descubrió al arreglar `[B-GAPLOT]`.
+Añade `--anim none` para saltarte el GIF, `--outdir` para escribir en otro
+sitio, y `--no-state` en la corrida si prefieres no gastar el ~1–3 MB por
+tarea (a cambio de volver al problema de antes).

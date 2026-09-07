@@ -131,16 +131,54 @@ KL final del QVMC contra el posterior de referencia, a `nqpp` fijo:
 En **20 de 24** celdas el rung entrenado con parameter-shift sale **peor** que
 el entrenado con gradiente clásico, y la brecha **crece con el número de
 qubits** (ΛCDM: 0.757 → 1.127 al ir de nqpp 4 a 9; PEDE: 0.742 → 1.506).
-Es la firma esperada de la varianza del estimador de parameter-shift con
-número finito de disparos, agravada al crecer el circuito.
 
-El coste es de **30× a 100×** en tiempo por un resultado peor. Ejemplo
-concreto: GEDE a nqpp=6, 433 s con gradiente clásico contra **10 horas** con
-parameter-shift, para pasar de KL 1.378 a 2.080.
+> **CORRECCIÓN.** Una versión anterior de este documento atribuía esa brecha a
+> «la varianza del estimador de parameter-shift con número finito de
+> disparos». **Eso es falso en la corrida ideal**, por dos razones
+> independientes: (1) con `--noise none` el QVMC lee amplitudes, no conteos,
+> así que no hay disparos ni varianza de muestreo; (2) la regla de
+> parameter-shift está implementada sobre las *probabilidades*
+> `Q_i = ⟨ψ|Π_i|ψ⟩` con regla de la cadena hacia el KL, y para puertas RY/RZ
+> (autovalores ±1/2) es **exacta**, no una diferencia finita — está verificada
+> contra diferencias centrales en los tests. Así que ni ruido de disparo ni
+> sesgo del gradiente.
+>
+> Lo que de verdad separa los rungs es que **son optimizadores distintos**:
+> el VI clásico usa COBYLA y el rung 67 % usa SGD con decaimiento de tasa
+> sobre el gradiente de parameter-shift. Eso es exactamente lo que la
+> taxonomía del proyecto etiqueta como celda ALGORITHMIC, y es correcto que
+> difieran.
 
-Esta es la conclusión honesta y es *fuerte*: el pipeline cuántico **reproduce**
-el clásico donde el criterio es identidad, y **cuesta dos órdenes de magnitud
-más sin mejorarlo** donde el criterio es estadístico. Fidelidad, no ventaja.
+**Y el SGD está SIN CONVERGER a 5000 iteraciones.** Medido sobre la traza de
+KL de los propios logs, comparando el KL en la iteración 4000 contra la 5000:
+
+| celda | VI clásico (COBYLA) | QVMC 67 % (SGD) |
+|---|---|---|
+| ΛCDM nqpp6 | −0.5 % | −1.3 % |
+| ΛCDM nqpp9 | −0.5 % | **−2.9 %** |
+| wCDM nqpp6 | −1.3 % | **−3.3 %** |
+| GEDE nqpp6 | −0.5 % | **−3.8 %** |
+
+El clásico ya está en su meseta; el cuántico sigue bajando, y **baja más justo
+donde la brecha es mayor**. O sea que una parte de la brecha no es una
+propiedad del método sino falta de iteraciones: el espacio de ángulos crece
+con `nqpp` y el SGD necesita más pasos para recorrerlo. Cuánta parte, no se
+sabe sin correrlo — cerrar de 1.127 a 0.519 en ΛCDM nqpp9 exige un 54 % de
+reducción y el ritmo actual es ~3 % por cada 1000 iteraciones, decreciendo.
+
+**Consecuencia práctica:** `--qvmc-iter` es una palanca real y bajarlo es un
+error. Cualquier afirmación sobre la brecha entre rungs tiene que venir de una
+corrida donde el SGD haya llegado a su meseta, o declarar explícitamente que
+está sin converger.
+
+El coste es de **30× a 100×** en tiempo. Ejemplo concreto: GEDE a nqpp=6,
+433 s con gradiente clásico contra **10 horas** con parameter-shift.
+
+La conclusión que sí se sostiene con estos datos es la de las celdas
+*faithful* (§3.1–3.2): el pipeline cuántico **reproduce** el clásico donde el
+criterio es identidad, y cuesta dos órdenes de magnitud más. Fidelidad, no
+ventaja. La comparación estadística del rung 67 % queda **pendiente** hasta
+tener el SGD convergido.
 
 > **Trampa a evitar.** Hay 4 celdas donde el 67 % sale mejor: GEDE nqpp 3 y 4,
 > PEDE nqpp 3, ΛCDM nqpp 3. Todas están en `nqpp = 3`, donde el VI clásico
@@ -241,15 +279,20 @@ trayectorias; si el fiducial cae fuera, se anota en el borde.
 
 ## 5. Qué falta antes de citar cualquier número
 
-1. **Semillas múltiples.** Todo esto es `--seed 42`. La degradación del
+1. **Un SGD convergido.** Lo primero, porque sin eso §3.3 no se puede citar:
+   subir `--qvmc-iter` hasta que la bajada del KL en el último 20 % del
+   entrenamiento sea comparable a la del VI clásico (~0.5 %). Con 5000 va por
+   el 3 %.
+2. **Semillas múltiples.** Todo esto es `--seed 42`. La degradación del
    parameter-shift (§3.3) aparece en 20 de 24 celdas y crece de forma
-   sistemática con el número de qubits, así que es sólida; pero cualquier
-   *número* concreto de KL necesita al menos 3–5 semillas y una barra.
-2. **La campaña con ruido de samplers.** La corrida en curso es solo genética.
+   sistemática con el número de qubits, así que la *tendencia* es sólida; pero
+   cualquier *número* concreto de KL necesita al menos 3–5 semillas y una
+   barra — y además el SGD convergido del punto anterior.
+3. **La campaña con ruido de samplers.** La corrida en curso es solo genética.
    Los rungs QVMC bajo ruido son la celda vacía del eje.
-3. **La columna de control `none-counts`.** Sin ella, comparar el peldaño ideal
+4. **La columna de control `none-counts`.** Sin ella, comparar el peldaño ideal
    (que lee amplitudes) contra los ruidosos (que leen conteos) mide el ruido y
    el cambio de operador a la vez.
-4. **Relanzar `cpl/nqpp5` y `gede,wcdm/nqpp7`** con `--max-task-gb` suficiente,
+5. **Relanzar `cpl/nqpp5` y `gede,wcdm/nqpp7`** con `--max-task-gb` suficiente,
    o aceptar que el techo real de este nodo es 18–19 qubits con
    CC+BAO+Pantheon y decirlo así en la tesis.

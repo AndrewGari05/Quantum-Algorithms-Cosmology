@@ -176,6 +176,14 @@ def canonical_level(level: Optional[str]) -> str:
 
     Returns:
         Etiqueta canonica; `'none'` cuando `level` es None o vacio.
+    Examples:
+        Los tres peldanos con nombre se normalizan a minusculas, y cualquier
+        otra cosa se interpreta como nombre de backend:
+
+        >>> canonical_level('NONE'), canonical_level(None)
+        ('none', 'none')
+        >>> canonical_level('FakeBrisbane')
+        'fakebrisbane'
     """
     if not level:
         return 'none'
@@ -523,6 +531,7 @@ class NoiseSpec:
         }
 
     def __repr__(self) -> str:                              # pragma: no cover
+        """Representacion corta para depuracion."""
         return (f"NoiseSpec(label={self.label!r}, "
                 f"gates={self.gate_model is not None}, "
                 f"readout={self.has_readout})")
@@ -589,6 +598,15 @@ def param_shift_batch_factor(n_qubits: int,
 
     Returns:
         `2 * n_phi`.
+    Examples:
+        Este es el numero que fija el techo de qubits del QVMC con ruido: el
+        entrenamiento cuantico materializa `2 * n_phi` matrices de densidad a
+        la vez, no una.
+
+        >>> param_shift_batch_factor(4)
+        56
+        >>> param_shift_batch_factor(12)
+        168
     """
     return 2 * ansatz_n_params(n_qubits, n_layers)
 
@@ -601,6 +619,17 @@ def noisy_density_bytes(n_qubits: int, batch_factor: int = 1) -> int:
         batch_factor: cuantas matrices de densidad viven a la vez (1 para una
             evaluacion suelta; `param_shift_batch_factor(n)` para el lote de
             entrenamiento cuantico del QVMC).
+    Examples:
+        Una matriz de densidad suelta a 12 qubits son 256 MB...
+
+        >>> noisy_density_bytes(12) / 1e6
+        268.435456
+
+        ...pero el lote de parameter-shift a esa anchura son 45 GB, y por eso
+        el techo del QVMC ruidoso esta muy por debajo del que da la RAM:
+
+        >>> round(noisy_density_bytes(12, param_shift_batch_factor(12)) / 1e9, 1)
+        45.1
     """
     return (2 ** (2 * int(n_qubits))) * 16 * int(batch_factor)
 
@@ -686,6 +715,25 @@ def genetic_noisy_seconds_per_gen(n_qubits: int) -> float:
     predice esta funcion. Con esos niveles en la barrida, baja
     `--noisy-task-hours` para compensar, o cuenta con que el reloj real supere
     al presupuesto.
+
+    Args:
+        n_qubits: ancho del circuito en qubits.
+
+    Returns:
+        float
+    Examples:
+        Reproduce las dos mediciones de la campana 2026-09-03...
+
+        >>> round(genetic_noisy_seconds_per_gen(10))
+        73
+        >>> round(genetic_noisy_seconds_per_gen(12))
+        1426
+
+        ...y extrapola a 14 qubits el valor que motivo [B-TIME]: 7.7 h POR
+        generacion, o sea ~4 meses las 500 que se pidieron.
+
+        >>> round(genetic_noisy_seconds_per_gen(14) / 3600, 1)
+        7.7
     """
     d = int(n_qubits) - GENETIC_NOISY_REF_QUBITS
     return GENETIC_NOISY_REF_SEC_PER_GEN * (GENETIC_NOISY_GROWTH_PER_QUBIT ** d)
@@ -703,6 +751,19 @@ def genetic_noisy_time_ceiling(generations: int,
     Returns:
         Techo de qubits; al menos 1, para que un presupuesto absurdo no
         produzca un plan vacio sin explicacion.
+    Examples:
+        Con 120 generaciones y dos dias de presupuesto caben 12 qubits; con
+        las 500 de la campana vieja, solo 11:
+
+        >>> genetic_noisy_time_ceiling(120, 48)
+        12
+        >>> genetic_noisy_time_ceiling(500, 48)
+        11
+
+        No es una constante: mas presupuesto concede mas anchura.
+
+        >>> genetic_noisy_time_ceiling(120, 480)
+        13
     """
     budget_s = max(float(budget_hours), 0.0) * 3600.0
     g = max(int(generations), 1)

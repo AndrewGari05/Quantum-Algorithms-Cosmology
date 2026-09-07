@@ -313,7 +313,14 @@ def probe_faithful_degradation() -> None:
                          for k in range(len(thetas))])
 
     def via_density(nm: Optional[NoiseModel]) -> np.ndarray:
-        """Lectura propuesta: rho[0,0]. Ve compuertas, NO ve lectura."""
+        """Lectura propuesta: rho[0,0]. Ve compuertas, NO ve lectura.
+
+        Args:
+            nm: modelo de ruido de Aer.
+
+        Returns:
+            np.ndarray
+        """
         qc = base.copy()
         qc.save_density_matrix()
         sim = AerSimulator(method='density_matrix', noise_model=nm)
@@ -326,7 +333,15 @@ def probe_faithful_degradation() -> None:
 
     def via_counts(nm: Optional[NoiseModel],
                    shots: int = 100_000) -> np.ndarray:
-        """Lectura por conteos: la unica que ve el canal de lectura."""
+        """Lectura por conteos: la unica que ve el canal de lectura.
+
+        Args:
+            nm: modelo de ruido de Aer.
+            shots: disparos por circuito. Por defecto 100000.
+
+        Returns:
+            np.ndarray
+        """
         qc = base.copy()
         qc.measure_all()
         sim = AerSimulator(noise_model=nm, seed_simulator=11)
@@ -365,7 +380,15 @@ def probe_faithful_degradation() -> None:
 # =============================================================================
 
 def main(argv=None) -> int:
-    """Ejecuta las sondas seleccionadas e imprime el reporte."""
+    """Ejecuta las sondas seleccionadas e imprime el reporte.
+
+    Args:
+        argv: argumentos de linea de comandos; None usa `sys.argv`. Por
+            defecto None.
+
+    Returns:
+        int
+    """
     ap = argparse.ArgumentParser(
         description="Sondas de viabilidad del eje de ruido NISQ.")
     ap.add_argument('--cost', action='store_true',

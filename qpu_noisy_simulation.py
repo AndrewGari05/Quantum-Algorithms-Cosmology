@@ -110,6 +110,14 @@ class LocalNoisyConnection(qpu.QPUConnection):
     def __init__(self, noise: "cnoise.NoiseSpec", shots: int = 4096,
                  seed: Optional[int] = None,
                  logger: Optional[logging.Logger] = None):
+        """Sustituto local de QPUConnection que simula ruido en vez de usar la QPU.
+
+        Args:
+            noise: especificacion de ruido a aplicar.
+            shots: disparos por circuito.
+            seed: semilla del simulador.
+            logger: destino de los mensajes.
+        """
         from cosmo_core import make_simulator
 
         self.shots = shots

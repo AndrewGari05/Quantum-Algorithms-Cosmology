@@ -1,35 +1,32 @@
-# =============================================================================
-#  cosmo_core.py — Shared physics, data and statistics
-# =============================================================================
-#
-#  Core module of the quantum-classical cosmological inference pipeline.
-#  ALL the physics lives here, strictly separated from the sampling logic
-#  (MCMC/QVMC), which lives in `cosmo_modular_quantum.py` and
-#  `qpu_cosmo_samplers.py`.
-#
-#  Contents:
-#    1. Modular registry of cosmological models (ΛCDM, wCDM, CPL, PEDE, GEDE)
-#    2. Observational data (Cosmic Chronometers + Pantheon+ SNe Ia)
-#    3. Likelihoods and N-dimensional posterior (any number of parameters)
-#    4. Statistical estimators: χ², reduced χ², AIC, BIC, ESS, Gelman-Rubin, τ
-#    5. Logging utilities for the non-interactive CLI mode
-#
-#  [KEY CHANGE vs previous version]
-#  The Pantheon+ likelihood NO LONGER uses a precomputed lookup grid in Ωm
-#  (which was only valid for flat ΛCDM). The comoving distance is now
-#  computed with a vectorized cumulative trapezoid over a fine z grid,
-#  valid for ANY model E²(z; θ). This is what enables CPL/wCDM without
-#  touching the sampling code, and is also ~10× faster than the original
-#  point-by-point scipy.integrate.quad.
-# =============================================================================
+""" cosmo_core.py — Shared physics, data and statistics
 
+ Core module of the quantum-classical cosmological inference pipeline.
+ ALL the physics lives here, strictly separated from the sampling logic
+ (MCMC/QVMC), which lives in `cosmo_modular_quantum.py` and
+ `qpu_cosmo_samplers.py`.
+
+ Contents:
+   1. Modular registry of cosmological models (ΛCDM, wCDM, CPL, PEDE, GEDE)
+   2. Observational data (Cosmic Chronometers + Pantheon+ SNe Ia)
+   3. Likelihoods and N-dimensional posterior (any number of parameters)
+   4. Statistical estimators: χ², reduced χ², AIC, BIC, ESS, Gelman-Rubin, τ
+   5. Logging utilities for the non-interactive CLI mode
+
+ [KEY CHANGE vs previous version]
+ The Pantheon+ likelihood NO LONGER uses a precomputed lookup grid in Ωm
+ (which was only valid for flat ΛCDM). The comoving distance is now
+ computed with a vectorized cumulative trapezoid over a fine z grid,
+ valid for ANY model E²(z; θ). This is what enables CPL/wCDM without
+ touching the sampling code, and is also ~10× faster than the original
+ point-by-point scipy.integrate.quad.
+"""
 from __future__ import annotations
 
 import logging
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -38,13 +35,28 @@ from scipy.optimize import minimize
 
 # ── Physical constants and Planck 2018 values ────────────────────────────────
 C_LIGHT  = 299792.458        # km/s
-# [P2] Radiation density today, FIXED. This is the photon term only; the
-# relativistic-neutrino contribution (a factor 1 + 7/8·(4/11)^{4/3}·N_eff ≈
-# 1.68 for N_eff = 3.046) is NOT included. Over the redshift range probed here
-# (CC+BAO to z≈2.3, SNe to z≈2.3) radiation is sub-percent in E², so this is a
-# deliberate, declared approximation rather than an omission; for high-z
-# (CMB-distance) extensions Ωr must be upgraded to include neutrinos.
-OMEGA_R0 = 9.4e-5            # radiation density today (photons only, fixed)
+# [P2] Densidad de radiacion hoy, FIJA.
+#
+# CORRECCION: el comentario anterior decia que este valor era "solo el termino
+# de fotones" y que para extensiones a alto z habria que multiplicarlo por
+# ~1.68 para incluir los neutrinos relativistas. Es al reves — el valor YA los
+# incluye, y seguir esa instruccion habria metido un error del 73 %:
+#
+#     Omega_gamma (solo fotones, Omega_gamma h^2 = 2.4728e-5, h = 0.6766)
+#                                        = 5.402e-05
+#     Omega_r (fotones + 3.046 neutrinos) = 9.138e-05
+#     este OMEGA_R0                       = 9.400e-05   <- 2.9 % por encima
+#                                                          del total, no 1.68x
+#                                                          por debajo
+#
+# O sea que ya es fotones + neutrinos, con un 3 % de holgura. Sobre el rango
+# de corrimiento al rojo que se usa aqui (z <~ 2.4) la radiacion aporta el
+# 0.096 % de E^2, asi que ese 3 % es irrelevante. Para extensiones a alto z
+# (distancias al CMB) hay que revisarlo, pero NO multiplicandolo por 1.68.
+OMEGA_R0 = 9.4e-5            # fotones + neutrinos relativistas, fijo
+
+#: Tipos de prior aceptados por `Posterior`. Ver [B-PRIORTYPE].
+PRIOR_TYPES = frozenset({'flat', 'gaussian'})
 
 H0_MU, H0_SIG = 67.66, 0.42      # Gaussian prior on H0  (Planck 2018, TT,TE,EE+lowE+lensing)
 OM_MU, OM_SIG = 0.3111, 0.0056   # Gaussian prior on Ωm  (Planck 2018)
@@ -104,9 +116,58 @@ class CosmoModel:
         return len(self.param_names)
 
     def H(self, z: np.ndarray, theta: np.ndarray) -> np.ndarray:
-        """H(z) in km/s/Mpc. θ[1] is always H0 by convention."""
+        """H(z) in km/s/Mpc. θ[1] is always H0 by convention.
+
+        [B-CLIP] Antes hacia `np.clip(e2, 1e-12, None)`, o sea que para
+        E^2 <= 0 — una combinacion de parametros SIN SENTIDO FISICO — devolvia
+        H = 1e-6 * H0 en vez de avisar, y de ahi salia un chi2 finito y un
+        log-posterior finito. El contrato documentado de la clase dice lo
+        contrario: que los valores no fisicos "se penalizan automaticamente".
+
+        La incoherencia era observable: para el mismo theta, la rama de
+        supernovas SI rechazaba (devolvia -inf) y la de cronometros no, asi
+        que el mismo punto tenia posterior finito con CC+BAO e infinito
+        negativo con CC+BAO+Pantheon.
+
+        Con los cinco modelos actuales E^2 > 0 en toda su caja de prior, asi
+        que esto no ha corrompido ningun resultado. Pero deja de ser latente
+        en cuanto se anada curvatura (Omega_k < 0 hace E^2 negativo a z alto),
+        que es justo el siguiente modelo del proyecto. Ahora devuelve `nan`,
+        que se propaga a un chi2 no finito y el punto se rechaza.
+
+        Args:
+            z: corrimiento(s) al rojo.
+            theta: vector de parametros del modelo.
+
+        Returns:
+            np.ndarray
+        Examples:
+            A z=0 todos los modelos dan H0 por construccion:
+
+            >>> import numpy as np
+            >>> round(float(MODELS['lcdm'].H(np.array([0.0]),
+            ...                              np.array([0.3, 70.0]))[0]), 10)
+            70.0
+
+            (Sale 69.99999999999999 sin redondear: E^2(0) = Om + Or + OL vale
+            1 solo hasta el epsilon de la maquina. El doctest lo detecto.)
+
+            Y los limites analiticos se cumplen EXACTAMENTE, que es la prueba
+            de que la fisica esta bien: wCDM con w=-1 es LCDM, y CPL con
+            w0=-1, wa=0 tambien.
+
+            >>> z = np.array([0.5, 1.0, 2.0])
+            >>> l = MODELS['lcdm'].H(z, np.array([0.3, 70.0]))
+            >>> w = MODELS['wcdm'].H(z, np.array([0.3, 70.0, -1.0]))
+            >>> c = MODELS['cpl'].H(z, np.array([0.3, 70.0, -1.0, 0.0]))
+            >>> bool(np.array_equal(l, w) and np.array_equal(l, c))
+            True
+
+            Un modelo no fisico (E^2 <= 0) devuelve nan, no un numero pequeno
+            — ver [B-CLIP] arriba.
+        """
         e2 = self.E2(np.asarray(z), theta)
-        return theta[1] * np.sqrt(np.clip(e2, 1e-12, None))
+        return theta[1] * np.sqrt(np.where(e2 > 0.0, e2, np.nan))
 
 
 def _E2_lcdm(z, th):
@@ -299,8 +360,22 @@ def load_cc(path: str = "cosmic_chronometers.txt") -> np.ndarray:
                     print(f"  ✓ CC+BAO H(z) loaded from file: {p}  "
                           f"({len(arr)} pts)")
                     return arr
+                # [B-SILENT] Un archivo con menos de 3 columnas caia hasta el
+                # `return` final SIN decir nada, y devolvia la tabla empotrada.
+                print(f"  ⚠  {p} tiene forma {arr.shape}, se esperaban >=3 "
+                      f"columnas (z, H, sigma) — se usa la tabla empotrada")
+                return _CC_EMBEDDED
             except Exception as e:
                 print(f"  ⚠  Error reading {p}: {e} — using embedded data")
+                return _CC_EMBEDDED
+    # [B-SILENT] Ningun candidato existia. Antes esto tambien era mudo: la
+    # UNICA senal de que se estaba usando la tabla empotrada en vez del archivo
+    # pedido era la AUSENCIA de la linea "✓ CC+BAO H(z) loaded" en un log de
+    # miles de lineas. Eso anula el proposito de data_manifest.py y de
+    # data_checksums.json, y sustituiria en silencio cualquier compilacion
+    # alternativa que un revisor pidiera probar.
+    print(f"  ⚠  No se encontro '{path}' junto al modulo ni en el directorio "
+          f"actual — se usa la tabla CC+BAO empotrada ({len(_CC_EMBEDDED)} pts)")
     return _CC_EMBEDDED
 
 
@@ -319,6 +394,13 @@ def load_pantheon(search_dirs: Optional[Sequence[str]] = None) -> Optional[dict]
     Returns:
         dict with arrays 'z', 'mb', 'dmb' sorted by z, or None if the
         file is not found.
+
+    Args:
+        search_dirs: carpetas donde buscar el archivo; None usa las de por
+            defecto. Por defecto None.
+
+    Returns:
+        Optional[dict]
     """
     names = ["pantheon_full_parameters.txt", "Pantheon_full_parameters.txt",
              "pantheon.txt", "Pantheon.txt"]
@@ -375,6 +457,7 @@ def _pantheon_plus_files_present(search_dirs: Optional[Sequence[str]] = None
     dirs = [script_dir, os.getcwd()] + list(search_dirs or [])
 
     def _find(cands):
+        """Primer nombre de `cands` que exista en alguno de `dirs`, o None."""
         for d in dirs:
             for nm in cands:
                 p = os.path.join(d, nm)
@@ -417,6 +500,17 @@ def load_pantheon_plus(data_name: str = "Pantheon+SH0ES.dat",
         dict with 'z', 'mu' (distance modulus), 'cov' (N×N), 'cov_inv',
         and helper sums for analytic M_abs marginalization; or None if the
         files are not found.
+
+    Args:
+        data_name: nombre del archivo de datos. Por defecto
+            'Pantheon+SH0ES.dat'.
+        cov_name: nombre del archivo de covarianza. Por defecto
+            'Pantheon+SH0ES_STAT+SYS.cov'.
+        search_dirs: carpetas donde buscar el archivo; None usa las de por
+            defecto. Por defecto None.
+
+    Returns:
+        Optional[dict]
     """
     names_data = [data_name, "Pantheon+SH0ES.dat", "PantheonPlusSH0ES.dat",
                   "Pantheon+_data.txt"]
@@ -429,6 +523,7 @@ def load_pantheon_plus(data_name: str = "Pantheon+SH0ES.dat",
     dirs = [script_dir, os.getcwd()] + list(search_dirs or [])
 
     def _find(cands):
+        """Primer nombre de `cands` que exista en alguno de `dirs`, o None."""
         for d in dirs:
             for nm in cands:
                 p = os.path.join(d, nm)
@@ -450,6 +545,19 @@ def load_pantheon_plus(data_name: str = "Pantheon+SH0ES.dat",
         cols = {n.lower(): n for n in tbl.dtype.names}
 
         def pick(options):
+            """Primera columna de `options` presente en la tabla, o None.
+
+            Los catalogos de supernovas renombran sus columnas entre versiones
+            (zHD/zCMB/zcmb, MU_SH0ES/mu), asi que se prueban alias en orden de
+            preferencia en vez de exigir un nombre fijo.
+
+            Args:
+                options: nombres alternativos a probar, en orden de
+                    preferencia.
+
+            Returns:
+                Ver la descripcion de arriba.
+            """
             for o in options:
                 if o.lower() in cols:
                     return tbl[cols[o.lower()]].astype(float)
@@ -520,7 +628,19 @@ DATASET_ALIASES: Dict[str, str] = {
 
 
 def canonical_dataset(name: str) -> str:
-    """Map a dataset name (possibly an old alias) to its canonical key."""
+    """Map a dataset name (possibly an old alias) to its canonical key.
+
+    Args:
+        name: nombre a resolver.
+
+    Returns:
+        str
+    Examples:
+        >>> canonical_dataset('CC+BAO')
+        'CC+BAO'
+        >>> canonical_dataset('CC')
+        'CC+BAO'
+    """
     return DATASET_ALIASES.get(name, name)
 
 
@@ -551,6 +671,20 @@ class Posterior:
                  cc_data: Optional[np.ndarray] = None,
                  pantheon: Optional[dict] = None,
                  n_zgrid: int = 1200):
+        """Construye el posterior de un modelo sobre un dataset.
+
+        Args:
+            model: modelo cosmologico activo (de `MODELS`).
+            dataset: nombre o alias reconocido por `canonical_dataset`.
+            prior_type: 'flat' (caja) o 'gaussian' (Planck 2018 sobre Om y H0).
+                Cualquier otra cadena levanta ValueError; ver [B-PRIORTYPE].
+            cc_data: tabla H(z) ya cargada; None la carga con `load_cc`.
+            pantheon: catalogo de supernovas ya cargado; None lo carga solo.
+            n_zgrid: puntos de la rejilla en z para la distancia comovil.
+
+        Raises:
+            ValueError: dataset o prior_type desconocidos.
+        """
         self.model = model
         self.dataset = canonical_dataset(dataset)
         if self.dataset not in DATASET_COMPONENTS:
@@ -558,6 +692,16 @@ class Posterior:
                 f"Unknown dataset '{dataset}'. Valid: "
                 f"{list(DATASET_COMPONENTS)} (or aliases {list(DATASET_ALIASES)})")
         self.components = DATASET_COMPONENTS[self.dataset]
+        # [B-PRIORTYPE] Cualquier cadena no reconocida caia silenciosamente en
+        # el prior plano: 'Gaussian' con mayuscula, 'planck', un typo — todos
+        # daban log_prior = 0 sin avisar. Una corrida etiquetada "gaussian" en
+        # el CSV de resultados que en realidad uso prior plano es irrecuperable
+        # despues. Los CLI ya lo acotan con `choices`, pero las llamadas de
+        # biblioteca no.
+        if prior_type not in PRIOR_TYPES:
+            raise ValueError(
+                f"prior_type desconocido: {prior_type!r}. "
+                f"Validos: {sorted(PRIOR_TYPES)}")
         self.prior_type = prior_type
 
         # CC+BAO H(z) table (always loaded; used only if 'cc' is active).
@@ -610,8 +754,22 @@ class Posterior:
 
     # ── χ² components ────────────────────────────────────────────────────────
     def chi2_cc(self, theta: np.ndarray) -> float:
-        """CC+BAO H(z) χ² for the active model (diagonal errors)."""
+        """CC+BAO H(z) χ² for the active model (diagonal errors).
+
+        [B-CLIP] Devuelve `inf` si el modelo no es fisico en algun z de la
+        muestra (E^2 <= 0 hace que `H` devuelva nan). Antes salia un chi2
+        grande pero finito, y el punto entraba en la cadena como si fuera un
+        mal ajuste en vez de una imposibilidad.
+
+        Args:
+            theta: vector de parametros del modelo.
+
+        Returns:
+            float
+        """
         Hm = self.model.H(self.z_cc, theta)
+        if not np.all(np.isfinite(Hm)):
+            return float(np.inf)
         return float(np.sum(((self.H_cc - Hm) / self.sig_cc)**2))
 
     def _mu_theory(self, z_sn: np.ndarray, theta: np.ndarray) -> np.ndarray:
@@ -643,6 +801,12 @@ class Posterior:
 
         χ²_eff = A − B²/C (Goliath et al. 2001):
             A = Σ Δ²/σ², B = Σ Δ/σ², C = Σ 1/σ², Δ = m_obs − μ_th.
+
+        Args:
+            theta: vector de parametros del modelo.
+
+        Returns:
+            float
         """
         mu_th = self._mu_theory(self.pantheon['z'], theta)
         if mu_th is None:
@@ -661,6 +825,12 @@ class Posterior:
         which is the matrix generalization of Goliath et al. (2001): it
         analytically marginalizes the constant M_abs offset while keeping the
         correlated systematics encoded in C.
+
+        Args:
+            theta: vector de parametros del modelo.
+
+        Returns:
+            float
         """
         mu_th = self._mu_theory(self.pantheon['z'], theta)
         if mu_th is None:
@@ -685,6 +855,12 @@ class Posterior:
         what anchors H0 — but it means that for a combined dataset H0 is NOT
         marginalized away; only the SNe nuisance offset is. Reduced-χ² and
         BIC use the full n_data across both blocks.
+
+        Args:
+            theta: vector de parametros del modelo.
+
+        Returns:
+            Tuple[float, int]
         """
         c = 0.0
         if 'cc' in self.components:
@@ -697,7 +873,14 @@ class Posterior:
 
     # ── prior and posterior ──────────────────────────────────────────────────
     def log_prior(self, theta: np.ndarray) -> float:
-        """Log-prior: hard box + optional Planck Gaussian on (Ωm, H0)."""
+        """Log-prior: hard box + optional Planck Gaussian on (Ωm, H0).
+
+        Args:
+            theta: vector de parametros del modelo.
+
+        Returns:
+            float
+        """
         for v, (lo, hi) in zip(theta, self.model.bounds):
             if not (lo < v < hi):
                 return -np.inf
@@ -707,7 +890,14 @@ class Posterior:
         return 0.0
 
     def log_prob(self, theta: np.ndarray) -> float:
-        """(Unnormalized) log-posterior at θ."""
+        """(Unnormalized) log-posterior at θ.
+
+        Args:
+            theta: vector de parametros del modelo.
+
+        Returns:
+            float
+        """
         lp = self.log_prior(theta)
         if not np.isfinite(lp):
             return -np.inf
@@ -717,6 +907,7 @@ class Posterior:
         return lp - 0.5 * c
 
     def __call__(self, theta: np.ndarray) -> float:
+        """Alias de `log_prob`, para pasar el posterior como funcion."""
         return self.log_prob(theta)
 
     # ── batched (vectorized) evaluation ──────────────────────────────────────
@@ -731,6 +922,12 @@ class Posterior:
         It works for any model because the E²(z;θ) functions are written
         with elementary broadcasting operations: θ_i components with
         shape (B,1) are passed against z with shape (Nz,).
+
+        Args:
+            thetas: lote de parametros, de forma (B, d).
+
+        Returns:
+            np.ndarray
         """
         thetas = np.atleast_2d(np.asarray(thetas, dtype=float))
         B = len(thetas)
@@ -753,15 +950,29 @@ class Posterior:
         # 2) vectorized CC+BAO: E2 with broadcasting (Bv, Ncc)
         if 'cc' in self.components:
             e2 = self.model.E2(self.z_cc[None, :], th_cols)
-            Hm = T[:, 1:2] * np.sqrt(np.clip(e2, 1e-12, None))
-            lp += -0.5 * np.sum(((self.H_cc[None, :] - Hm)
-                                 / self.sig_cc[None, :])**2, axis=1)
+            # [B-CLIP] Mismo criterio que CosmoModel.H: E^2 <= 0 no es un
+            # H(z) chiquito, es un punto no fisico. `nan` se propaga y el
+            # filtro de abajo lo rechaza.
+            bad_cc = np.any(~np.isfinite(e2) | (e2 <= 0.0), axis=1)
+            Hm = T[:, 1:2] * np.sqrt(np.where(e2 > 0.0, e2, 1.0))
+            chi2c = np.sum(((self.H_cc[None, :] - Hm)
+                            / self.sig_cc[None, :])**2, axis=1)
+            # [B-CLIP] Un punto no fisico se rechaza, no se le asigna un chi2
+            # grande: asi la ruta vectorizada devuelve -inf igual que la
+            # escalar, en vez de un nan.
+            chi2c[bad_cc] = np.inf
+            lp += -0.5 * chi2c
 
         # 3) vectorized SNe (Pantheon 2018 diagonal OR Pantheon+ covariance):
         #    row-wise cumulative trapezoid for the comoving distance (Bv, Nzg)
         if ('sn' in self.components or 'snp' in self.components) and self.pantheon:
             e2 = self.model.E2(self._zg[None, :], th_cols)
-            bad = np.any(e2 <= 0, axis=1)
+            # [B-NANMASK] `nan <= 0` es False, asi que un E^2 = nan se colaba
+            # por esta mascara y salia un log-posterior nan donde la ruta
+            # escalar devolvia -inf. Metropolis rechaza un nan por
+            # comparacion, asi que nunca corrompio una cadena, pero las dos
+            # rutas deben coincidir.
+            bad = np.any(~np.isfinite(e2) | (e2 <= 0), axis=1)
             e2 = np.clip(e2, 1e-12, None)
             I = cumulative_trapezoid(1.0 / np.sqrt(e2), self._zg,
                                      axis=1, initial=0.0)
@@ -868,6 +1079,12 @@ def autocorr_time_max(chains: np.ndarray) -> float:
 
     Averages τ over the M chains per parameter, then takes the maximum over
     the d parameters (the conservative choice that drives ESS).
+
+    Args:
+        chains: numero de cadenas en paralelo.
+
+    Returns:
+        float
     """
     M, N, d = chains.shape
     taus = [np.mean([autocorr_time_fft(chains[c, :, p]) for c in range(M)])
@@ -891,14 +1108,25 @@ def ess_chains(chains: np.ndarray) -> float:
     This is the same MN/τ convention used by emcee; it is intentionally
     distinct from ArviZ's rank-normalized bulk-ESS, which is reported
     separately by the diagnostics layer when needed.
+
+    Args:
+        chains: numero de cadenas en paralelo.
+
+    Returns:
+        float
     """
     M, N, _ = chains.shape
     return float(M * N / autocorr_time_max(chains))
 
 
+#: Semilla por defecto del prefit que coloca la rejilla. Ver [B-GRIDSEED].
+GRID_WINDOW_SEED = 20260904
+
+
 def estimate_grid_window(post, sigma_mult: float = 4.0,
                          n_steps: int = 400, n_chains: int = 4,
-                         use_median: bool = True) -> List[tuple]:
+                         use_median: bool = True,
+                         seed: Optional[int] = GRID_WINDOW_SEED) -> List[tuple]:
     """Quick classical pre-fit that positions a discrete inference grid.
 
     [ADAPTIVE GRID] A grid-based method (QVMC, classical VI, the QPU
@@ -923,19 +1151,49 @@ def estimate_grid_window(post, sigma_mult: float = 4.0,
 
     The pre-fit only places/scales the grid (an adaptive-grid technique); it
     does not feed the downstream result itself.
+
+    [B-GRIDSEED] Este prefit tomaba sus numeros aleatorios del RNG global del
+    modulo, asi que **la ventana cambiaba en cada llamada**: medido sobre
+    lcdm/CC+BAO, el ancho en Om variaba un 54 % entre llamadas identicas
+    (0.1121 a 0.1721), y ademas dependia de cuantos numeros hubiera consumido
+    antes cualquier otra parte del programa.
+
+    Eso rompia justo la promesa que hace [B3] arriba: que el simulador y la
+    QPU construyen la MISMA rejilla. Como cada uno llama a esta funcion por su
+    cuenta, en realidad cada uno se quedaba con una rejilla distinta, y el KL
+    de la QPU se comparaba contra el del simulador **medido sobre otra
+    discretizacion**. Esa comparacion es el resultado central del proyecto.
+
+    Ahora la ventana es una funcion PURA de (post, sigma_mult, n_steps,
+    n_chains, use_median, seed): mismo `seed`, misma ventana, sin importar el
+    orden de ejecucion ni quien llame antes. `seed=None` recupera el
+    comportamiento viejo (RNG global) por si alguien quiere muestrear la
+    variabilidad de la ventana a proposito.
+
+    Args:
+        post: posterior activo.
+        sigma_mult: semiancho de la ventana en sigmas.
+        n_steps: pasos de la cadena corta del prefit.
+        n_chains: cadenas del prefit.
+        use_median: centrar en la mediana ([S1]) o en la media.
+        seed: semilla del prefit. `None` usa el RNG global (no reproducible).
+
+    Returns:
+        Lista de `(lo, hi)` por parametro, recortada a `model.bounds`.
     """
     model = post.model
     d = model.n_params
+    rng = RNG if seed is None else np.random.default_rng(seed)
     lo = np.array([b[0] for b in model.sample_box])
     hi = np.array([b[1] for b in model.sample_box])
     step = 0.06 * (hi - lo)
-    theta = lo + (hi - lo) * RNG.uniform(0.3, 0.7, size=(n_chains, d))
+    theta = lo + (hi - lo) * rng.uniform(0.3, 0.7, size=(n_chains, d))
     lp = post.log_prob_batch(theta)
     samples = []
     for s in range(n_steps):
-        prop = theta + step * RNG.normal(size=(n_chains, d))
+        prop = theta + step * rng.normal(size=(n_chains, d))
         lpp = post.log_prob_batch(prop)
-        acc = np.log(RNG.uniform(size=n_chains) + 1e-300) < (lpp - lp)
+        acc = np.log(rng.uniform(size=n_chains) + 1e-300) < (lpp - lp)
         theta[acc] = prop[acc]
         lp[acc] = lpp[acc]
         if s >= n_steps // 3:                  # discard burn-in third
@@ -954,14 +1212,52 @@ def estimate_grid_window(post, sigma_mult: float = 4.0,
 
 
 def ess_weights(w: np.ndarray) -> float:
-    """Kish ESS for weighted samples (QVMC/VI): (Σw)²/Σw²."""
+    """Kish ESS for weighted samples (QVMC/VI): (Σw)²/Σw².
+
+    Args:
+        w: pesos de las muestras.
+
+    Returns:
+        float
+    Examples:
+        Con pesos uniformes el ESS es el numero de muestras...
+
+        >>> float(ess_weights(np.ones(100)))
+        100.0
+
+        ...y si todo el peso cae en una sola muestra, es 1. Ese contraste es
+        justo lo que medía mal [B-ESSCOMP]: el ESS de Kish NO es invariante si
+        comprimes la muestra en (valor, conteo).
+
+        >>> w = np.zeros(100); w[0] = 1.0
+        >>> float(ess_weights(w))
+        1.0
+    """
     w = np.asarray(w, dtype=float)
     s = w.sum()
     return float(s * s / np.sum(w * w)) if s > 0 else 0.0
 
 
 def gelman_rubin(chains: np.ndarray) -> float:
-    """Gelman-Rubin R̂ statistic for one parameter, shape (M, N)."""
+    """Gelman-Rubin R̂ statistic for one parameter, shape (M, N).
+
+    Args:
+        chains: numero de cadenas en paralelo.
+
+    Returns:
+        float
+    Examples:
+        Cadenas identicas dan R-hat = 1; cadenas desplazadas entre si dan
+        R-hat > 1, que es la senal de no convergencia.
+
+        >>> rng = np.random.default_rng(0)
+        >>> iguales = rng.normal(size=(4, 500))
+        >>> round(gelman_rubin(iguales), 2)
+        1.0
+        >>> desplazadas = iguales + np.arange(4)[:, None]
+        >>> gelman_rubin(desplazadas) > 1.3
+        True
+    """
     M, N = chains.shape
     mu_j = chains.mean(axis=1)
     B = N * np.var(mu_j, ddof=1)
@@ -971,7 +1267,14 @@ def gelman_rubin(chains: np.ndarray) -> float:
 
 
 def gelman_rubin_max(chains: np.ndarray) -> float:
-    """Maximum classical R̂ over all parameters, shape (M, N, d)."""
+    """Maximum classical R̂ over all parameters, shape (M, N, d).
+
+    Args:
+        chains: numero de cadenas en paralelo.
+
+    Returns:
+        float
+    """
     return max(gelman_rubin(chains[:, :, p]) for p in range(chains.shape[2]))
 
 
@@ -1058,7 +1361,16 @@ RHAT_THRESHOLD = 1.01
 
 def mcmc_converged(chains: np.ndarray, threshold: float = RHAT_THRESHOLD
                    ) -> bool:
-    """True if rank-normalized split-R̂ is below `threshold` (default 1.01)."""
+    """True if rank-normalized split-R̂ is below `threshold` (default 1.01).
+
+    Args:
+        chains: cadenas, de forma (M, N) o (M, N, d).
+        threshold: umbral de R-hat - 1 para declarar convergencia. Por defecto
+            RHAT_THRESHOLD.
+
+    Returns:
+        bool
+    """
     r = split_rhat(chains)
     return bool(np.isfinite(r) and r < threshold)
 
@@ -1077,14 +1389,59 @@ def fit_statistics(post: Posterior, theta_mean: np.ndarray,
 
     Returns:
         dict with theta_best, chi2, chi2_red, AIC, BIC, k, n_data.
+    Examples:
+        Las relaciones de informacion se cumplen por construccion:
+
+        >>> import contextlib, io
+        >>> with contextlib.redirect_stdout(io.StringIO()):   # el cargador
+        ...     post = Posterior(MODELS['lcdm'], 'CC+BAO')    # imprime la ruta
+        >>> st = fit_statistics(post, MODELS['lcdm'].fiducial)
+        >>> abs(st['AIC'] - (st['chi2'] + 2 * st['k'])) < 1e-9
+        True
+        >>> st['n_data']
+        51
+
+        [B-BOUNDS] Y el punto devuelto cae SIEMPRE dentro del soporte del
+        prior. Antes no: el refinamiento sin cotas llegaba a reportar
+        H0 = 6.3e-5 km/s/Mpc como "mejor ajuste", con un chi2 que se veia sano.
+
+        >>> import numpy as np
+        >>> bool(np.isfinite(post.log_prior(st['theta_best'])))
+        True
     """
     theta_best = np.asarray(theta_mean, dtype=float).copy()
     if refine:
+        # [B-BOUNDS] El refinamiento era Nelder-Mead SIN restricciones sobre
+        # `chi2`, que nunca ve el prior. Como chi2 es finito fuera de la caja
+        # (H(z) hace clip de E^2, ver [B-CLIP]), el simplex se salia y se
+        # reportaba como "mejor ajuste" un punto con probabilidad posterior
+        # CERO. Medido sobre las 15 combinaciones modelo x dataset, 5 se
+        # salian, incluida cpl/CC+BAO+Pantheon, y una llegaba a devolver
+        # H0 = 6.3e-5 km/s/Mpc. La penalizacion en chi2 era minima
+        # (Delta chi2 = 0.004 en esa celda), asi que AIC y BIC apenas
+        # cambiaban: el numero se veia perfectamente sano. Exactamente la
+        # clase de fallo silencioso que este proyecto ya ha sufrido tres
+        # veces.
+        #
+        # L-BFGS-B con las cotas del modelo mantiene el minimo DENTRO del
+        # soporte del prior, que es el unico sitio donde "mejor ajuste"
+        # significa algo. Se conserva Nelder-Mead como respaldo por si el
+        # gradiente numerico falla (chi2 puede ser no suave en el borde).
+        bounds = list(getattr(post.model, 'bounds', []) or []) or None
         res = minimize(lambda t: post.chi2(t)[0], theta_best,
-                       method='Nelder-Mead',
-                       options={'maxiter': 800, 'xatol': 1e-6, 'fatol': 1e-6})
+                       method='L-BFGS-B', bounds=bounds,
+                       options={'maxiter': 800, 'ftol': 1e-12})
+        if not (res.success and np.isfinite(res.fun)):
+            res = minimize(lambda t: post.chi2(t)[0], theta_best,
+                           method='Nelder-Mead', bounds=bounds,
+                           options={'maxiter': 800, 'xatol': 1e-6,
+                                    'fatol': 1e-6})
         if np.isfinite(res.fun):
-            theta_best = res.x
+            cand = np.asarray(res.x, dtype=float)
+            # Cinturon y tirantes: si aun asi saliera del soporte, no se
+            # acepta. Un chi2 mas bajo fuera del prior no es un mejor ajuste.
+            if np.isfinite(post.log_prior(cand)):
+                theta_best = cand
     chi2, n = post.chi2(theta_best)
     k = post.model.n_params
     dof = max(n - k, 1)
@@ -1110,6 +1467,14 @@ def setup_logger(log_file: Optional[str] = None,
     In interactive mode (log_file=None) everything goes to the console.
     In CLI mode, the detail goes to the file and the console only
     receives WARNING+.
+
+    Args:
+        log_file: ruta del archivo de log; None escribe solo por pantalla. Por
+            defecto None.
+        name: nombre a resolver. Por defecto 'qcosmo'.
+
+    Returns:
+        logging.Logger
     """
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
@@ -1337,7 +1702,15 @@ def make_simulator(method: str = 'statevector', prefer_gpu: bool = False,
 
 
 def fmt_theta(model: CosmoModel, theta: np.ndarray) -> str:
-    """Format θ with parameter names for readable logs."""
+    """Format θ with parameter names for readable logs.
+
+    Args:
+        model: modelo cosmologico (`cosmo_core.CosmoModel`).
+        theta: vector de parametros del modelo.
+
+    Returns:
+        str
+    """
     return "  ".join(f"{n}={v:.4f}" for n, v in zip(model.param_names, theta))
 
 # =============================================================================

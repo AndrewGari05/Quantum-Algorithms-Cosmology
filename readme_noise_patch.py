@@ -412,7 +412,15 @@ def apply(text: str, check_only: bool = False) -> str:
 
 
 def main(argv=None) -> int:
-    """Punto de entrada."""
+    """Punto de entrada.
+
+    Args:
+        argv: argumentos de linea de comandos; None usa `sys.argv`. Por
+            defecto None.
+
+    Returns:
+        int
+    """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--path', default='README.md')
     ap.add_argument('--check', action='store_true',
