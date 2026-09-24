@@ -170,3 +170,299 @@ def test_qga_reproducible_with_fixed_seed(post):
     t1, c1 = run_once()
     t2, c2 = run_once()
     assert np.allclose(t1, t2) and c1 == c2
+
+
+# ── [B-NOPLOT] --no-plot en los modos de HPC ─────────────────────────────
+
+def test_b_noplot_el_ladder_acepta_y_propaga_la_bandera():
+    """`--no-plot` debe llegar hasta donde se dibujan las figuras.
+
+    Antes la llamada a `plot_method_ladders` dentro de
+    `run_quantumness_ladder` era incondicional, y ese es el camino que usan
+    --benchmark y --sweep-all: o sea, TODA corrida de HPC. La bandera solo
+    funcionaba en el camino de configuracion unica, y encima el docstring de
+    `run_sweep_all` la anunciaba como pass-through. Se detecto corriendo una
+    prueba de humo con --no-plot que aun asi escribio 20 figuras.
+    """
+    import inspect
+    import cosmo_modular_quantum as cmq
+
+    firma = inspect.signature(cmq.run_quantumness_ladder)
+    assert 'no_plot' in firma.parameters, (
+        "run_quantumness_ladder no acepta no_plot: --no-plot se ignora en "
+        "--benchmark y en --sweep-all")
+    assert firma.parameters['no_plot'].default is False
+
+    cuerpo = inspect.getsource(cmq.run_quantumness_ladder)
+    i_flag = cuerpo.find('if no_plot')
+    i_plot = cuerpo.find('plot_method_ladders(')
+    assert 0 <= i_flag < i_plot, (
+        "plot_method_ladders no esta dentro del if de no_plot")
+
+    # run_sweep_all debe pasarla, no solo aceptarla.
+    fuente_sweep = inspect.getsource(cmq.run_sweep_all)
+    assert 'no_plot=no_plot' in fuente_sweep, (
+        "run_sweep_all documenta no_plot como pass-through pero no lo pasa")
+
+
+# ── [B-REFCLIP] bandas de referencia cortadas ────────────────────────────
+
+def test_b_refclip_la_banda_que_cabe_se_dibuja_entera():
+    """La banda de Planck no debe quedar cortada por el borde del panel.
+
+    Se dibujaba DESPUES de fijar los ejes a los datos, asi que en
+    ladder_trends la banda de Om (0.3055-0.3167) se cortaba en 0.315 y no
+    se veia donde acababa.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import cosmo_modular_quantum as cmq
+
+    fig, ax = plt.subplots()
+    ax.set_ylim(0.265, 0.315)
+    fuera = cmq._draw_ref_lines(ax, 'Om', axis='y', band=True)
+    lo, hi = ax.get_ylim()
+    val, sig = [(v, s) for _, v, s, _, _ in cmq._ref_specs('Om')][0]
+    assert fuera == []
+    assert lo <= val - sig and val + sig <= hi, "la banda sigue cortada"
+    plt.close(fig)
+
+
+def test_b_refclip_la_referencia_fuera_de_rango_se_anota_no_se_dibuja():
+    """SH0ES (73.0) contra datos en 68.5-70.5: anotar, no estirar el eje.
+
+    Estirarlo aplastaria los datos en una franja ilegible — que es lo que
+    [B-FIDSCALE] arreglo — y media banda confunde mas que ninguna.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import cosmo_modular_quantum as cmq
+
+    fig, ax = plt.subplots()
+    ax.set_ylim(68.5, 70.5)
+    fuera = cmq._draw_ref_lines(ax, 'H0', axis='y', band=True)
+    lo, hi = ax.get_ylim()
+    assert len(fuera) == 2, f"se esperaban 2 referencias fuera, hubo {fuera}"
+    assert any('SH0ES' in f and '>' in f for f in fuera)
+    assert any('Planck' in f and '<' in f for f in fuera)
+    assert hi < 72, "el eje se estiro hasta SH0ES y aplasto los datos"
+    plt.close(fig)
+
+
+# ── [B-REPLOT] rehacer figuras sin repetir el computo ────────────────────
+
+def _csv_de_tarea(destino):
+    """Escribe un resultados_config.csv como el que produce una tarea real."""
+    import csv
+    cols = ['Method', 'Om_mean', 'Om_std', 'H0_mean', 'H0_std', 'Time_s',
+            'nqpp', 'chi2', 'n_data', 'chi2_red', 'AIC', 'BIC', 'acceptance',
+            'final_KL', 'ESS', 'dataset', 'prior', 'noise', 'proposal_route',
+            'seed', 'budget_mode', 'circuits_train', 'chi2_grid']
+    base = {'chi2': '1064.61', 'n_data': '1099', 'chi2_red': '0.970',
+            'AIC': '1068.6', 'BIC': '1078.6', 'dataset': 'CC+BAO+Pantheon',
+            'prior': 'flat', 'noise': 'none', 'seed': '42'}
+    filas = []
+    for met, om, h0, t, acc, ess, kl in [
+            ('Classical MCMC', '0.2764', '69.59', '16.8', '0.487', '6872', ''),
+            ('QMCMC 50%', '0.2764', '69.60', '105.6', '0.456', '6956', ''),
+            ('QMCMC 100%', '0.2764', '69.60', '142.4', '0.456', '6956', ''),
+            ('Classical VI', '0.2757', '69.54', '449.1', '', '12288', '1.6250'),
+            ('QVMC 33%', '0.2755', '69.55', '452.4', '', '12288', '1.6250'),
+            ('QVMC 67%', '0.2754', '69.56', '1504.9', '', '12288', '1.6286'),
+            ('QVMC 100%', '0.2754', '69.56', '1529.3', '', '12288', '1.6286')]:
+        r = dict.fromkeys(cols, '')
+        r.update(base)
+        r.update({'Method': met, 'Om_mean': om, 'Om_std': '0.0104',
+                  'H0_mean': h0, 'H0_std': '0.80', 'Time_s': t,
+                  'acceptance': acc, 'ESS': ess, 'final_KL': kl, 'nqpp': '3'})
+        filas.append(r)
+    os.makedirs(os.path.dirname(destino), exist_ok=True)
+    with open(destino, 'w', newline='') as fh:
+        w = csv.DictWriter(fh, cols)
+        w.writeheader()
+        w.writerows(filas)
+
+
+def test_b_replot_rehace_las_figuras_desde_el_csv(tmp_path):
+    """Volver a dibujar sin repetir el computo.
+
+    En los nqpp altos una tarea son dias (16 qubits ~ 6 dias medidos), asi
+    que tras arreglar algo del DIBUJO hay que poder rehacer la figura desde
+    los datos ya guardados. Todo lo que muestran ladder_trends y
+    ladder_summary son escalares que el CSV trae.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import cosmo_modular_quantum as cmq
+
+    csv_path = str(tmp_path / 'model_lcdm' / 'resultados_config.csv')
+    _csv_de_tarea(csv_path)
+    destino = cmq.replot_ladder_from_csv(csv_path)
+    for f in ('ladder_trends_lcdm.png', 'ladder_summary_lcdm.png'):
+        p = os.path.join(destino, f)
+        assert os.path.exists(p) and os.path.getsize(p) > 5000, f"falta {f}"
+
+
+def test_b_replot_lee_steps_e_iters_del_log(tmp_path):
+    """El CSV no guarda steps/iters; el log de la tarea si."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import cosmo_modular_quantum as cmq
+
+    csv_path = str(tmp_path / 'model_lcdm' / 'resultados_config.csv')
+    _csv_de_tarea(csv_path)
+    (tmp_path / 'sweep_all_x.log').write_text(
+        'SWEEP-ALL\n  dataset=CC+BAO+Pantheon | steps=20000 | '
+        'qvmc_iter=15000 | nqpp=3\n')
+    cmq.replot_ladder_from_csv(csv_path)   # no debe fallar leyendo el log
+
+
+def test_b_replot_avisa_si_el_csv_no_sirve(tmp_path):
+    """Un CSV sin filas de peldanos debe fallar diciendo por que."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import cosmo_modular_quantum as cmq
+    import pytest as _pytest
+
+    p = tmp_path / 'model_lcdm' / 'resultados_config.csv'
+    os.makedirs(os.path.dirname(str(p)), exist_ok=True)
+    p.write_text('Method,Om_mean\nCGA,0.26\n')
+    with _pytest.raises(ValueError, match='QMCMC|QVMC'):
+        cmq.replot_ladder_from_csv(str(p))
+
+
+def test_b_replot_rhat_y_kl_salen_del_log(tmp_path):
+    """R-hat y KL son trazas, no escalares: se recuperan del log.
+
+    El CSV solo guarda el valor final de cada peldano. Pero el log imprime
+    la traza linea a linea, asi que las dos figuras se pueden rehacer sin
+    recalcular — con la resolucion de --log-every, no mas fina.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import cosmo_modular_quantum as cmq
+
+    csv_path = str(tmp_path / 'model_lcdm' / 'resultados_config.csv')
+    _csv_de_tarea(csv_path)
+    lineas = ['SWEEP-ALL | steps=20000 | qvmc_iter=15000 | nqpp=3']
+    for s in range(500, 3001, 500):
+        for tag in ('C-MCMC', 'QMCMC50', 'QMCMC100'):
+            lineas.append(f'[{tag}] step {s:6d}/20000 | acc=0.48 | '
+                          f'R-hat-1=+{0.07 * 500 / s:.4f} | mean: Om=0.27')
+    for it in range(0, 3001, 500):
+        for tag in ('C-VI', 'QVMC33', 'QVMC67', 'QVMC100'):
+            lineas.append(f'[{tag}] iter {it:6d}/15000 | '
+                          f'KL={9.0 / (1 + it / 500):.6f} | E[theta]')
+    (tmp_path / 'sweep_all_x.log').write_text('\n'.join(lineas))
+
+    destino = cmq.replot_ladder_from_csv(csv_path)
+    for f in ('ladder_rhat_qmcmc_lcdm.png', 'ladder_kl_qvmc_lcdm.png'):
+        p = os.path.join(destino, f)
+        assert os.path.exists(p) and os.path.getsize(p) > 5000, f"falta {f}"
+
+
+def test_b_replot_sin_log_no_falla_y_hace_lo_que_puede(tmp_path):
+    """Sin log no hay trazas: deben salir las dos que si dependen del CSV."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import cosmo_modular_quantum as cmq
+
+    csv_path = str(tmp_path / 'model_lcdm' / 'resultados_config.csv')
+    _csv_de_tarea(csv_path)
+    destino = cmq.replot_ladder_from_csv(csv_path)
+    assert os.path.exists(os.path.join(destino, 'ladder_trends_lcdm.png'))
+    assert not os.path.exists(os.path.join(destino,
+                                           'ladder_rhat_qmcmc_lcdm.png'))
+
+
+def test_b_replot_el_rhat_del_log_es_absoluto_no_menos_uno():
+    """El log escribe R-hat-1; la figura vuelve a restar 1.
+
+    Si se guardara el valor del log tal cual, la curva saldria desplazada
+    una unidad entera hacia abajo y cruzaria cero en escala logaritmica.
+    """
+    import tempfile
+    import cosmo_modular_quantum as cmq
+
+    with tempfile.NamedTemporaryFile('w', suffix='.log', delete=False) as t:
+        t.write('[QMCMC50] step  500/20000 | acc=0.46 | R-hat-1=+0.0460 | m\n')
+        nombre = t.name
+    rhat, _ = cmq.historias_desde_log(nombre)
+    os.unlink(nombre)
+    assert rhat[50.0] == [(500, 1.046)]
+
+
+# ── [B-ITERDISP] el contador debe mostrar el presupuesto real ────────────
+
+def test_b_iterdisp_el_denominador_es_el_presupuesto_real(tmp_path):
+    """El log de la rama clasica escribia 'iter 122000/15000'.
+
+    Con budget_mode='circuits' el tope de COBYLA es max_iter*(1+2*n_phi)
+    —2,115,000 para lcdm con nqpp=5—, pero el log seguia imprimiendo
+    max_iter como denominador. Visto de madrugada, eso parece que el codigo
+    se rompio; en realidad es el presupuesto igualado funcionando. Un
+    contador que miente sobre lo que falta es peor que no tenerlo.
+    """
+    import logging
+    import cosmo_modular_quantum as cmq
+
+    reg = []
+
+    class _Cap(logging.Handler):
+        def emit(self, r):
+            reg.append(r.getMessage())
+
+    log = logging.getLogger('test_iterdisp')
+    log.setLevel(logging.INFO)
+    log.handlers = [_Cap()]
+
+    post = cmq.Posterior(cmq.MODELS['lcdm'], 'CC+BAO', 'flat')
+    cmq._reseed(42)
+    q = cmq.QVMCModular(post, {}, n_qubits_per_param=2, budget_mode='circuits')
+    P = q.build_target()
+    q.train(P, max_iter=20, logger=log, log_every=100, progress=False,
+            tag='C-VI')
+
+    presupuesto = [m for m in reg if 'presupuesto COBYLA' in m]
+    assert presupuesto, "no se anuncia el presupuesto real antes de arrancar"
+
+    lineas = [m for m in reg if '] iter ' in m]
+    assert lineas, "no hubo lineas de progreso"
+    # n_phi = 3*4*2 + 4 = 28 -> 20 * (1 + 56) = 1140
+    assert all('/1140' in m for m in lineas), (
+        f"el denominador no es el presupuesto real: {lineas[:2]}")
+    assert not any('/20 ' in m for m in lineas), "sigue mostrando max_iter"
+
+
+# ═══ [B-REPLOTGLOB] --replot-ladder debe aceptar varios CSV ══════════════
+
+def test_b_replotglob_acepta_varios_csv():
+    """La ayuda promete comodines del shell; argparse debe poder recibirlos.
+
+    Sin `nargs='+'` la shell expandia el patron a N rutas, argparse tomaba
+    la primera como valor de la bandera y abortaba con "unrecognized
+    arguments" por las otras N-1. Resultado: rehacer las figuras de una
+    campana entera era imposible salvo archivo por archivo.
+    """
+    import inspect
+    cands = [f for n, f in inspect.getmembers(mq, inspect.isfunction)
+             if 'parser' in n]
+    assert cands, "no se encontro el constructor del parser"
+    p = cands[0]()
+    args = p.parse_args(['--replot-ladder', 'a.csv', 'b.csv', 'c.csv'])
+    assert args.replot_ladder == ['a.csv', 'b.csv', 'c.csv']
+
+
+def test_b_replotglob_uno_solo_sigue_funcionando():
+    """Pasar un unico CSV no debe romperse ni devolver una cadena suelta."""
+    import inspect
+    p = None
+    for n, f in inspect.getmembers(mq, inspect.isfunction):
+        if 'parser' in n:
+            p = f()
+            break
+    assert p is not None
+    args = p.parse_args(['--replot-ladder', 'solo.csv'])
+    assert args.replot_ladder == ['solo.csv']

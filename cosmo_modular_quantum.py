@@ -57,8 +57,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import glob
 import json
 import os
+import re
 import sys
 import time
 import warnings
@@ -246,16 +248,55 @@ def _ref_specs(param_name: str):
 
 
 def _draw_ref_lines(ax, param_name: str, axis: str = 'x', band: bool = True):
-    """Draw Planck/SH0ES reference line(s) (+/-1 sigma band) for a parameter."""
+    """Draw Planck/SH0ES reference line(s) (+/-1 sigma band) for a parameter.
+
+    [B-REFCLIP] Las bandas se dibujan DESPUES de que los ejes ya estan
+    fijados a los datos, asi que una referencia que cae fuera salia cortada
+    a la mitad: se veia el color pero no donde acababa, y no habia forma de
+    saber si el limite del eje era el borde de la banda o del panel. Ahora
+    hay tres casos:
+
+      * la banda entera cabe            -> se dibuja tal cual;
+      * la linea cabe pero la banda no  -> se estira el eje lo justo para
+                                           que quepa completa;
+      * la linea queda fuera del rango  -> NO se dibuja media banda; se
+                                           anota en una esquina, igual que
+                                           ya hacian las figuras del
+                                           genetico ("fiducial = X, fuera
+                                           de rango").
+
+    Args:
+        ax: los ejes sobre los que dibujar.
+        param_name: nombre del parametro ('Om', 'H0', ...).
+        axis: 'x' o 'y', el eje sobre el que va la referencia.
+        band: si dibujar la banda de +/-1 sigma ademas de la linea.
+
+    Returns:
+        Lista de las etiquetas que quedaron fuera de rango y se anotaron.
+    """
+    fuera = []
     for label, val, sig, col, ls in _ref_specs(param_name):
+        lo, hi = ax.get_xlim() if axis == 'x' else ax.get_ylim()
+        if not (lo <= val <= hi):
+            # La referencia no cae en el rango de los datos. Estirar el eje
+            # hasta ella aplastaria los datos en una franja ilegible, que es
+            # lo que [B-FIDSCALE] arreglo; y media banda confunde. Se anota.
+            fuera.append(f"{label} = {val:g} ({'>' if val > hi else '<'} rango)")
+            continue
         if axis == 'x':
             ax.axvline(val, color=col, ls=ls, lw=1.8, label=label, zorder=5)
             if band and sig:
                 ax.axvspan(val - sig, val + sig, color=col, alpha=0.12, zorder=0)
+                ax.set_xlim(min(lo, val - sig), max(hi, val + sig))
         else:
             ax.axhline(val, color=col, ls=ls, lw=1.8, label=label, zorder=5)
             if band and sig:
                 ax.axhspan(val - sig, val + sig, color=col, alpha=0.12, zorder=0)
+                ax.set_ylim(min(lo, val - sig), max(hi, val + sig))
+    if fuera:
+        ax.text(0.98, 0.02, '\n'.join(fuera), transform=ax.transAxes,
+                ha='right', va='bottom', fontsize=6, color='0.45')
+    return fuera
 
 
 def _overplot_refs_corner(fig, model):
@@ -1205,7 +1246,36 @@ def quantum_amplitude_normalization(P_unnorm: np.ndarray) -> np.ndarray:
         sim = _noisy_sim(counts_route=False)
         qc.save_probabilities()
     sim.run(transpile(qc, sim)).result()
-    return P_unnorm / (norm + 1e-15)
+    # [B-EPS15] El divisor es `norm`, NO `norm + 1e-15`.
+    #
+    # La rama clasica de `build_target` hace `P / total`; esta hacia
+    # `P / (total + 1e-15)`. Como `build_target` normaliza con
+    # max(log_p) = 0, se tiene max(P) = 1 y por tanto total >= 1: la
+    # diferencia relativa entre los dos divisores es <= 1e-15, o sea entre
+    # CERO y DOS ULPs segun cuantos puntos tenga la rejilla (medido: 2 ULPs
+    # con 64 puntos, 2 con 256, exactamente 0 con 4096).
+    #
+    # Suena despreciable y no lo es, por dos razones:
+    #
+    #   1. Rompe la afirmacion FIEL. `QVMC 67%` y `QVMC 100%` solo se
+    #      diferencian en este componente y deben salir identicas dígito a
+    #      dígito. Con el epsilon no lo son cuando la rejilla es chica.
+    #   2. El entrenamiento variacional amplifica la perturbacion. Medido en
+    #      la campana de Saptiva `hpc_20260907_182345`: en
+    #      `samplers_pede_nqpp3_noise-fakebrisbane` y
+    #      `samplers_pede_nqpp4_noise-fakebrisbane` la KL final coincide a
+    #      seis decimales pero Om_mean difiere en 1.1e-5 y H0_mean en 4.6e-4
+    #      (~0.001 sigma). Cientificamente nulo; para una celda que por
+    #      construccion debe ser exacta, es un fallo.
+    #
+    # El epsilon era una guarda contra division por cero que ya no hace
+    # falta: `build_target` levanta [B-EMPTY] si `total <= 0` antes de
+    # llegar aqui, asi que `norm > 0` esta garantizado.
+    #
+    # AVISO: esto CAMBIA los numeros del peldano QVMC 100% al nivel de 1e-5
+    # respecto a las campanas ya corridas. Es el precio de que la celda fiel
+    # sea de verdad fiel.
+    return P_unnorm / norm
 
 
 def estimate_grid_window(post: Posterior, sigma_mult: float = 4.0,
@@ -1495,6 +1565,11 @@ class QVMCModular:
         phi = 0.1 * RNG.standard_normal(n_p)
         history = []
         t0 = time.time()
+        # [B-ITERDISP] Tope real de iteraciones de la rama que se acabe
+        # ejecutando. La rama cuantica usa max_iter; la clasica lo sustituye
+        # por su presupuesto de COBYLA en cuanto lo calcula. Va en una lista
+        # para que `record`, que se define antes, vea el valor actualizado.
+        budget_efectivo = [int(max_iter)]
 
         def record(it, kl, Q):
             """Anota una iteracion del entrenamiento en el historial.
@@ -1506,8 +1581,16 @@ class QVMCModular:
             """
             theta_mean = Q @ self.theta_table
             history.append({'it': it, 'kl': kl, 'theta_mean': theta_mean})
-            if logger and (it % log_every == 0 or it == max_iter - 1):
-                logger.info(f"[{tag}] iter {it:5d}/{max_iter} | KL={kl:.6f} | "
+            # [B-ITERDISP] El denominador es el presupuesto REAL de esta rama,
+            # no `max_iter`. En la rama clasica con budget_mode='circuits' el
+            # tope es max_iter*(1+2*n_phi) —hasta 2.1 millones—, asi que el
+            # log escribia cosas como "iter 122000/15000", que parece un error
+            # del codigo cuando en realidad es el presupuesto igualado
+            # haciendo su trabajo. Un contador que miente sobre lo que falta
+            # es peor que no tener contador.
+            tope = budget_efectivo[0]
+            if logger and (it % log_every == 0 or it == tope - 1):
+                logger.info(f"[{tag}] iter {it:5d}/{tope} | KL={kl:.6f} | "
                             f"E[theta]: {fmt_theta(self.model, theta_mean)}")
 
         if self.config.get('training', False):
@@ -1646,6 +1729,16 @@ class QVMCModular:
             cobyla_iter = max(cobyla_iter, n_p + 2)
             self._circuits_per_iter = 1
             self._cobyla_budget = cobyla_iter
+            budget_efectivo[0] = cobyla_iter
+            if logger:
+                # Anunciarlo ANTES de arrancar: con nqpp=5 son 2.1 millones de
+                # evaluaciones, y saberlo al empezar evita creer a media noche
+                # que el proceso se colgó.
+                logger.info(
+                    f"[{tag}] presupuesto COBYLA = {cobyla_iter:,} "
+                    f"evaluaciones ({max_iter} x (1+2*{n_p}), "
+                    f"budget_mode={self.budget_mode}). Es un TOPE: COBYLA "
+                    f"para antes si converge.")
             res = minimize(cost, phi, method='COBYLA',
                            options={'maxiter': cobyla_iter, 'rhobeg': 0.3})
             if pbar:
@@ -2483,7 +2576,8 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
                            n_shots: int = 2000,
                            csv_paths: Optional[list] = None,
                            dataset_label: str = "", prior_type: str = "",
-                           budget_mode: str = 'circuits') -> dict:
+                           budget_mode: str = 'circuits',
+                           no_plot: bool = False) -> dict:
     """Run TWO independent, monotonic per-method quantumness ladders.
 
     This is the canonical benchmark: it sweeps each sampler along ITS OWN
@@ -2583,11 +2677,21 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
             f"  KL={res['kl_final']:.4f}  "
             f"circuitos={res.get('circuits_train', '?')}")
 
+    # [B-NOPLOT] Las figuras se saltan si el llamador lo pidio. Antes esta
+    # llamada era incondicional y `--no-plot` solo funcionaba en el camino de
+    # configuracion unica: en --benchmark y en --sweep-all (o sea, en TODA
+    # corrida de HPC) la bandera se ignoraba en silencio, y ademas el docstring
+    # de run_sweep_all la anunciaba como pass-through. En una prueba de humo
+    # eso es tiempo tirado, y en una campana larga son cientos de PDF que
+    # nadie pidio.
     meta = dict(n_steps=n_steps_mcmc, n_iter=max_iter_qvmc, nqpp=nqpp)
-    plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta)
-    say(f"Ladder figures in {outdir}/: ladder_qmcmc_*, "
-        f"ladder_qvmc_*, ladder_rhat_qmcmc_*, ladder_kl_qvmc_*, "
-        f"ladder_1to1_*, ladder_summary_*, ladder_trends_*")
+    if no_plot:
+        say("Figuras omitidas (--no-plot).")
+    else:
+        plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta)
+        say(f"Ladder figures in {outdir}/: ladder_qmcmc_*, "
+            f"ladder_qvmc_*, ladder_rhat_qmcmc_*, ladder_kl_qvmc_*, "
+            f"ladder_1to1_*, ladder_summary_*, ladder_trends_*")
 
     # [FIX] Write the benchmark to CSV too. Previously only single-config runs
     # wrote resultados_config.csv; the --benchmark path returned before the
@@ -2614,117 +2718,211 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
     return {'qmcmc': qmcmc_runs, 'qvmc': qvmc_runs}
 
 
-def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
-    """All per-method ladder figures (family overlay, diagnostics, 1-to-1).
+#: Etiquetas con que el log marca cada peldano, y el porcentaje que les
+#: corresponde. Son las que imprime el propio ladder al correr.
+_TAGS_LOG = {'C-MCMC': ('qmcmc', 0.0), 'QMCMC50': ('qmcmc', 50.0),
+             'QMCMC100': ('qmcmc', 100.0),
+             'C-VI': ('qvmc', 0.0), 'QVMC33': ('qvmc', 33.0),
+             'QVMC67': ('qvmc', 67.0), 'QVMC100': ('qvmc', 100.0)}
+
+_RE_RHAT = re.compile(
+    r'\[([A-Za-z0-9-]+)\]\s+step\s+(\d+)/\d+.*?R-hat-1=([+-]?[\d.eE+-]+)')
+_RE_KL = re.compile(
+    r'\[([A-Za-z0-9-]+)\]\s+iter\s+(\d+)/\d+\s*\|\s*KL=([\d.eE+-]+)')
+
+
+def historias_desde_log(log_path: str):
+    """Reconstruye las trazas de R-hat y de KL desde el log de una tarea.
+
+    Ni el R-hat por paso ni el KL por iteracion son columnas del CSV —el CSV
+    guarda un solo numero final por peldano—, pero el log SI los imprime
+    linea a linea mientras corre. Eso permite rehacer `ladder_rhat_qmcmc_*`
+    y `ladder_kl_qvmc_*` de una campana ya terminada sin repetir el computo.
 
     Args:
-        qmcmc_runs: corridas de la familia QMCMC.
-        qvmc_runs: corridas de la familia QVMC.
-        model: modelo cosmologico (`cosmo_core.CosmoModel`).
-        outdir: carpeta donde escribir la salida.
-        meta: metadatos de la corrida para el pie de figura.
+        log_path: ruta del `sweep_all_*.log` de la tarea.
 
     Returns:
-        Ver la descripcion de arriba.
+        `(rhat, kl)`: dos dicts indexados por porcentaje de peldano. `rhat`
+        mapea pct -> [(paso, R-hat), ...] con el R-hat ABSOLUTO (el log
+        escribe R-hat menos uno). `kl` mapea pct -> [{'it':…, 'kl':…}, …].
+
+    Examples:
+        >>> import tempfile, os
+        >>> t = tempfile.NamedTemporaryFile('w', suffix='.log', delete=False)
+        >>> _ = t.write('[QMCMC50] step  500/20000 | acc=0.46 | '
+        ...             'R-hat-1=+0.0460 | mean: Om=0.27\\n'
+        ...             '[QVMC33] iter  500/15000 | KL=1.694478 | E[theta]\\n')
+        >>> t.close()
+        >>> rh, kl = historias_desde_log(t.name)
+        >>> rh[50.0]
+        [(500, 1.046)]
+        >>> kl[33.0]
+        [{'it': 500, 'kl': 1.694478}]
+        >>> os.unlink(t.name)
+    """
+    rhat, kl = {}, {}
+    try:
+        texto = open(log_path, errors='ignore').read()
+    except OSError:
+        return rhat, kl
+    for tag, paso, val in _RE_RHAT.findall(texto):
+        if tag in _TAGS_LOG:
+            # El log imprime R-hat MENOS UNO; la figura resta 1 otra vez,
+            # asi que aqui se devuelve el absoluto.
+            rhat.setdefault(_TAGS_LOG[tag][1], []).append(
+                (int(paso), 1.0 + float(val)))
+    for tag, it, val in _RE_KL.findall(texto):
+        if tag in _TAGS_LOG:
+            kl.setdefault(_TAGS_LOG[tag][1], []).append(
+                {'it': int(it), 'kl': float(val)})
+    return rhat, kl
+
+
+def replot_ladder_from_csv(csv_path: str, outdir: Optional[str] = None,
+                           nqpp: Optional[int] = None,
+                           solo_diagnosticos: bool = False):
+    """[B-REPLOT] Rehace ladder_trends y ladder_summary desde un CSV.
+
+    Sirve para volver a dibujar las figuras de una campana que ya corrio
+    —por ejemplo tras arreglar algo del dibujo— sin repetir el calculo, que
+    en los nqpp altos son dias. NO rehace los corner ni los 1-a-1: esos
+    necesitan las cadenas, y las cadenas no se guardan en el CSV.
+
+    Args:
+        csv_path: `resultados_config.csv` de UNA tarea (el de la subcarpeta
+            `model_<modelo>/`, no el acumulado de varios modelos).
+        outdir: donde escribir. Por defecto, junto al CSV.
+        nqpp: solo para el titulo; si no se da se toma del CSV.
+
+    Returns:
+        La carpeta donde quedaron las figuras.
+
+    Raises:
+        ValueError: si el CSV no trae filas de ningun peldano reconocible.
+    """
+    import csv as _csv
+    outdir = outdir or os.path.dirname(os.path.abspath(csv_path))
+    filas = list(_csv.DictReader(open(csv_path, newline='')))
+    if not filas:
+        raise ValueError(f"{csv_path} no tiene filas")
+
+    # El modelo no viene como columna en el CSV de samplers: se deduce de la
+    # carpeta `model_<clave>` que lo contiene.
+    clave = (filas[0].get('model') or '').strip()
+    if clave not in MODELS:
+        m = re.search(r'model_(\w+)', os.path.abspath(csv_path))
+        clave = m.group(1) if m and m.group(1) in MODELS else ''
+    if clave not in MODELS:
+        raise ValueError(
+            f"no pude deducir el modelo de {csv_path}; se esperaba una "
+            f"carpeta 'model_<{'|'.join(MODELS)}>' o una columna 'model'")
+    model = MODELS[clave]
+
+    def _num(x, por_defecto=float('nan')):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return por_defecto
+
+    def _fila_a_run(r, pct):
+        mu = [_num(r.get(f'{p}_mean')) for p in model.param_names]
+        sd = [_num(r.get(f'{p}_std')) for p in model.param_names]
+        return {'pct': pct, 'mu': np.array(mu), 'std': np.array(sd),
+                'chi2_red': _num(r.get('chi2_red')), 'AIC': _num(r.get('AIC')),
+                'BIC': _num(r.get('BIC')), 'elapsed': _num(r.get('Time_s'), 0.0),
+                'acceptance': _num(r.get('acceptance')),
+                'ess': _num(r.get('ESS'), 0.0),
+                'kl_final': _num(r.get('final_KL')),
+                'rhat_hist': [], 'history': []}
+
+    qmcmc, qvmc = [], []
+    for r in filas:
+        met = (r.get('Method') or '').strip()
+        if met == 'Classical MCMC':
+            qmcmc.append(_fila_a_run(r, 0.0))
+        elif met == 'Classical VI':
+            qvmc.append(_fila_a_run(r, 0.0))
+        elif met.startswith('QMCMC'):
+            qmcmc.append(_fila_a_run(r, _num(met.rstrip('%').split()[-1])))
+        elif met.startswith('QVMC'):
+            qvmc.append(_fila_a_run(r, _num(met.rstrip('%').split()[-1])))
+    if not qmcmc and not qvmc:
+        raise ValueError(
+            f"{csv_path} no trae filas de QMCMC ni de QVMC (metodos vistos: "
+            f"{sorted({r.get('Method') for r in filas})})")
+
+    if nqpp is None:
+        nqpp = int(_num(filas[0].get('nqpp'), 0)) or 3
+        for r in filas:
+            v = _num(r.get('nqpp'), 0)
+            if v:
+                nqpp = int(v)
+                break
+    # steps/iters no son columnas del CSV, pero el log de la tarea los
+    # imprime en su cabecera. Si esta a mano se leen de ahi para que el
+    # titulo de la figura rehecha diga lo mismo que el de la original.
+    meta = {'n_steps': '?', 'n_iter': '?', 'nqpp': nqpp}
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(csv_path)))
+    rhat_h, kl_h = {}, {}
+    for log in sorted(glob.glob(os.path.join(raiz, '*.log')))[:4]:
+        try:
+            texto = open(log, errors='ignore').read(20000)
+        except OSError:
+            continue
+        s = re.search(r'steps=(\d+)', texto)
+        i = re.search(r'qvmc_iter=(\d+)|iters=(\d+)', texto)
+        if s:
+            meta['n_steps'] = int(s.group(1))
+        if i:
+            meta['n_iter'] = int(i.group(1) or i.group(2))
+        # Las trazas de R-hat y KL viven en el mismo log, linea a linea.
+        r_i, k_i = historias_desde_log(log)
+        for d, o in ((rhat_h, r_i), (kl_h, k_i)):
+            for pct, v in o.items():
+                d.setdefault(pct, []).extend(v)
+    for r in qmcmc:
+        r['rhat_hist'] = sorted(rhat_h.get(r['pct'], []))
+    for r in qvmc:
+        r['history'] = sorted(kl_h.get(r['pct'], []), key=lambda d: d['it'])
+    q_cols = _q_colors([r['pct'] for r in (qmcmc or qvmc)])
+    v_cols = _q_colors([r['pct'] for r in (qvmc or qmcmc)])
+    # [B-SOLODIAG] `solo_diagnosticos` salta las dos figuras caras (trends y
+    # summary, 8-10 paneles) y rehace unicamente R-hat y KL. Sirve cuando ya
+    # se rehizo todo y solo cambio el dibujo de los diagnosticos: cuesta ~2s
+    # por tarea en vez de ~7s, y en una campana de 90 tareas eso es la
+    # diferencia entre diez minutos y tres.
+    if not solo_diagnosticos:
+        _ladder_trends_y_tabla(qmcmc, qvmc, model, outdir, meta, q_cols)
+    # R-hat y KL solo salen si el log estaba a mano; si no, se omiten en
+    # silencio y quedan las otras dos, que es mejor que fallar entero.
+    if any(r['rhat_hist'] for r in qmcmc) or any(r['history'] for r in qvmc):
+        _ladder_diagnosticos(qmcmc, qvmc, model, outdir, meta, q_cols, v_cols)
+    return outdir
+
+
+def _ladder_trends_y_tabla(qmcmc_runs, qvmc_runs, model, outdir, meta,
+                           q_cols):
+    """Las dos figuras del ladder que NO necesitan las muestras.
+
+    Se separo de `plot_method_ladders` para poder rehacerla desde el CSV
+    de una corrida terminada ([B-REPLOT]): todo lo que dibuja son
+    escalares (medias, sigmas, tiempos, chi2, AIC, BIC, ESS, aceptacion,
+    KL) que el CSV ya guarda, a diferencia de los corner, que necesitan
+    las cadenas y esas no se guardan.
+
+    Args:
+        qmcmc_runs, qvmc_runs: las corridas de cada familia.
+        model: modelo cosmologico.
+        outdir: carpeta de salida.
+        meta: dict con n_steps, n_iter y nqpp para el titulo.
+        q_cols: colores por peldano.
+
+    Returns:
+        None. Escribe ladder_trends_<modelo> y ladder_summary_<modelo>.
     """
     name = model.name
     steps, iters, nqpp = meta['n_steps'], meta['n_iter'], meta['nqpp']
-
-    # QVMC lives on a DISCRETE 2^nqpp grid per parameter, so its raw samples
-    # land on a few fixed values and a corner plot shows spikes, never a
-    # smooth (Gaussian-like) blob. For VISUALIZATION only we add uniform
-    # jitter of ±half a grid cell, which spreads each grid point across the
-    # cell it represents and reveals the continuous distribution the grid is
-    # approximating. (Statistics/means/KL are always computed on the exact
-    # un-jittered samples; this never touches the numbers, only the picture.)
-    n_grid = 2 ** nqpp
-    cell = np.array([(hi - lo) / (n_grid - 1)
-                     for lo, hi in model.sample_box])
-
-    def _jitter(S):
-        """Reparte las muestras dentro de su celda de rejilla.
-
-        Sin esto, un corner de una distribucion discreta se ve como una malla de
-        puntos y no como una nube: el ruido uniforme de media celda recupera la
-        forma sin mover ninguna estadistica.
-        """
-        return S + RNG.uniform(-0.5, 0.5, size=S.shape) * cell
-
-    # ── QMCMC family corner: classical + every QMCMC rung ────────────────────
-    q_cols = _q_colors([r['pct'] for r in qmcmc_runs])
-    plot_corner_multi(
-        [r['flat'] for r in qmcmc_runs], q_cols,
-        [f"QMCMC {r['pct']:.0f}%" + (" (classical)" if r['pct'] == 0 else "")
-         for r in qmcmc_runs],
-        model, outdir, f'ladder_qmcmc_{name}',
-        title=f"{model.label} — QMCMC quantumness ladder  [steps={steps}]")
-
-    # ── QVMC family corner: classical + every QVMC rung (weighted) ───────────
-    v_cols = _q_colors([r['pct'] for r in qvmc_runs])
-    plot_corner_multi(
-        [_jitter(r['S']) for r in qvmc_runs], v_cols,
-        [f"QVMC {r['pct']:.0f}%" + (" (classical)" if r['pct'] == 0 else "")
-         for r in qvmc_runs],
-        model, outdir, f'ladder_qvmc_{name}',
-        title=f"{model.label} — QVMC quantumness ladder  "
-              f"[iters={iters}, nqpp={nqpp}]  (cell-jittered for display)",
-        weights_list=[r['W'] for r in qvmc_runs])
-
-    # ── R̂ overlay along the QMCMC ladder ────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(8, 5.2))
-    for r, col in zip(qmcmc_runs, q_cols):
-        if not r['rhat_hist']:
-            continue
-        s, rh = zip(*r['rhat_hist'])
-        lw = 2.8 if r['pct'] == 0 else 1.9
-        ax.semilogy(s, np.array(rh) - 1, 'o-', color=col, lw=lw, ms=4,
-                    label=f"{r['pct']:.0f}%")
-    ax.axhline(core.RHAT_THRESHOLD - 1.0, color='k', ls='--', lw=1.2,
-               label=rf'$\hat R-1={core.RHAT_THRESHOLD-1.0:g}$')  # [H1]
-    ax.set_xlabel('Sampling steps'); ax.set_ylabel(r'$\hat{R}_{\max}-1$')
-    ax.set_title(f'QMCMC convergence along the quantumness ladder\n'
-                 f'(total steps = {steps})')
-    ax.legend(title='QMCMC %', fontsize=9); ax.grid(True, alpha=0.3)
-    f = os.path.join(outdir, f'ladder_rhat_qmcmc_{name}.png')
-    _save_fig(fig, f)
-
-    # ── KL overlay along the QVMC ladder ─────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(8, 5.2))
-    for r, col in zip(qvmc_runs, v_cols):
-        h = r['history']
-        if not h:
-            continue
-        lw = 2.8 if r['pct'] == 0 else 1.9
-        ax.semilogy([d['it'] for d in h], [max(d['kl'], 1e-12) for d in h],
-                    color=col, lw=lw, label=f"{r['pct']:.0f}%")
-    ax.set_xlabel('Training iteration')
-    ax.set_ylabel(r'KL$(Q_\varphi\,\|\,P_{\rm target})$')
-    ax.set_title(f'QVMC training along the quantumness ladder\n'
-                 f'(iterations = {iters}, nqpp = {nqpp})')
-    ax.legend(title='QVMC %', fontsize=9); ax.grid(True, alpha=0.3)
-    f = os.path.join(outdir, f'ladder_kl_qvmc_{name}.png')
-    _save_fig(fig, f)
-
-    # ── 1-to-1: each quantum rung vs its classical baseline ──────────────────
-    base_m = qmcmc_runs[0]
-    for r in qmcmc_runs[1:]:
-        plot_corner_overlay(
-            base_m['flat'], r['flat'], model, outdir,
-            f"ladder_1to1_qmcmc_{name}_q{int(r['pct']):03d}",
-            title=f"{model.label} — QMCMC {r['pct']:.0f}% vs classical  "
-                  f"[steps={steps}]",
-            labels=('Classical MCMC (0%)', f"QMCMC {r['pct']:.0f}%"),
-            q_color=C_QUANTUM)
-    base_v = qvmc_runs[0]
-    for r in qvmc_runs[1:]:
-        plot_corner_overlay(
-            _jitter(base_v['S']), _jitter(r['S']), model, outdir,
-            f"ladder_1to1_qvmc_{name}_q{int(r['pct']):03d}",
-            title=f"{model.label} — QVMC {r['pct']:.0f}% vs classical  "
-                  f"[iters={iters}, nqpp={nqpp}]  (cell-jittered)",
-            labels=('Classical VI (0%)', f"QVMC {r['pct']:.0f}%"),
-            q_color=C_QUANTUM2,
-            weights_c=base_v['W'], weights_q=r['W'])
 
     # ── trend panels: how everything changes with quantumness ───────────────
     # (the comparison plots requested: H0 and Om vs quantumness, runtime,
@@ -2856,6 +3054,179 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta):
     _save_fig(fig, f)
 
 
+def _ladder_diagnosticos(qmcmc_runs, qvmc_runs, model, outdir, meta,
+                         q_cols, v_cols):
+    """Las figuras de R-hat y de KL a lo largo de cada escalera.
+
+    Separadas de `plot_method_ladders` para poder rehacerlas sin
+    recalcular ([B-REPLOT]). Dibujan trazas, no escalares, asi que no
+    salen del CSV; sus datos se recuperan del log de la tarea con
+    `historias_desde_log`. Un peldano sin traza simplemente no se
+    dibuja, asi que la figura sale con lo que haya.
+
+    Args:
+        qmcmc_runs, qvmc_runs: corridas de cada familia; se leen
+            `rhat_hist` y `history`.
+        model: modelo cosmologico.
+        outdir: carpeta de salida.
+        meta: dict con n_steps, n_iter y nqpp para los titulos.
+        q_cols, v_cols: colores por peldano de cada familia.
+
+    Returns:
+        None. Escribe ladder_rhat_qmcmc_<modelo> y
+        ladder_kl_qvmc_<modelo>.
+    """
+    name = model.name
+    steps, iters, nqpp = meta['n_steps'], meta['n_iter'], meta['nqpp']
+
+    # ── R̂ overlay along the QMCMC ladder ────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    for r, col in zip(qmcmc_runs, q_cols):
+        if not r['rhat_hist']:
+            continue
+        s, rh = zip(*r['rhat_hist'])
+        lw = 2.8 if r['pct'] == 0 else 1.9
+        ax.semilogy(s, np.array(rh) - 1, 'o-', color=col, lw=lw, ms=4,
+                    label=f"{r['pct']:.0f}%")
+    ax.axhline(core.RHAT_THRESHOLD - 1.0, color='k', ls='--', lw=1.2,
+               label=rf'$\hat R-1={core.RHAT_THRESHOLD-1.0:g}$')  # [H1]
+    ax.set_xlabel('Sampling steps'); ax.set_ylabel(r'$\hat{R}_{\max}-1$')
+    ax.set_title(f'QMCMC convergence along the quantumness ladder\n'
+                 f'(total steps = {steps})')
+    ax.legend(title='QMCMC %', fontsize=9); ax.grid(True, alpha=0.3)
+    f = os.path.join(outdir, f'ladder_rhat_qmcmc_{name}.png')
+    _save_fig(fig, f)
+
+    # ── KL overlay along the QVMC ladder ─────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    for r, col in zip(qvmc_runs, v_cols):
+        h = r['history']
+        if not h:
+            continue
+        lw = 2.8 if r['pct'] == 0 else 1.9
+        ax.semilogy([max(d['it'], 1) for d in h],
+                    [max(d['kl'], 1e-12) for d in h],
+                    color=col, lw=lw, label=f"{r['pct']:.0f}%")
+    # [B-KLLOGX] Eje x logaritmico. Los peldanos NO gastan el mismo numero de
+    # iteraciones: el presupuesto se iguala por CIRCUITOS, no por iteraciones,
+    # y el optimizador clasico (scipy) cuenta evaluaciones de funcion, asi que
+    # el peldano de 33% puede registrar ~1.2e5 mientras los de 67% y 100%
+    # paran en 1.5e4. Con eje lineal, el peldano mas largo se come toda la
+    # escala y los otros tres quedan aplastados contra el margen izquierdo
+    # —que es justo donde ocurre la bajada que interesa—. En log se ven los
+    # cuatro completos y la diferencia de presupuesto queda a la vista en vez
+    # de esconderse. No se recorta ni un solo punto.
+    ax.set_xscale('log')
+    ax.set_xlabel('Training iteration (escala log)')
+    ax.set_ylabel(r'KL$(Q_\varphi\,\|\,P_{\rm target})$')
+    ax.set_title(f'QVMC training along the quantumness ladder\n'
+                 f'(iterations = {iters}, nqpp = {nqpp})')
+    ax.legend(title='QVMC %', fontsize=9); ax.grid(True, alpha=0.3)
+    f = os.path.join(outdir, f'ladder_kl_qvmc_{name}.png')
+    _save_fig(fig, f)
+
+
+
+def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta,
+                        solo_escalares: bool = False):
+    """All per-method ladder figures (family overlay, diagnostics, 1-to-1).
+
+    Args:
+        qmcmc_runs: corridas de la familia QMCMC.
+        qvmc_runs: corridas de la familia QVMC.
+        model: modelo cosmologico (`cosmo_core.CosmoModel`).
+        outdir: carpeta donde escribir la salida.
+        meta: metadatos de la corrida para el pie de figura.
+        solo_escalares: dibujar SOLO las figuras que no necesitan las
+            muestras (tendencias y tabla resumen). Es lo que usa el modo
+            `--replot-ladder`, que reconstruye desde el CSV una corrida que
+            ya termino: las cadenas no se guardan, asi que los corner y los
+            1-a-1 no se pueden rehacer, pero esas dos si. Por defecto False.
+
+    Returns:
+        Ver la descripcion de arriba.
+    """
+    name = model.name
+    steps, iters, nqpp = meta['n_steps'], meta['n_iter'], meta['nqpp']
+
+    # QVMC lives on a DISCRETE 2^nqpp grid per parameter, so its raw samples
+    # land on a few fixed values and a corner plot shows spikes, never a
+    # smooth (Gaussian-like) blob. For VISUALIZATION only we add uniform
+    # jitter of ±half a grid cell, which spreads each grid point across the
+    # cell it represents and reveals the continuous distribution the grid is
+    # approximating. (Statistics/means/KL are always computed on the exact
+    # un-jittered samples; this never touches the numbers, only the picture.)
+    n_grid = 2 ** nqpp
+    cell = np.array([(hi - lo) / (n_grid - 1)
+                     for lo, hi in model.sample_box])
+
+    def _jitter(S):
+        """Reparte las muestras dentro de su celda de rejilla.
+
+        Sin esto, un corner de una distribucion discreta se ve como una malla de
+        puntos y no como una nube: el ruido uniforme de media celda recupera la
+        forma sin mover ninguna estadistica.
+        """
+        return S + RNG.uniform(-0.5, 0.5, size=S.shape) * cell
+
+    # ── QMCMC family corner: classical + every QMCMC rung ────────────────────
+    q_cols = _q_colors([r['pct'] for r in qmcmc_runs])
+    if solo_escalares:
+        # [B-REPLOT] Rehaciendo desde disco no hay cadenas guardadas, asi que
+        # los corner y los 1-a-1 no se pueden dibujar. Las otras cuatro si:
+        # tendencias y tabla salen de los escalares del CSV, y R-hat y KL de
+        # las trazas que el log imprime linea a linea.
+        _ladder_diagnosticos(qmcmc_runs, qvmc_runs, model, outdir, meta,
+                             q_cols, _q_colors([r['pct'] for r in qvmc_runs]))
+        return _ladder_trends_y_tabla(qmcmc_runs, qvmc_runs, model, outdir,
+                                      meta, q_cols)
+    plot_corner_multi(
+        [r['flat'] for r in qmcmc_runs], q_cols,
+        [f"QMCMC {r['pct']:.0f}%" + (" (classical)" if r['pct'] == 0 else "")
+         for r in qmcmc_runs],
+        model, outdir, f'ladder_qmcmc_{name}',
+        title=f"{model.label} — QMCMC quantumness ladder  [steps={steps}]")
+
+    # ── QVMC family corner: classical + every QVMC rung (weighted) ───────────
+    v_cols = _q_colors([r['pct'] for r in qvmc_runs])
+    plot_corner_multi(
+        [_jitter(r['S']) for r in qvmc_runs], v_cols,
+        [f"QVMC {r['pct']:.0f}%" + (" (classical)" if r['pct'] == 0 else "")
+         for r in qvmc_runs],
+        model, outdir, f'ladder_qvmc_{name}',
+        title=f"{model.label} — QVMC quantumness ladder  "
+              f"[iters={iters}, nqpp={nqpp}]  (cell-jittered for display)",
+        weights_list=[r['W'] for r in qvmc_runs])
+
+    _ladder_diagnosticos(qmcmc_runs, qvmc_runs, model, outdir,
+                         meta, q_cols, v_cols)
+
+    # ── 1-to-1: each quantum rung vs its classical baseline ──────────────────
+    base_m = qmcmc_runs[0]
+    for r in qmcmc_runs[1:]:
+        plot_corner_overlay(
+            base_m['flat'], r['flat'], model, outdir,
+            f"ladder_1to1_qmcmc_{name}_q{int(r['pct']):03d}",
+            title=f"{model.label} — QMCMC {r['pct']:.0f}% vs classical  "
+                  f"[steps={steps}]",
+            labels=('Classical MCMC (0%)', f"QMCMC {r['pct']:.0f}%"),
+            q_color=C_QUANTUM)
+    base_v = qvmc_runs[0]
+    for r in qvmc_runs[1:]:
+        plot_corner_overlay(
+            _jitter(base_v['S']), _jitter(r['S']), model, outdir,
+            f"ladder_1to1_qvmc_{name}_q{int(r['pct']):03d}",
+            title=f"{model.label} — QVMC {r['pct']:.0f}% vs classical  "
+                  f"[iters={iters}, nqpp={nqpp}]  (cell-jittered)",
+            labels=('Classical VI (0%)', f"QVMC {r['pct']:.0f}%"),
+            q_color=C_QUANTUM2,
+            weights_c=base_v['W'], weights_q=r['W'])
+
+    _ladder_trends_y_tabla(qmcmc_runs, qvmc_runs, model, outdir,
+                           meta, q_cols)
+
+
+
 # =============================================================================
 # 7.  INTERACTIVE MENU (default behavior with no arguments)
 # =============================================================================
@@ -2889,7 +3260,13 @@ def csv_provenance(side: dict) -> dict:
         dict
     """
     return {
-        'noise': getattr(NOISE, 'label', 'none'),
+        # [B-PROV-GEN] El peldano puede venir EN la fila. Esta funcion la
+        # comparten los dos modulos, pero `NOISE` es un global por modulo: el
+        # CLI del genetico fija el de `cosmo_genetic_optimizers` y este se
+        # quedaba en 'none', asi que toda fila genetica mentia sobre su propio
+        # peldano. Los samplers no mandan la clave y siguen leyendo el global,
+        # igual que antes.
+        'noise': str(side.get('noise') or getattr(NOISE, 'label', 'none')),
         'proposal_route': PROPOSAL_ROUTE,
         'seed': str(side.get('seed', RUN_SEED if RUN_SEED is not None else '')),
         'budget_mode': str(side.get('budget_mode', '')),
@@ -3519,6 +3896,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--sanity-check', action='store_true',
                    help='Run the routing/correctness sanity check and exit '
                         '(acceptance regression test + per-preset engine map)')
+    # [B-REPLOTGLOB] `nargs='+'` porque la ayuda promete comodines del shell
+    # y sin esto argparse recibia la expansion del glob como varios
+    # argumentos posicionales y abortaba con "unrecognized arguments",
+    # rechazando TODOS menos el primero. El glob interno de abajo sigue
+    # existiendo para las shells que no expanden (Windows CMD) o cuando el
+    # patron se pasa entre comillas.
+    p.add_argument('--replot-ladder', metavar='CSV', default=None, nargs='+',
+                   help='NO calcula nada: rehace ladder_trends y '
+                        'ladder_summary desde el resultados_config.csv de una '
+                        'tarea que ya termino, y sale. Para volver a dibujar '
+                        'una campana vieja tras un arreglo de figuras sin '
+                        'repetir dias de computo. Los corner y los 1-a-1 NO '
+                        'se pueden rehacer: necesitan las cadenas, que el CSV '
+                        'no guarda. Acepta varios CSV con comodines del shell.')
     return p
 
 
@@ -3605,7 +3996,7 @@ def run_sweep_all(models, dataset, prior, steps, qvmc_iter, nqpp, chains,
                 outdir=model_dir, seed=seed, logger=logger,
                 log_every=log_every, n_chains_mcmc=chains, n_shots=shots,
                 csv_paths=csv_paths, dataset_label=dataset, prior_type=prior,
-                budget_mode=budget_mode)
+                budget_mode=budget_mode, no_plot=no_plot)
             status[model_name] = 'ok'
             say(f"[{i}/{len(models)}] {model_name}: DONE -> {model_dir}/")
         except Exception as exc:                      # keep the batch alive
@@ -3687,6 +4078,35 @@ def main():
     if getattr(args, 'sanity_check', False):
         sanity_check_routing(model_name=args.model, nqpp=min(args.nqpp, 2))
         return
+
+    # [B-REPLOT] Solo dibuja; no toca ningun numero.
+    if getattr(args, 'replot_ladder', None):
+        import glob as _glob
+        matplotlib.use('Agg')
+        # [B-REPLOTGLOB] Ahora llega una LISTA. Cada elemento puede ser ya
+        # una ruta (la shell expandio) o todavia un patron (no expandio, o
+        # venia entre comillas); se expande cada uno y se quitan repetidos.
+        patrones = args.replot_ladder
+        if isinstance(patrones, str):
+            patrones = [patrones]
+        rutas, vistas = [], set()
+        for patron in patrones:
+            for r in sorted(_glob.glob(patron)) or [patron]:
+                if r not in vistas:
+                    vistas.add(r)
+                    rutas.append(r)
+        hechos = fallos = 0
+        for ruta in rutas:
+            try:
+                destino = replot_ladder_from_csv(ruta)
+                print(f"  ok    {ruta} -> {destino}/ladder_*")
+                hechos += 1
+            except Exception as exc:
+                print(f"  FALLO {ruta}: {exc}")
+                fallos += 1
+        print(f"\n{hechos} figura(s) rehecha(s), {fallos} fallo(s). "
+              f"Los corner y los 1-a-1 NO se rehacen: necesitan las cadenas.")
+        return 0 if fallos == 0 else 1
 
     cli_mode = len(sys.argv) > 1 and not args.interactive
 
@@ -3844,7 +4264,8 @@ def main():
                                csv_paths=csv_paths, dataset_label=dataset,
                                prior_type=prior,
                                budget_mode=getattr(args, 'budget_mode',
-                                                   'circuits'))
+                                                   'circuits'),
+                               no_plot=args.no_plot)
         _finish_profile(profiler, args.outdir, say,
                         f"{model.label} benchmark | steps={steps} "
                         f"iters={qvmc_iter} nqpp={nqpp}")
