@@ -1095,8 +1095,65 @@ class QGA(GeneticEvolver):
         for q in range(nb):
             qc_cx.append(pswap, [q, nb + q])       # partial swap A[q] <-> B[q]
         qc_cx.measure_all()
-        self._qc_cx_t = transpile(qc_cx, self.sim)       # transpiled ONCE
+        self._qc_cx_t = self._transpile_cx(qc_cx)        # transpiled ONCE
         self._prep_a, self._prep_b = prep_a, prep_b
+
+    # ── [B-RZZ] ────────────────────────────────────────────────────────────
+    def _transpile_cx(self, qc_cx: "QuantumCircuit") -> "QuantumCircuit":
+        """Transpila el cruce cuantico, con red de seguridad para `noise=full`.
+
+        El cruce es el UNICO circuito del QGA que lleva una compuerta de dos
+        qubits arbitraria (`UnitaryGate(SWAP^alpha)`), asi que es el unico que
+        obliga al transpilador a SINTETIZAR un unitario de dos qubits. Para
+        elegir con que compuerta descomponerlo, Qiskit recorre las compuertas
+        de dos qubits del `target` y evalua `Operator(g)` en cada una.
+
+        El peldano `full` declara como base, entre otras, `rzz`, `rxx` y `ryy`
+        (`cosmo_noise._GATES_2Q`: ahi se le cuelga el canal despolarizante).
+        Esas tres son parametricas, y en algunas versiones de Qiskit
+        `Operator(RZZGate(Parameter))` levanta
+
+            TypeError: ParameterExpression with unbound parameters
+                       (dict_keys([Parameter(theta)])) cannot be cast to a float
+
+        que mata el QGA en `__init__`, ANTES de correr un solo peldano.
+        Medido: en la campana de Nicte-Ha `hpc_20260907_130425` la tarea
+        `genetic_lcdm_nb4_noise-full` murio asi y dejo el CSV con la fila del
+        CGA y nada mas; ninguna otra tarea de las 135 fallo.
+
+        La via principal queda INTACTA a proposito: donde hoy transpila, sigue
+        transpilando exactamente igual, asi que ningun resultado ya obtenido
+        cambia. Solo cuando esa via revienta con este error concreto se
+        reintenta sin las tres compuertas parametricas — que de todos modos no
+        son supercontroladas y el sintetizador nunca habria elegido. El aviso
+        se emite para que la celda quede marcada como obtenida por el
+        reintento.
+
+        Args:
+            qc_cx: plantilla del cruce, sin transpilar.
+
+        Returns:
+            QuantumCircuit
+        """
+        try:
+            return transpile(qc_cx, self.sim)
+        except TypeError as exc:
+            if 'unbound parameter' not in str(exc).lower():
+                raise
+            base = getattr(getattr(self.sim, 'options', None),
+                           'noise_model', None)
+            basis = sorted(set(getattr(base, 'basis_gates', ()) or ())
+                           - {'rzz', 'rxx', 'ryy'})
+            if not basis:
+                raise
+            warnings.warn(
+                "[B-RZZ] el transpilador no pudo inspeccionar las compuertas "
+                "parametricas de dos qubits del modelo de ruido "
+                f"('{self.noise_label}'); se reintenta el cruce cuantico sin "
+                "rzz/rxx/ryy en la base. Esta celda NO es comparable bit a "
+                "bit con una transpilada por la via principal.",
+                RuntimeWarning, stacklevel=2)
+            return transpile(qc_cx, self.sim, basis_gates=basis)
 
     # ── operator 1: quantum initialization ──────────────────────────────────
     def do_init(self) -> np.ndarray:
@@ -2132,7 +2189,8 @@ def plot_fitness_curve(results: Sequence[GAResult], outdir: str,
 # ── CSV export matching the shared `resultados_config.csv` schema ────────────
 #: Exact field order written by lcdm_quantum_samplers_personal.py so the
 #: genetic rows append cleanly to the same accumulating table.
-def _ga_side(result: GAResult, post: Posterior) -> dict:
+def _ga_side(result: GAResult, post: Posterior,
+             seed: Optional[int] = None) -> dict:
     """Pack a GAResult into the 'side' dict shape the shared CSV writers expect.
 
     The genetic estimate is reported on equal footing with the samplers: the
@@ -2156,6 +2214,20 @@ def _ga_side(result: GAResult, post: Posterior) -> dict:
         'ess': ess_weights(w),
         # genetic optimizers have neither MH acceptance nor a VI KL, so those
         # columns are left blank by the shared writer (is_mcmc=True, no keys).
+        #
+        # [B-PROV-GEN] El peldano de ruido va EN el dict, no se deja que el
+        # escritor lo lea de un global. `csv_row_for_side` vive en
+        # cosmo_modular_quantum y `csv_provenance` leia el `NOISE` de ESE
+        # modulo; el CLI del genetico solo fija el de ESTE. Resultado medido en
+        # las tres campanas: toda fila genetica decia noise='none', incluidas
+        # las de las tareas `noise-readout`, `noise-full` y `noise-fakebrisbane`
+        # — el eje de ruido del genetico era irreconstruible desde el CSV, que
+        # es exactamente la falla que [B-PROV] arreglo para los samplers.
+        'noise': getattr(NOISE, 'label', 'none'),
+        # [B-PROV-GEN] Idem con la semilla: el genetico la lleva en GAConfig y
+        # nunca llegaba al CSV, asi que la columna `seed` salia vacia en toda
+        # corrida genetica y `comparar_semillas.py` no podia usarla.
+        'seed': ('' if seed is None else str(int(seed))),
     }
 
 
@@ -2163,7 +2235,8 @@ def append_results_csv(result: GAResult, post: Posterior,
                        dataset_label: str, prior_type: str,
                        run_csv: str = "resultados_config.csv",
                        cumulative_csv: str = "resultados_config.csv",
-                       n_bits: Optional[int] = None) -> str:
+                       n_bits: Optional[int] = None,
+                       seed: Optional[int] = None) -> str:
     """Append the genetic MAP to the per-run AND cumulative results CSVs.
 
     [FIX] Now reports EVERY model parameter (wCDM: w; CPL: w0, wa; GEDE: Delta),
@@ -2189,11 +2262,13 @@ def append_results_csv(result: GAResult, post: Posterior,
             'resultados_config.csv'.
         n_bits: bits por parametro en la codificacion del genetico. Por
             defecto None.
+        seed: [B-PROV-GEN] semilla de la corrida (`GAConfig.seed`), para que la
+            fila diga por si sola con que semilla se obtuvo.
 
     Returns:
         str
     """
-    side = _ga_side(result, post)
+    side = _ga_side(result, post, seed=seed)
     model = post.model
     nqpp_tag = (str(n_bits) if (result.method == 'QGA' and n_bits is not None)
                 else "—")
@@ -2291,7 +2366,7 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
             append_results_csv(res, post, dataset_label, prior_type,
                                run_csv=run_csv,
                                cumulative_csv=cumulative_csv,
-                               n_bits=n_bits)
+                               n_bits=n_bits, seed=ga.seed)
             say(f"[{res.method}] MAP appended to {run_csv} "
                 f"(+ cumulative {cumulative_csv})")
 
