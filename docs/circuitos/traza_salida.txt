@@ -1,0 +1,136 @@
+
+modelo: Flat ΛCDM | parametros: 2 | datos: 1099
+
+==========================================================================
+  QMCMC — un paso de Metropolis completo
+==========================================================================
+
+--------------------------------------------------------------------------
+  1. CLASICO — el punto actual y su verosimilitud
+--------------------------------------------------------------------------
+   QUE CRUZA                  | TIPO                       | VALOR
+   ---------------------------+----------------------------+-------------------------------
+   theta (punto actual)       | float[2]  clasico          | [ 0.28 69.5 ]
+   log p(theta)               | float  clasico             | -532.3972   <- aqui entran los 1099 datos
+
+--------------------------------------------------------------------------
+  2. CUANTICO — la propuesta
+--------------------------------------------------------------------------
+   QUE CRUZA                  | TIPO                       | VALOR
+   ---------------------------+----------------------------+-------------------------------
+   ancho del circuito         | int                        | 2 qubits  (= d, NO n_data)
+   angulos de entrada         | float[17]  aleatorios      | sorteados en [0, 2pi) — NADA del problema
+   lo que sale de Aer         | complex[4]  amplitudes     | el vector de estado completo
+   lectura: Re(psi)*sign(Im)  | float[2]                   | [-0.0756 -0.4438]
+   theta' = theta + s*delta   | float[2]  clasico          | [ 0.2762 67.2809]
+
+--------------------------------------------------------------------------
+  3. CLASICO — evaluar el punto propuesto
+--------------------------------------------------------------------------
+   QUE CRUZA                  | TIPO                       | VALOR
+   ---------------------------+----------------------------+-------------------------------
+   log p(theta')              | float  clasico             | -542.7681   <- otra vez los 1099 datos
+   Delta                      | float                      | -10.370910
+   A = min(1, e^Delta)        | float en [0,1]             | 0.000031
+
+--------------------------------------------------------------------------
+  4. CUANTICO — la aceptacion  (1 qubit)
+--------------------------------------------------------------------------
+   QUE CRUZA                  | TIPO                       | VALOR
+   ---------------------------+----------------------------+-------------------------------
+   angulo de entrada          | float  UN solo numero      | theta_A = 2*arccos(sqrt(A)) = 3.130398 rad
+   lo que sale                | float  P(medir 0)          | 0.000031
+   comprobacion               | P(0) deberia ser A         | |P(0) - A| = 1.00e-12   <- por eso es FIEL
+   decision                   | bool  clasico              | u=0.5 < P(0)=0.0000  ->  RECHAZA
+
+   Resumen: los 1099 datos entraron DOS veces, las dos de forma
+   clasica, y de ellos solo sobrevivio UN numero (A) hasta tocar
+   un qubit. El circuito de propuesta ni siquiera vio el problema.
+
+==========================================================================
+  QVMC — una evaluacion de la KL
+==========================================================================
+
+--------------------------------------------------------------------------
+  1. CLASICO — la rejilla y el objetivo
+--------------------------------------------------------------------------
+   QUE CRUZA                  | TIPO                       | VALOR
+   ---------------------------+----------------------------+-------------------------------
+   ancho del circuito         | int                        | 6 qubits = d(2) x nqpp(3)
+   puntos de la rejilla       | int                        | 2^6 = 64
+   P (objetivo)               | float[64]  clasico         | suma=1.000000  <- construido con los 1099 datos
+   theta_table                | float[64, 2]               | cadena de bits -> punto del espacio de parametros
+
+--------------------------------------------------------------------------
+  2. CUANTICO — el ansatz
+--------------------------------------------------------------------------
+   QUE CRUZA                  | TIPO                       | VALOR
+   ---------------------------+----------------------------+-------------------------------
+   angulos de entrada         | float[18]  los parametros phi | n_phi = n(2L+1) = 6*(2*1+1) = 18
+   lo que sale de Aer         | float[64]  |psi|^2         | suma=1.0000000000
+   Q (la distribucion)        | float[64]                  | max=0.06167 en la celda 21
+
+--------------------------------------------------------------------------
+  3. CLASICO — comparar Q contra P
+--------------------------------------------------------------------------
+   QUE CRUZA                  | TIPO                       | VALOR
+   ---------------------------+----------------------------+-------------------------------
+   KL(Q || P)                 | float  UN numero           | 19.493044
+   estimador                  | float[2]  E_Q[theta]       | [ 0.3298 71.4367]
+
+   El circuito NUNCA vio los datos. Produjo Q; los datos vivian
+   en P, y las dos se comparan clasicamente. El optimizador mueve
+   los phi para bajar ese unico numero.
+
+--------------------------------------------------------------------------
+  4. El TERCER circuito del QVMC no es un circuito nuevo
+--------------------------------------------------------------------------
+   QUE CRUZA                  | TIPO                       | VALOR
+   ---------------------------+----------------------------+-------------------------------
+   mismo circuito, phi[0]+pi/2 | float  KL                  | 18.177150
+   mismo circuito, phi[0]-pi/2 | float  KL                  | 19.355489
+   dKL/dphi[0]                | float  derivada EXACTA     | (18.177150 - 19.355489)/2 = -0.589169
+   costo por iteracion        | int  circuitos             | 1 + 2*18 = 37
+
+   Por eso son TRES componentes y DOS dibujos: el entrenamiento
+   reusa el ansatz con los angulos corridos pi/2.
+
+==========================================================================
+  QGA — un gen mutado
+==========================================================================
+
+--------------------------------------------------------------------------
+  1. CLASICO — el individuo, como bits
+--------------------------------------------------------------------------
+   QUE CRUZA                  | TIPO                       | VALOR
+   ---------------------------+----------------------------+-------------------------------
+   theta (un individuo)       | float[2]                   | [ 0.28 69.5 ]
+   genes (enteros)            | int[2]  rejilla 2^3        | [2 3]
+   bits                       | int[2, 3]                  | 010 011
+
+--------------------------------------------------------------------------
+  2. CUANTICO — la mutacion
+--------------------------------------------------------------------------
+   QUE CRUZA                  | TIPO                       | VALOR
+   ---------------------------+----------------------------+-------------------------------
+   ancho del circuito         | int                        | 3 qubits (= n_bits)
+   angulos de entrada         | float[3]                   | [0.9273 2.2143 0.9273]
+     (de donde salen)         | P1 = b(1-p) + (1-b)p       | [0.2 0.8 0.2]
+   lo que sale                | cadena de bits medida      | una por disparo — ese ES el gen mutado
+
+--------------------------------------------------------------------------
+  3. CLASICO — decodificar y evaluar
+--------------------------------------------------------------------------
+   QUE CRUZA                  | TIPO                       | VALOR
+   ---------------------------+----------------------------+-------------------------------
+   theta decodificado         | float[2]                   | [ 0.28  69.625]
+   fitness (chi2)             | float  clasico             | 1064.9759  sobre 1099 datos   <- aqui entran los datos
+
+   El circuito solo movio bits. Que tan bueno es el individuo lo
+   decide el chi2, que es clasico de principio a fin.
+
+==========================================================================
+  En los tres: los datos entran SOLO por la evaluacion clasica.
+  Los qubits cuentan parametros, no datos.
+==========================================================================
+
