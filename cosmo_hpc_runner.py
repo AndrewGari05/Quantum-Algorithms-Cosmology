@@ -1239,6 +1239,32 @@ def _read_master_profile_rss(master_dir: str):
     return rss
 
 
+def _familia_de_metodo(method: str) -> str:
+    """Familia a la que pertenece un metodo: 'genetic' o 'samplers'.
+
+    [B-NBITS] Hace falta porque las dos familias reportan su resolucion en la
+    MISMA columna del CSV (`nqpp`) pero midiendo cosas distintas: para los
+    samplers es qubits por parametro de la rejilla del posterior, para el
+    genetico es bits por gen de la codificacion. Dibujarlas en un solo eje
+    etiquetado 'nqpp' — que es lo que se hacia — pone juntos dos numeros que
+    no son comparables.
+
+    Args:
+        method: nombre del metodo tal como aparece en la columna `Method`.
+
+    Returns:
+        'genetic' o 'samplers'.
+
+    Examples:
+        >>> _familia_de_metodo('CGA'), _familia_de_metodo('QGA (q=33%)')
+        ('genetic', 'genetic')
+        >>> _familia_de_metodo('QMCMC 50%'), _familia_de_metodo('Classical VI')
+        ('samplers', 'samplers')
+    """
+    m = method.upper()
+    return 'genetic' if ('GA' in m.replace('CLASSICAL', '')) else 'samplers'
+
+
 def _is_grid_method(method: str) -> bool:
     """True si el metodo vive sobre la rejilla (QVMC o VI clasico).
 
@@ -1627,7 +1653,9 @@ def _one_noise_figure(model, rows, levels, outdir, suffix, pull, np, plt,
 
 def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
                                only_grid_methods: bool = False,
-                               xlabel: str = 'nqpp') -> List[str]:
+                               xlabel: str = 'nqpp',
+                               familia: Optional[str] = None,
+                               sufijo: str = '') -> List[str]:
     """Generate convergence_<model>.png and cost_<model>.png for each model with
     >=2 grid values. Returns the paths created. Does not raise if matplotlib is
 
@@ -1637,6 +1665,14 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
         only_grid_methods: restringir a los metodos que viven sobre la
             rejilla. Por defecto False.
         xlabel: etiqueta del eje x. Por defecto 'nqpp'.
+        familia: [B-NBITS] restringe a una familia de metodos: 'samplers'
+            (QMCMC/QVMC/clasicos) o 'genetic' (CGA/QGA). None dibuja todos,
+            que es lo que hacia antes y estaba MAL: el eje x del genetico es
+            n_bits (bits por gen) y el de los samplers es nqpp (qubits por
+            parametro de la rejilla). Son cantidades distintas y compartir
+            eje las hace incomparables. Por defecto None.
+        sufijo: se agrega al nombre del archivo para no pisar la figura de
+            la otra familia. Por defecto ''.
 
     Returns:
         List[str]
@@ -1687,7 +1723,14 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
 
     made: List[str] = []
     for model in models:
-        grids = sorted({r['grid'] for r in records if r['model'] == model})
+        # [B-NBITS] El eje x lo fijan SOLO los registros de la familia que se
+        # esta dibujando. Sin este filtro la figura del genetico heredaba los
+        # valores de nqpp de los samplers (p. ej. 2 y 3) y el eje salia de 2 a
+        # 5 con datos solo en 4 y 5 — media grafica vacia y una escala que no
+        # corresponde a ninguna de las dos familias.
+        grids = sorted({r['grid'] for r in records if r['model'] == model
+                        and (not familia
+                             or _familia_de_metodo(r['method']) == familia)})
         if len(grids) < 2:
             print(f"  . {model}: only {len(grids)} {xlabel} value(s); "
                   f"no convergence to plot (skipped).")
@@ -1709,6 +1752,8 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
             ax = axes[idx // ncol][idx % ncol]
             for method in sorted(series(model, param)):
                 if only_grid_methods and not _is_grid_method(method):
+                    continue
+                if familia and _familia_de_metodo(method) != familia:
                     continue
                 g, m, s = series(model, param)[method]
                 col, mk, ls = style[method]
@@ -1751,7 +1796,7 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
                      fontsize=13, fontweight='bold')
         fig.tight_layout(rect=[0, 0, 1, 0.96])
         os.makedirs(outdir, exist_ok=True)
-        p1 = os.path.join(outdir, f'convergence_{model}.png')
+        p1 = os.path.join(outdir, f'convergence_{model}{sufijo}.png')
         fig.savefig(p1, dpi=150, bbox_inches='tight')
         fig.savefig(p1.replace('.png', '.pdf'), bbox_inches='tight')
         plt.close(fig); made.append(p1)
@@ -1760,8 +1805,18 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
         from collections import defaultdict
         times = defaultdict(list)
         for r in records:
-            if r['model'] == model and not np.isnan(r['time_s']):
-                times[r['method']].append((r['grid'], r['time_s']))
+            if r['model'] != model or np.isnan(r['time_s']):
+                continue
+            # [B-NBITS2] El MISMO filtro de familia que usa la figura de
+            # convergencia. Sin el, la figura de costo de los samplers
+            # dibujaba tambien las curvas del genetico —cuyo eje x es n_bits,
+            # no nqpp— sobre un eje etiquetado 'nqpp' y con los ticks puestos
+            # en los valores de la otra familia: los puntos del genetico caian
+            # a la derecha del ultimo tick, sin etiqueta. Es el mismo error
+            # que [B-NBITS] arreglo arriba, que aqui se habia quedado.
+            if familia and _familia_de_metodo(r['method']) != familia:
+                continue
+            times[r['method']].append((r['grid'], r['time_s']))
         grids_rss = sorted([(g, v) for (mm, g), v in rss_map.items()
                             if mm == model])
         if times or grids_rss:
@@ -1785,8 +1840,11 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
             fig.suptitle(f'Cost vs resolution - model {model.upper()}',
                          fontsize=12, fontweight='bold')
             fig.tight_layout()
-            p2 = os.path.join(outdir, f'cost_{model}.png')
+            p2 = os.path.join(outdir, f'cost_{model}{sufijo}.png')
             fig.savefig(p2, dpi=150, bbox_inches='tight')
+            # [B-PDF] Tambien en PDF, como la figura de convergencia de
+            # arriba. Faltaba solo aqui, y el paper necesita vectorial.
+            fig.savefig(p2.replace('.png', '.pdf'), bbox_inches='tight')
             plt.close(fig); made.append(p2)
 
     if made:
@@ -1946,7 +2004,11 @@ def main() -> int:
             sys.stderr.write(f"--plot-only: {args.plot_only} does not exist\n")
             return 2
         made = generate_convergence_plots(
-            args.plot_only, only_grid_methods=args.only_grid_methods)
+            args.plot_only, only_grid_methods=args.only_grid_methods,
+            xlabel='nqpp', familia='samplers')
+        made += generate_convergence_plots(
+            args.plot_only, only_grid_methods=args.only_grid_methods,
+            xlabel='n_bits', familia='genetic', sufijo='_genetico')
         if not made:
             print("Nothing to plot: you need >=2 grid values per model "
                   "(run a sweep with --nqpp-sweep).")
@@ -2138,8 +2200,15 @@ def main() -> int:
     # --- convergence plots at the end of ALL the runs ---
     if not args.no_plots:
         print("\nGenerating convergence plots...")
+        # [B-NBITS] Dos figuras, una por familia: el eje x del genetico es
+        # n_bits y el de los samplers es nqpp, y mezclarlos en un solo eje
+        # etiquetado 'nqpp' ponia lado a lado dos cantidades distintas.
         generate_convergence_plots(
-            master_dir, only_grid_methods=args.only_grid_methods)
+            master_dir, only_grid_methods=args.only_grid_methods,
+            xlabel='nqpp', familia='samplers')
+        generate_convergence_plots(
+            master_dir, only_grid_methods=args.only_grid_methods,
+            xlabel='n_bits', familia='genetic', sufijo='_genetico')
         # [PLOT-NOISE] Solo produce algo si hubo mas de un peldano; con una
         # corrida ideal se salta sola y no ensucia la carpeta.
         if any_noisy or len(noise_levels) > 1:
