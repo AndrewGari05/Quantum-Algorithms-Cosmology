@@ -89,6 +89,124 @@ def _sufijo_qubits(nombre):
     return ''
 
 
+def columnas_de_parametros(cols):
+    """Columnas de parametros cosmologicos presentes en el CSV.
+
+    Los nombres dependen del modelo (`Om_mean`, `H0_std`, `w0_mean`...), asi
+    que no se pueden fijar de antemano: se descubren por el sufijo.
+
+    Args:
+        cols: conjunto de nombres de columna del CSV.
+
+    Returns:
+        Lista ordenada de las columnas que acaban en `_mean` o `_std`.
+
+    Examples:
+        >>> columnas_de_parametros({'Method', 'Om_mean', 'Om_std', 'chi2'})
+        ['Om_mean', 'Om_std']
+        >>> columnas_de_parametros({'Method', 'chi2'})
+        []
+    """
+    return sorted(c for c in cols
+                  if c.endswith('_mean') or c.endswith('_std'))
+
+
+def _iguales(a, b, campos):
+    """¿Coinciden dos filas en todos los campos dados?
+
+    Compara solo los campos que EXISTEN en ambas filas y exige que haya al
+    menos uno. Sin esa condicion, comparar dos filas por nombres de columna
+    inexistentes da `None == None` para todo y la celda faithful sale "OK"
+    sin haber comprobado nada — que es justo lo contrario de lo que sirve
+    esta seccion.
+
+    Args:
+        a, b: las dos filas a comparar.
+        campos: nombres de columna a cotejar.
+
+    Returns:
+        True si coinciden en todos los campos comunes; False si difieren o
+        si no comparten ninguno.
+
+    Examples:
+        >>> _iguales({'x': '1'}, {'x': '1'}, ['x'])
+        True
+        >>> _iguales({'x': '1'}, {'x': '2'}, ['x'])
+        False
+        >>> _iguales({'x': '1'}, {'x': '1'}, ['no_existe'])
+        False
+    """
+    comunes = [c for c in campos if c in a and c in b]
+    if not comunes:
+        return False
+    return all(a[c] == b[c] for c in comunes)
+
+
+def modelo_de_ruta(path):
+    """Deduce el modelo cosmologico de la ruta de un CSV.
+
+    El CSV no lleva columna `model`: el modelo esta en la carpeta
+    (`model_lcdm/`) o en el nombre del archivo (`resultados_lcdm.csv`).
+
+    Args:
+        path: ruta del CSV.
+
+    Returns:
+        Clave del modelo, o `'?'` si la ruta no lo dice.
+
+    Examples:
+        >>> modelo_de_ruta('run/model_wcdm/resultados_config.csv')
+        'wcdm'
+        >>> modelo_de_ruta('run/resultados_cpl.csv')
+        'cpl'
+        >>> modelo_de_ruta('run/resultados_config.csv')
+        '?'
+    """
+    partes = path.replace('\\', '/').split('/')
+    for p in partes:
+        m = re.match(r'model_(\w+)$', p)
+        if m and m.group(1) in DIM_MODELO:
+            return m.group(1)
+    m = re.search(r'resultados_(\w+)\.csv$', partes[-1])
+    if m and m.group(1) in DIM_MODELO:
+        return m.group(1)
+    for p in partes:
+        m = re.search(r'_(' + '|'.join(DIM_MODELO) + r')_', p)
+        if m:
+            return m.group(1)
+    return '?'
+
+
+def nivel_de_ruido(fila, ruta):
+    """Nivel de ruido de una fila: columna si existe, si no la ruta.
+
+    En las campanas anteriores al 2026-09-04 no hay columna `noise` — es una
+    de las que introdujo [B-PROV] —, pero el runner SI pone el nivel en el
+    nombre de la carpeta (`samplers_lcdm_nqpp5_noise-full`). Sin esta caida
+    a la ruta, toda campana vieja parece ideal y las celdas ruidosas se
+    denuncian como error cuando estan haciendo justo lo que deben.
+
+    Args:
+        fila: la fila del CSV.
+        ruta: ruta del archivo del que salio.
+
+    Returns:
+        El nivel como cadena; `'none'` si no se puede determinar.
+
+    Examples:
+        >>> nivel_de_ruido({'noise': 'readout'}, 'x/samplers_lcdm_noise-full/r.csv')
+        'readout'
+        >>> nivel_de_ruido({}, 'x/samplers_lcdm_nqpp5_noise-full/r.csv')
+        'full'
+        >>> nivel_de_ruido({'noise': ''}, 'x/genetic_lcdm_nb6/r.csv')
+        'none'
+    """
+    if fila.get('noise'):
+        return fila['noise']
+    m = re.search(r'noise-([A-Za-z0-9_.-]+)', ruta.replace('\\', '/'))
+    return m.group(1) if m else 'none'
+
+
 def estado_de_tarea(carpeta):
     """Clasifica una carpeta de tarea.
 
@@ -161,6 +279,15 @@ def revisar(master_dir):
     for p in glob.glob(os.path.join(master_dir, '**', 'resultados_*.csv'),
                        recursive=True):
         nuevas = _leer_csv(p)
+        # El modelo no viene como columna: se anota desde la ruta para poder
+        # agrupar por modelo en las secciones 2 y 4.
+        mod = modelo_de_ruta(p)
+        for r in nuevas:
+            # El CSV del barrido genetico SI trae columna `model`; el de
+            # samplers no. Se prefiere la del archivo y se cae a la ruta.
+            r['_modelo'] = r.get('model') or mod
+            r['_archivo'] = p
+            r['_ruido'] = nivel_de_ruido(r, p)
         filas += nuevas
         for r in nuevas[:1]:
             cols |= set(r.keys())
@@ -171,7 +298,7 @@ def revisar(master_dir):
     print("\n2. AJUSTE  (chi2 del mejor ajuste, identico en todos los rungs)")
     vistos = {}
     for r in filas:
-        mod = r.get('model') or '?'
+        mod = r.get('_modelo') or '?'
         if mod not in vistos and r.get('chi2'):
             vistos[mod] = (r.get('chi2'), r.get('n_data'), r.get('chi2_red'),
                            r.get('AIC'), r.get('BIC'))
@@ -221,30 +348,91 @@ def revisar(master_dir):
         print("       (que es para lo que sirven).")
 
     # ── 4. celdas faithful ───────────────────────────────────────────────
+    # La clave de agrupacion NO incluye nqpp a proposito. Los rungs clasicos
+    # ('Classical VI', 'CGA') escriben nqpp='—' mientras sus parejas cuanticas
+    # escriben el numero, asi que agrupar por nqpp separaba a cada pareja y el
+    # par CGA == QGA (q=0%) no llegaba a comprobarse nunca. Se usa el archivo
+    # de origen en su lugar: dentro de un CSV de tarea el nqpp es unico.
     grupos = defaultdict(dict)
     for r in filas:
-        clave = (r.get('model'), r.get('nqpp'), r.get('dataset'),
-                 r.get('noise', ''))
+        clave = (r.get('_archivo'), r.get('_modelo'), r.get('dataset'),
+                 r.get('_ruido'))
         grupos[clave][r.get('Method')] = r
 
-    def _iguales(a, b, campos):
-        return all(a.get(c) == b.get(c) for c in campos)
+    campos = columnas_de_parametros(cols)
+    if not campos:
+        print("\n4. CELDAS FAITHFUL: el CSV no trae ninguna columna *_mean /")
+        print("   *_std, asi que NO se puede comprobar nada. Revisa el CSV.")
+        return
 
-    campos = ['p1_mean', 'p1_std', 'p2_mean', 'p2_std']
-    pares = [('QMCMC 50%', 'QMCMC 100%'), ('Classical VI', 'QVMC 33%'),
-             ('QVMC 67%', 'QVMC 100%'), ('CGA', 'QGA (q=0%)')]
-    resumen = defaultdict(lambda: [0, 0])
-    for g in grupos.values():
-        for a, b in pares:
-            if a in g and b in g:
+    # Solo pares REALMENTE faithful. 'Classical VI' vs 'QVMC 33%' NO lo es y
+    # estaba mal puesto aqui: el rung 33% cambia el muestreo (disparos en vez
+    # de amplitudes), asi que difiere en la cuarta cifra por construccion.
+    # Exigirle igualdad habria producido un fallo falso en cada celda.
+    # El tercer campo dice si el par DEBE separarse al encender el ruido.
+    # Solo es cierto cuando el componente que los distingue es un circuito
+    # cuantico que el ruido toca:
+    #
+    #   QMCMC 50 -> 100 : anade la aceptacion cuantica, un circuito real.
+    #                     El ruido lo degrada. DEBE separarse.
+    #   QVMC  67 -> 100 : anade la normalizacion, que ejecuta el circuito
+    #                     pero DESCARTA su resultado y usa la suma exacta
+    #                     (ver quantum_amplitude_normalization). Es inmune
+    #                     al ruido por construccion: seguir identico es lo
+    #                     correcto, no un fallo.
+    #   CGA  -> QGA 0%  : quantumness 0%, no hay componente cuantico que el
+    #                     ruido pueda tocar.
+    #
+    # Sin esta distincion el triage denunciaba 'el ruido no llego' en 70 de
+    # 92 celdas sanas.
+    pares = [('QMCMC 50%', 'QMCMC 100%', True),
+             ('QVMC 67%', 'QVMC 100%', False),
+             ('CGA', 'QGA (q=0%)', False)]
+    # La igualdad faithful SOLO se exige en el eje ideal. Con ruido, los dos
+    # peldanos tienen que separarse: es el resultado del eje NISQ, no un
+    # error. Mezclar ambos ejes en un solo contador daba '40/62 REVISAR' en
+    # una campana perfectamente sana — y una alarma que salta siempre es una
+    # alarma que se deja de leer. Al reves tambien informa: un peldano
+    # ruidoso que coincide BIT A BIT con el ideal significa que el ruido no
+    # se aplico, y eso si es un error.
+    resumen = defaultdict(lambda: [0, 0])       # ideal: cuantos coinciden
+    ruidosas = defaultdict(lambda: [0, 0])      # ruido: cuantos se separan
+    inmunes = defaultdict(lambda: [0, 0])       # ruido: cuantos siguen iguales
+    for (_arch, _mod, _ds, ruido), g in grupos.items():
+        ideal = (ruido or 'none') in ('none', 'none-counts', '')
+        for a, b, sensible in pares:
+            if a not in g or b not in g:
+                continue
+            igual = _iguales(g[a], g[b], campos)
+            if ideal:
                 resumen[(a, b)][1] += 1
-                if _iguales(g[a], g[b], campos):
-                    resumen[(a, b)][0] += 1
+                resumen[(a, b)][0] += int(igual)
+            elif sensible:
+                ruidosas[(a, b)][1] += 1
+                ruidosas[(a, b)][0] += int(not igual)
+            else:
+                inmunes[(a, b)][1] += 1
+                inmunes[(a, b)][0] += int(igual)
+
+    if resumen or ruidosas or inmunes:
+        print("\n4. CELDAS FAITHFUL")
+        print(f"   comparando: {', '.join(campos)}")
     if resumen:
-        print("\n4. CELDAS FAITHFUL  (deben coincidir; si no, hay un error)")
+        print("\n   Sin ruido — DEBEN coincidir exactamente:")
         for (a, b), (ok, tot) in sorted(resumen.items()):
             marca = 'OK' if ok == tot else '*** REVISAR ***'
-            print(f"   {a:14s} == {b:14s}  {ok}/{tot}  {marca}")
+            print(f"     {a:14s} == {b:14s}  {ok}/{tot}  {marca}")
+    if ruidosas:
+        print("\n   Con ruido — DEBEN separarse (que difieran es el resultado):")
+        for (a, b), (sep, tot) in sorted(ruidosas.items()):
+            marca = 'OK' if sep == tot else '*** REVISAR: el ruido no llego ***'
+            print(f"     {a:14s} != {b:14s}  {sep}/{tot}  {marca}")
+    if inmunes:
+        print("\n   Con ruido, pares INMUNES por construccion "
+              "(deben seguir iguales):")
+        for (a, b), (ok, tot) in sorted(inmunes.items()):
+            marca = 'OK' if ok == tot else '*** REVISAR ***'
+            print(f"     {a:14s} == {b:14s}  {ok}/{tot}  {marca}")
 
 
 def main(argv=None):
