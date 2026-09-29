@@ -728,9 +728,21 @@ class QuantumProposalEngine:
         # both formally at odds with the i.i.d. symmetric-proposal assumption
         # of Metropolis-Hastings. With fixed constants the proposals are
         # i.i.d. draws from one distribution, still zero-mean and unit-std.
+        #
+        # [E-QM1] ... but the calibration MEAN must not be subtracted. The raw
+        # displacement is exactly symmetric in distribution, so its true mean
+        # is zero; subtracting the EMPIRICAL mean of the calibration block
+        # added a constant offset c = -mu_hat/sigma to every proposal. With a
+        # plain Metropolis acceptance (no Hastings term) that asymmetric
+        # proposal made the chain sample a shifted distribution (toy Gaussian:
+        # mean -0.61 instead of 0; LCDM: Om -0.25 sigma). Now only the scale
+        # is calibrated (root mean square, so the proposal has unit variance)
+        # and each displacement gets an independent random sign in `_refill`,
+        # which makes q(delta) = q(-delta) hold exactly for any backend,
+        # including asymmetric readout noise on real devices.
         raw = self._raw_block(max(n_calib, batch))
-        self._mu = raw.mean(axis=0)
-        sigma = raw.std(axis=0)
+        self._mu = np.zeros(self.d)          # kept for API compatibility
+        sigma = np.sqrt(np.mean(raw ** 2, axis=0))
         sigma[sigma < 1e-8] = 1.0
         self._sigma = sigma
 
@@ -841,7 +853,10 @@ class QuantumProposalEngine:
         replacement for the classical Gaussian (acceptance back in the
         healthy 0.2–0.5 band) while keeping the draws i.i.d.
         """
-        raw = (self._raw_block(self.batch) - self._mu) / self._sigma
+        # [E-QM1] Random sign per displacement: exact symmetry, zero mean.
+        raw = self._raw_block(self.batch) / self._sigma
+        signs = 2.0 * RNG.integers(0, 2, size=(self.batch, 1)) - 1.0
+        raw = signs * raw
         for k in range(self.batch):
             self._queue.append(raw[k].copy())
 

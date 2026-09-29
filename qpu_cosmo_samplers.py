@@ -842,11 +842,18 @@ class QPUProposalEngine:
         all_counts = self.conn.run_pub(self.isa, phis, shots=self.shots)
         raw = np.array([self._counts_to_shift(cnt) for cnt in all_counts])
         if self._sigma is None:                    # first block calibrates
-            self._mu = raw.mean(axis=0)
-            sigma = raw.std(axis=0)
+            # [E-QPU2] Scale only (root mean square). Subtracting the block's
+            # empirical mean added a constant drift to every step, and
+            # Metropolis without a Hastings term then samples a shifted
+            # distribution (bias up to 0.3 sigma in a dry run). On hardware
+            # the true mean is not even zero (asymmetric readout), so the
+            # random sign below is what makes the proposal symmetric.
+            self._mu = np.zeros(self.d)
+            sigma = np.sqrt(np.mean(raw ** 2, axis=0))
             sigma[sigma < 1e-8] = 1.0
             self._sigma = sigma
-        raw = (raw - self._mu) / self._sigma
+        signs = 2.0 * RNG.integers(0, 2, size=(len(raw), 1)) - 1.0
+        raw = signs * raw / self._sigma
         for k in range(len(raw)):
             self._queue.append(raw[k].copy())
 

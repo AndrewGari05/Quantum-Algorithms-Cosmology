@@ -213,6 +213,59 @@ def test_runner_forwards_rungs_and_qga_levels(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# QM-1: the quantum proposal must be symmetric (zero mean) for EVERY seed.
+# Seed 7 with d=2 on the amplitude route had a calibration offset of -0.067
+# step units in coordinate 0 (z ~ -6 over 8192 draws); the chain then sampled
+# a shifted target (toy Gaussian mean -0.61, KS p = 2e-22).
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("route", ["amplitude", "counts"])
+def test_qm1_proposal_displacements_are_symmetric(route):
+    import numpy as np
+    import cosmo_modular_quantum as cmq
+    import cosmo_noise as cn
+    cmq.set_noise(cn.NoiseSpec.from_level("none"), proposal_route=route)
+    try:
+        cmq._reseed(7)
+        eng = cmq.QuantumProposalEngine(2, n_layers=3, batch=512)
+        assert np.all(eng._mu == 0.0)
+        draws = np.array([eng.next() for _ in range(8192)])
+        z = draws.mean(axis=0) / (draws.std(axis=0) / np.sqrt(len(draws)))
+        assert np.all(np.abs(z) < 4.0), z
+        assert np.allclose((draws ** 2).mean(axis=0), 1.0, atol=0.08)
+    finally:
+        cmq.set_noise(cn.NoiseSpec.from_level("none"), proposal_route="auto")
+
+
+def test_qpu2_hardware_engine_has_no_calibration_drift():
+    import numpy as np
+    import qpu_cosmo_samplers as qpu
+
+    class _Conn:                               # asymmetric fake device
+        rng = np.random.default_rng(11)
+
+        def transpile_isa(self, qc):
+            return qc
+
+        def run_pub(self, isa, phis, shots):
+            rng = self.rng
+            out = []
+            for _ in phis:                     # biased <Z>: P(1) = 0.4 per qubit
+                bits = rng.random((shots, 2)) < 0.4
+                c = {}
+                for b in bits:
+                    k = "".join("1" if x else "0" for x in b[::-1])
+                    c[k] = c.get(k, 0) + 1
+                out.append(c)
+            return out
+
+    qpu._reseed(3)
+    eng = qpu.QPUProposalEngine(_Conn(), n_phys=2, block=64, shots_per_proposal=64)
+    draws = np.array([eng.next() for _ in range(8192)])
+    z = draws.mean(axis=0) / (draws.std(axis=0) / np.sqrt(len(draws)))
+    assert np.all(np.abs(z) < 4.0), z        # sign flip removes device bias
+
+
+# --------------------------------------------------------------------------- #
 # HPC-3: on a fake-backend level every two-qubit gate must carry noise, and
 # routing must keep the outputs in logical qubit order.
 # --------------------------------------------------------------------------- #
