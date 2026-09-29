@@ -368,11 +368,11 @@ def test_ga1_grid_floor_value():
     assert abs(g["floor_minus_continuous"] - 0.930) < 2e-3
 
 
-def test_refit_tool_reads_campaign(tmp_path):
+def test_refit_tool_reads_campaign(tmp_path, monkeypatch):
     import errata_tools as et
     _task(tmp_path, "samplers_lcdm_nqpp3_noise-none",
           [_row("Classical MCMC", 0.2574, chi2="27.9", n="51")])
-    os.chdir(tmp_path)
+    monkeypatch.chdir(tmp_path)
     out = et.cmd_refit([str(tmp_path)], quiet=True)
     assert len(out) == 1 and abs(out[0]["chi2_new"] - 27.469109) < 1e-4
 
