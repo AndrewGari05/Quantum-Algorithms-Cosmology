@@ -1,45 +1,63 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
-title: "Quantum Algorithms for Cosmology: a classical-quantum ablation framework for Bayesian inference"
+title: "qablate: classical-quantum ablation studies for Bayesian parameter inference"
 abstract: >-
-  A toolkit that fits cosmological models (LambdaCDM, wCDM, CPL, PEDE, GEDE)
-  to CC+BAO H(z) and Type Ia supernova data (Pantheon 2018 / Pantheon+ 2022)
-  with classical and quantum sampling and optimization algorithms (MCMC/QMCMC,
-  VI/QVMC, CGA/QGA), organized as a per-component classical-quantum ablation
-  framework. The scientific aim is faithful replication of classical results
-  by quantum methods, not a claim of quantum advantage.
+  A Python library that swaps the components of Bayesian inference algorithms
+  (Metropolis-Hastings proposal and acceptance, variational distribution and
+  optimizer, genetic operators) between classical and quantum-circuit
+  implementations, one at a time, and checks what changes. It includes flat
+  background cosmology models (LambdaCDM, wCDM, CPL, PEDE, GEDE) with H(z) and
+  Pantheon 2018 likelihoods. The aim is fidelity to classical results; no
+  quantum advantage is claimed.
 type: software
 authors:
   - given-names: "Andrés"
     family-names: "García Rivera"
+    email: "andres.garciarivera05@gmail.com"
     affiliation: "Universidad Iberoamericana (IBERO), Mexico City"
-# TODO(author): add ORCID once available.
-# - orcid: "https://orcid.org/0000-0000-0000-0000"
 repository-code: "https://github.com/AndrewGari05/Quantum-Algorithms-Cosmology"
 license: MIT
-version: "2.0.0"
-date-released: "2026-01-01"
+version: "1.0.0.dev0"
 keywords:
   - quantum computing
-  - cosmology
   - Bayesian inference
-  - MCMC
-  - variational quantum Monte Carlo
-  - genetic algorithms
+  - Markov chain Monte Carlo
+  - variational inference
+  - ablation study
+  - cosmology
   - Qiskit
 references:
   - type: article
     authors:
       - family-names: "Sarracino"
-    title: "Quantum-enhanced Markov chain Monte Carlo proposal"
+    title: "Quantum Markov Chain Monte Carlo for Cosmological Functions"
     year: 2025
-    notes: "QMCMC proposal circuit."
+    identifiers:
+      - type: other
+        value: "arXiv:2509.09395"
+    notes: "Random proposal circuit."
   - type: article
     authors:
-      - family-names: "Goliath"
-    title: "Supernovae and the nature of the dark energy"
-    year: 2001
-    notes: "Analytic marginalization of the absolute magnitude M_abs."
+      - family-names: "Magaña"
+      - family-names: "Amante"
+      - family-names: "García-Aspeitia"
+      - family-names: "Motta"
+    title: >-
+      The Cardassian expansion revisited: constraints from updated Hubble
+      parameter measurements and type Ia supernova data
+    journal: "Monthly Notices of the Royal Astronomical Society"
+    volume: 476
+    start: 1036
+    year: 2018
+    notes: "51-point H(z) compilation (CC+BAO)."
+  - type: article
+    authors:
+      - family-names: "Scolnic"
+    title: "The Complete Light-curve Sample of Spectroscopically Confirmed SNe Ia from Pan-STARRS1 and Cosmological Constraints from the Combined Pantheon Sample"
+    journal: "The Astrophysical Journal"
+    volume: 859
+    year: 2018
+    notes: "Pantheon supernova sample."
   - type: article
     authors:
       - family-names: "Vehtari"
@@ -50,11 +68,5 @@ references:
     title: >-
       Rank-normalization, folding, and localization: an improved R-hat for
       assessing convergence of MCMC
+    journal: "Bayesian Analysis"
     year: 2021
-    notes: "Rank-normalized split-R-hat and the 1.01 convergence threshold."
-  - type: article
-    authors:
-      - family-names: "Spall"
-    title: "Implementation of the simultaneous perturbation algorithm (SPSA)"
-    year: 1998
-    notes: "SPSA optimizer used on the QPU path."

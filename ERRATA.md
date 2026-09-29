@@ -13,6 +13,9 @@ changes numbers that were already computed.
   reproduces the reference set bit for bit.
 * Every fix has a regression test in `tests/test_errata.py` that fails on
   `v0.8.1-thesis` and passes after the fix.
+* File names below refer to branch `thesis-errata`. On the default branch the
+  campaign tools are `python -m thesis legacy {refit,grid-floor,mc-error}`, and
+  every fix is also part of the `qablate` library (see CHANGELOG.md).
 
 ## 1. Fixes that change results
 
