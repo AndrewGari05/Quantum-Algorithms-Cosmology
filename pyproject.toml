@@ -24,7 +24,7 @@ dependencies = ["numpy>=1.24", "scipy>=1.10"]
 
 [project.optional-dependencies]
 quantum = ["qiskit>=2.0", "qiskit-aer>=0.17"]
-ibm = ["qiskit-ibm-runtime>=0.40"]
+ibm = ["qiskit-ibm-runtime>=0.40,<0.51"]   # SamplerV2 is deprecated from 0.50; tested with 0.50.0
 diagnostics = ["arviz>=0.18"]
 plot = ["matplotlib>=3.7", "corner>=2.2"]
 all = ["qablate[quantum,ibm,diagnostics,plot]", "tqdm>=4.60"]

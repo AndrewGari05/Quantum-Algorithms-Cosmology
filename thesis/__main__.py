@@ -8,6 +8,8 @@ Examples::
     python -m thesis campaign --campaign results/c1 --models lcdm cpl --noise none readout
     python -m thesis analyze results/c1
     python -m thesis legacy refit <old campaign folder>
+    python -m thesis hardware --device fake_fez --locations ideal noisy --out results/hw
+    python -m thesis hardware --device ibm_fez --out results/hw --dry-run
 
 Every flag is used by the command that accepts it; there are no parsed but
 ignored options.
@@ -85,6 +87,34 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("roots", nargs="+")
     a.add_argument("--out", default="analysis")
 
+    h = sub.add_parser("hardware", help="QMCMC, QVMC and QGA with one recipe on the ideal "
+                       "simulator, the noisy twin and an IBM device")
+    h.add_argument("--device", required=True,
+                   help="IBM device name (ibm_fez, ...), least_busy, or a fake backend (fake_fez)")
+    h.add_argument("--locations", nargs="+", default=["ideal", "noisy", "device"],
+                   choices=["ideal", "noisy", "device"])
+    h.add_argument("--algorithms", nargs="+", default=["vi", "genetic", "mcmc"],
+                   choices=["vi", "genetic", "mcmc"])
+    h.add_argument("--out", required=True)
+    h.add_argument("--model", choices=sorted(MODELS), default="lcdm")
+    h.add_argument("--dataset", default="CC+BAO")
+    h.add_argument("--seed", type=int, default=42)
+    h.add_argument("--max-quantum-seconds", type=float, default=480.0,
+                   help="stop submitting device jobs past this billed time (default 8 min)")
+    h.add_argument("--channel", default=None, help="IBM channel (default: saved account)")
+    h.add_argument("--instance", default=None, help="IBM instance/CRN (default: saved account)")
+    h.add_argument("--optimization-level", type=int, default=3)
+    h.add_argument("--dry-run", action="store_true",
+                   help="compile and print jobs, shots and a rough time estimate; run nothing")
+    for flag, typ in (("vi-grid", int), ("vi-iters", int), ("vi-shots", int), ("vi-samples", int),
+                      ("vi-warm-evals", int), ("vi-warm-restarts", int), ("mcmc-steps", int), ("mcmc-chains", int),
+                      ("mcmc-shots", int), ("mcmc-block", int), ("ga-bits", int),
+                      ("ga-population", int), ("ga-generations", int)):
+        h.add_argument(f"--{flag}", type=typ, default=None)
+    h.add_argument("--vi-init", choices=["warm", "cold"], default=None)
+    h.add_argument("--spsa-a", type=float, default=None)
+    h.add_argument("--spsa-c", type=float, default=None)
+
     lg = sub.add_parser("legacy", help="tools for campaigns written by the v0.8 thesis code")
     lg.add_argument("args", nargs=argparse.REMAINDER)
     return ap
@@ -134,8 +164,53 @@ def main(argv=None) -> int:
     if args.cmd == "analyze":
         from . import analysis
         return analysis.main(args.roots, args.out)
+    if args.cmd == "hardware":
+        return _hardware(args)
     from .legacy import errata_tools
     return errata_tools.main(args.args)
+
+
+def _hardware(args) -> int:
+    from qablate.cosmology import Posterior
+
+    from . import hardware as hw
+    cfg = hw.HardwareConfig(model=args.model, dataset=args.dataset, seed=args.seed)
+    for k in vars(cfg):
+        v = getattr(args, k, None)
+        if v is not None and k not in ("model", "dataset", "seed"):
+            setattr(cfg, k, v)
+    device = hw.resolve_device(args.device, channel=args.channel, instance=args.instance)
+    post = Posterior(cfg.model, cfg.dataset, cfg.prior)
+    plan = hw.plan(cfg, post)
+    total = 0.0
+    print(f"  device {getattr(device, 'name', args.device)}; per location:")
+    for alg in args.algorithms:
+        p = plan[alg]
+        est = hw.estimate_quantum_seconds(p)
+        total += est
+        print(f"  {alg:8s} {p['qubits']:2d} qubits | {p['jobs']:4d} jobs | "
+              f"{p['circuits']:6d} circuits | {p['shots']:9d} shots | device ~{est / 60:.1f} min")
+    if "device" in args.locations:
+        print(f"  device total ~{total / 60:.1f} min (rough; the run stops submitting at "
+              f"{args.max_quantum_seconds / 60:.1f} min of billed time)")
+    if args.dry_run:
+        from qablate.circuits import hardware_efficient_ansatz, random_proposal_circuit
+        from qablate.hardware import DeviceCompiler
+        comp = DeviceCompiler(device, args.optimization_level, cfg.seed)
+        for name, qc in (("vi ansatz", hardware_efficient_ansatz(post.ndim * cfg.vi_grid,
+                                                                 cfg.vi_layers)),
+                         ("mcmc proposal", random_proposal_circuit(max(2, post.ndim), 3))):
+            isa, _, dt = comp.compile(qc)
+            print(f"  {name:14s} -> depth {isa.depth():4d}, "
+                  f"{comp.two_qubit_gates(isa):3d} two-qubit gates (compiled in {dt:.1f} s)")
+        return 0
+    rows = hw.run(cfg, device, locations=args.locations, algorithms=args.algorithms,
+                  out=args.out, max_quantum_seconds=args.max_quantum_seconds,
+                  optimization_level=args.optimization_level)
+    print(hw.summary_table(rows))
+    print(f"  written to {args.out}/ (results.csv, jobs.csv, vi_trace.csv, circuits.json, "
+          "summary.md)")
+    return 1 if any("error" in r for r in rows) else 0
 
 
 if __name__ == "__main__":

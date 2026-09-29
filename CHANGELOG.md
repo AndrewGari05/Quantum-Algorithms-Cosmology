@@ -33,6 +33,15 @@ ERRATA.md for the list and the measured effect of each fix.
   analysis, tools for v0.8 campaign folders.
 - Statistical-validity tests (stationarity of every proposal × acceptance
   combination), golden tests against the errata code, import-contract tests.
+- `qablate.hardware`: `DeviceCompiler` (transpile once per device, content
+  fingerprints) and `DeviceBackend` (the same ISA circuit on the ideal
+  simulator, the noisy twin or the device; per-job wall, queue, execution and
+  billed quantum seconds; quantum-seconds budget guard; identical random-stream
+  consumption at every location).
+- `BornMachineVI(optimizer="spsa", shots=...)`: SPSA training from measured
+  frequencies (2 circuits per iteration), iterate history, `fit(initial=...)`.
+- `python -m thesis hardware`: QMCMC, QVMC and QGA with one recipe on the three
+  locations, dry-run budget, results/jobs/trace tables ([docs/hardware.md](docs/hardware.md)).
 
 ### Changed (results differ from v0.8)
 - The circuit proposal is symmetric by construction (scale-only calibration

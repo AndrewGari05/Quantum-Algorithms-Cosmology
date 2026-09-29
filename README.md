@@ -72,6 +72,12 @@ prop = RandomCircuitProposal(0.5, backend=AerBackend("FakeBrisbane"), shots=128)
 # IBMRuntimeBackend(service.backend("ibm_torino")) runs the same circuits on a device
 ```
 
+To compare locations fairly, compile once and run the same ISA circuit on the
+ideal simulator, the device's noisy twin and the device, with per-job timing
+(`qablate.hardware.DeviceCompiler` / `DeviceBackend`). The thesis protocol
+`python -m thesis hardware` does this for QMCMC, QVMC (SPSA) and QGA; see
+[docs/hardware.md](docs/hardware.md).
+
 ## Cosmology
 
 ```python

@@ -12,10 +12,15 @@ Reverse KL is mode seeking: when ``Q`` cannot represent the correlations of
 ``P`` it under-estimates marginal widths (Bishop 2006, section 10.1.2).
 Report :attr:`VIResult.correlation` next to the widths.
 
-Two optimizers are provided: ``'cobyla'`` (gradient free, SciPy) and
+Three optimizers are provided: ``'cobyla'`` (gradient free, SciPy),
 ``'parameter-shift'`` (exact gradients of ``KL`` from ``2 * n_params``
-shifted circuits, chain rule through ``Q``). Every circuit evaluation is
-counted in :attr:`VIResult.circuit_evaluations`, so budgets can be matched.
+shifted circuits, chain rule through ``Q``) and ``'spsa'`` (Spall 1998: a
+gradient estimate from 2 circuits per iteration whatever the number of
+parameters). COBYLA and parameter-shift need exact probabilities; SPSA also
+trains from measured frequencies (``shots``), which is what hardware
+provides, and then minimizes the plug-in estimate ``KL(Q_hat || P)``
+(biased low for few shots). Every circuit evaluation is counted in
+:attr:`VIResult.circuit_evaluations`, so budgets can be matched.
 """
 from __future__ import annotations
 
@@ -132,6 +137,8 @@ class VIResult:
     correlation: np.ndarray
     history: list[float] = field(default_factory=list)
     circuit_evaluations: int = 0
+    #: SPSA only: the parameters after every iteration (for post-hoc exact KL).
+    phi_history: np.ndarray | None = None
     samples: np.ndarray | None = None
 
 
@@ -141,9 +148,13 @@ class BornMachineVI:
     Args:
         grid: The :class:`Grid`.
         n_layers: Layers of :func:`~qablate.circuits.hardware_efficient_ansatz`.
-        optimizer: ``'cobyla'`` or ``'parameter-shift'``.
-        backend: Where circuits run (exact probabilities are required for
-            training); ideal Aer by default.
+        optimizer: ``'cobyla'``, ``'parameter-shift'`` or ``'spsa'``.
+        backend: Where circuits run; ideal Aer by default. COBYLA and
+            parameter-shift need exact probabilities (a simulator).
+        shots: Shots per circuit evaluation (``None``: exact probabilities).
+            Only ``'spsa'`` accepts shots.
+        spsa_gains: ``(a, c)`` of the SPSA schedule ``a_k = a / (k + 1)**0.602``,
+            ``c_k = c / (k + 1)**0.101`` (the thesis hardware values).
         learning_rate: Initial step of parameter-shift gradient descent; the
             step decays as ``lr / (1 + decay * i)`` and the gradient norm is
             clipped to 1 (the schedule of the thesis runs).
@@ -152,15 +163,20 @@ class BornMachineVI:
 
     def __init__(self, grid: Grid, *, n_layers: int = 3, optimizer: str = "cobyla",
                  backend: Backend | None = None, learning_rate: float = 0.05,
-                 decay: float | None = None):
+                 decay: float | None = None, shots: int | None = None,
+                 spsa_gains: tuple[float, float] = (0.15, 0.1)):
         from .circuits import hardware_efficient_ansatz
-        if optimizer not in ("cobyla", "parameter-shift"):
-            raise ValueError("optimizer must be 'cobyla' or 'parameter-shift'")
+        if optimizer not in ("cobyla", "parameter-shift", "spsa"):
+            raise ValueError("optimizer must be 'cobyla', 'parameter-shift' or 'spsa'")
         self.grid = grid
         self.optimizer = optimizer
         self.backend = backend if backend is not None else AerBackend()
-        if not self.backend.exact:
-            raise ValueError("training needs exact probabilities (a simulator backend)")
+        if shots is not None and optimizer != "spsa":
+            raise ValueError("only optimizer='spsa' trains from shots")
+        if shots is None and not self.backend.exact:
+            raise ValueError("this backend only samples: use optimizer='spsa' with shots")
+        self.shots = None if shots is None else int(shots)
+        self.spsa_gains = (float(spsa_gains[0]), float(spsa_gains[1]))
         self.circuit = hardware_efficient_ansatz(grid.n_qubits, n_layers)
         self.n_params = self.circuit.num_parameters
         self.learning_rate = float(learning_rate)
@@ -171,25 +187,43 @@ class BornMachineVI:
         """``Q_phi`` for each row of ``phis`` (counted as circuit evaluations)."""
         phis = np.atleast_2d(phis)
         self._evals += len(phis)
-        return self.backend.probabilities(self.circuit, phis, rng)
+        return self.backend.probabilities(self.circuit, phis, rng, shots=self.shots)
 
-    def fit(self, p: np.ndarray, max_iter: int, rng, *, budget: str = "circuits") -> VIResult:
+    def fit(self, p: np.ndarray, max_iter: int, rng, *, budget: str = "circuits",
+            initial: np.ndarray | None = None) -> VIResult:
         """Train on target ``p``.
 
         Args:
             p: Grid target from :meth:`Grid.target`.
-            max_iter: Iterations of parameter-shift descent. COBYLA gets the
+            max_iter: Iterations of parameter-shift descent or SPSA (2 circuit
+                evaluations each, plus one final evaluation). COBYLA gets the
                 same number of circuit evaluations (``budget='circuits'``,
                 ``max_iter * (1 + 2 * n_params)``) or of iterations
                 (``budget='iterations'``).
             rng: ``numpy.random.Generator``; draws the initial angles.
+            initial: Start from these angles instead (the initial draw is
+                still made, so the rest of the random stream is unchanged).
         """
         from scipy.optimize import minimize
         self._evals = 0
         rng = np.random.default_rng(rng)
         phi = 0.1 * rng.standard_normal(self.n_params)
+        if initial is not None:
+            phi = np.array(initial, dtype=float).reshape(self.n_params)
         history: list[float] = []
-        if self.optimizer == "parameter-shift":
+        phi_history = None
+        if self.optimizer == "spsa":
+            a, c = self.spsa_gains
+            phi_history = np.empty((int(max_iter), self.n_params))
+            for k in range(int(max_iter)):
+                ak, ck = a / (k + 1) ** 0.602, c / (k + 1) ** 0.101
+                delta = rng.choice([-1.0, 1.0], size=self.n_params)
+                qs = self.distributions(np.vstack([phi + ck * delta, phi - ck * delta]), rng)
+                f_plus, f_minus = reverse_kl(qs, p)
+                phi = phi - ak * (f_plus - f_minus) / (2.0 * ck) * delta
+                history.append(0.5 * float(f_plus + f_minus))
+                phi_history[k] = phi
+        elif self.optimizer == "parameter-shift":
             best_kl, best_phi = np.inf, phi.copy()
             ps = (p + 1e-12) / np.sum(p + 1e-12)
             for i in range(int(max_iter)):
@@ -224,7 +258,7 @@ class BornMachineVI:
         mu, sd, corr = self.grid.moments(q)
         return VIResult(phi=phi, q=q, kl=float(reverse_kl(q, p)[0]), mean=mu, std=sd,
                         correlation=corr, history=history,
-                        circuit_evaluations=self._evals)
+                        circuit_evaluations=self._evals, phi_history=phi_history)
 
     def sample(self, result: VIResult, n: int, rng, *, shots_backend: Backend | None = None) -> np.ndarray:
         """Draw ``n`` grid points from the trained distribution.
