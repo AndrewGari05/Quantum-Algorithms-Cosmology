@@ -2224,6 +2224,7 @@ def _ga_side(result: GAResult, post: Posterior,
         # — el eje de ruido del genetico era irreconstruible desde el CSV, que
         # es exactamente la falla que [B-PROV] arreglo para los samplers.
         'noise': getattr(NOISE, 'label', 'none'),
+        'noise_params': getattr(NOISE, 'params', ''),   # [E-PROV]
         # [B-PROV-GEN] Idem con la semilla: el genetico la lleva en GAConfig y
         # nunca llegaba al CSV, asi que la columna `seed` salia vacia en toda
         # corrida genetica y `comparar_semillas.py` no podia usarla.

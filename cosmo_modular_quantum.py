@@ -1199,6 +1199,9 @@ class QMCMCModular:
             'acceptance': float(acc.sum() / (n_done * self.n_chains)),
             'elapsed': elapsed, 'rhat_hist': rhat_hist,
             'converged': converged, 'ess': ess_chains(chains),
+            # [E-PROV] R-hat of the chains actually returned (rhat_hist is
+            # only refreshed every `rhat_every` steps).
+            'rhat_final': core.split_rhat(chains) if n_done > 3 else float('nan'),
         }
         if logger:
             logger.info(f"[{tag}] done: {n_done} steps, acc={info['acceptance']:.3f}, "
@@ -1998,7 +2001,8 @@ def run_config(post: Posterior, config: dict, n_steps_mcmc: int = 300,
             'p84': np.percentile(m['flat'], 84, axis=0),
             'acceptance': m['acceptance'], 'converged': m['converged'],
             'ess': m['ess'], 'elapsed': m['elapsed'],
-            'rhat_hist': m['rhat_hist'], **fs_mcmc,
+            'rhat_hist': m['rhat_hist'], 'rhat_final': m['rhat_final'],
+            **({'seed': seed} if seed is not None else {}), **fs_mcmc,
         },
         'qvmc': {
             'mu': q['mu'], 'std': q['sd'], 'kl_final': q['kl_final'],
@@ -2635,6 +2639,7 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
         fs = fit_statistics(post, r['flat'].mean(0))
         qmcmc_runs.append({'pct': pct, 'cfg': cfg, 'flat': r['flat'],
                            'chains': r['chains'], 'rhat_hist': r['rhat_hist'],
+                           'rhat_final': r['rhat_final'], 'seed': seed,
                            'acceptance': r['acceptance'], 'ess': r['ess'],
                            'elapsed': time.time() - _t0,
                            'mu': r['flat'].mean(0), 'std': r['flat'].std(0),
@@ -3243,7 +3248,32 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta,
 # `cosmo_noise.NoiseSpec.metadata()` ya devolvia exactamente esto y no se
 # llamaba desde ningun sitio del repositorio.
 CSV_PROVENANCE_FIELDS = ['noise', 'proposal_route', 'seed', 'budget_mode',
-                         'circuits_train', 'chi2_grid']
+                         'circuits_train', 'chi2_grid',
+                         # [E-PROV] added by the thesis errata
+                         'noise_params', 'rhat', 'mc_converged', 'code_version']
+
+#: [E-PROV] Convergence rule written to `mc_converged` for MCMC rows:
+#: split-R-hat below this threshold AND bulk ESS at least `ESS_MIN`
+#: (Vehtari et al. 2021 recommend R-hat < 1.01 and ESS > 400).
+ESS_MIN = 400
+
+
+def _code_version() -> str:
+    """`git describe --always --dirty` of this repository, or 'unknown'."""
+    global _CODE_VERSION
+    if _CODE_VERSION is None:
+        import subprocess
+        try:
+            _CODE_VERSION = subprocess.run(
+                ['git', 'describe', '--tags', '--always', '--dirty'],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                capture_output=True, text=True, timeout=10).stdout.strip() or 'unknown'
+        except Exception:
+            _CODE_VERSION = 'unknown'
+    return _CODE_VERSION
+
+
+_CODE_VERSION = None
 
 
 def csv_provenance(side: dict) -> dict:
@@ -3278,7 +3308,29 @@ def csv_provenance(side: dict) -> dict:
         'chi2_grid': (f"{side['chi2_grid']:.4f}"
                       if isinstance(side.get('chi2_grid'), float)
                       and np.isfinite(side['chi2_grid']) else ''),
+        **_convergence_fields(side),
+        'noise_params': str(side.get('noise_params',
+                                     getattr(NOISE, 'params', ''))),
+        'code_version': _code_version(),
     }
+
+
+def _convergence_fields(side: dict) -> dict:
+    """[E-PROV] Final split-R-hat and the convergence flag of an MCMC row.
+
+    Empty for rows that are not MCMC chains (VI, genetic). Without these
+    columns a sigma difference between two MCMC rows could not be told apart
+    from Monte Carlo error (finding QM-3).
+    """
+    if 'rhat_final' in side:
+        rhat = float(side['rhat_final'])
+    elif side.get('rhat_hist'):
+        rhat = float(side['rhat_hist'][-1][1])
+    else:
+        return {'rhat': '', 'mc_converged': ''}
+    ess = float(side.get('ess', float('nan')))
+    ok = bool(np.isfinite(rhat) and rhat < core.RHAT_THRESHOLD and ess >= ESS_MIN)
+    return {'rhat': f"{rhat:.4f}", 'mc_converged': str(ok)}
 
 def csv_fields_for_model(model) -> list:
     """The CSV column schema for a given model: one mean/std pair per parameter.

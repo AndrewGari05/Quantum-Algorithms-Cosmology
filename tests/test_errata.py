@@ -156,3 +156,27 @@ def test_qv5_csv_header_mismatch_rotates_file(tmp_path):
     cmq._write_csv_rows([{"a": 6, "c": 7, "b": 8}], ["a", "c", "b"], path)
     with open(path) as fh:
         assert len(list(_csv.DictReader(fh))) == 2          # same header: append
+
+
+# --------------------------------------------------------------------------- #
+# Provenance: every CSV row carries noise parameters, R-hat, a convergence
+# flag and the code version (QM-3, HPC-17).
+# --------------------------------------------------------------------------- #
+def test_prov_fields_in_schema_and_noise_repr():
+    import cosmo_modular_quantum as cmq
+    import cosmo_noise as cn
+    for f in ("noise_params", "rhat", "mc_converged", "code_version"):
+        assert f in cmq.csv_fields_generic()
+    spec = cn.NoiseSpec.from_level("readout", readout_p=0.07)
+    assert spec.params == "readout_p=0.07"
+    assert "gates=False" in repr(spec)                     # HPC-17: no AttributeError
+    assert cn.NoiseSpec.from_level("full").metadata()["noise_has_gates"] is True
+
+
+def test_prov_convergence_flag():
+    import cosmo_modular_quantum as cmq
+    good = cmq._convergence_fields({"rhat_final": 1.004, "ess": 900.0})
+    bad = cmq._convergence_fields({"rhat_final": 1.004, "ess": 90.0})
+    assert good == {"rhat": "1.0040", "mc_converged": "True"}
+    assert bad["mc_converged"] == "False"
+    assert cmq._convergence_fields({"kl_final": 0.1}) == {"rhat": "", "mc_converged": ""}

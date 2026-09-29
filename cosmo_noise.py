@@ -351,6 +351,9 @@ class NoiseSpec:
     source_model: Optional[object] = None
     readout: Dict[int, np.ndarray] = field(default_factory=dict)
     default_readout: Optional[np.ndarray] = None
+    #: [E-PROV] Channel strengths actually used, e.g. 'readout_p=0.03'.
+    #: Recorded in every CSV row so a run is self-describing.
+    params: str = ''
 
     # ------------------------------------------------------------------ #
     @classmethod
@@ -389,8 +392,14 @@ class NoiseSpec:
             source = NoiseModel.from_backend(_resolve_fake_backend(lab))
 
         per_qubit, default = _extract_readout(source)
+        if lab == 'readout':
+            params = f"readout_p={readout_p:g}"
+        elif lab == 'full':
+            params = f"readout_p={readout_p:g};gate_p1={gate_p1:g};gate_p2={gate_p2:g}"
+        else:
+            params = f"backend={lab}"
         return cls(label=lab, source_model=source, readout=per_qubit,
-                   default_readout=default)
+                   default_readout=default, params=params)
 
     # ------------------------------------------------------------------ #
     @property
@@ -527,13 +536,24 @@ class NoiseSpec:
             'noise': self.label,
             'noise_ideal': self.is_ideal,
             'noise_has_readout': self.has_readout,
-            'noise_has_gates': self.gate_model is not None,
+            'noise_has_gates': self._has_gate_errors(),
+            'noise_params': self.params,
         }
+
+    def _has_gate_errors(self) -> bool:
+        """True if the source model has errors on any instruction but measure.
+
+        [E-HPC17] Replaces the `gate_model` attribute removed in [B-RECON];
+        `metadata()` and `repr()` raised AttributeError since then.
+        """
+        if self.source_model is None:
+            return False
+        return bool(set(self.source_model.noise_instructions) - {'measure'})
 
     def __repr__(self) -> str:                              # pragma: no cover
         """Representacion corta para depuracion."""
         return (f"NoiseSpec(label={self.label!r}, "
-                f"gates={self.gate_model is not None}, "
+                f"gates={self._has_gate_errors()}, "
                 f"readout={self.has_readout})")
 
 
