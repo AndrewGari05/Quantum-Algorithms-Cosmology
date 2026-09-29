@@ -1,16 +1,13 @@
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
 *:Zone.Identifier
 *.lock
-# Salidas de corridas. Patrones con comodin y no nombres exactos: `resultados/`
-# no cubria `resultados_quick/`, `resultados_ro_0.03/` ni ninguna carpeta con
-# --outdir propio, asi que un `git add -A` tras una corrida metia el run entero
-# —figuras, GIF, CSV— en el repo sin que se notara hasta el commit.
+# run outputs
 results*/
-resultados*/
-bridge.aux
-bridge.log
-bridge.out
-bridge.toc
-data_checksums.json
-resultados_quick/
+analysis/
+site/
