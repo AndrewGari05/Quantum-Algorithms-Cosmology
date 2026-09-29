@@ -120,7 +120,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -326,6 +326,56 @@ def _extract_readout(noise_model
 # NoiseSpec
 # =============================================================================
 
+def _device_path(backend, n: int) -> List[int]:
+    """A connected path of `n` physical qubits on `backend`, starting at 0.
+
+    Deterministic depth-first search over the (undirected) coupling graph.
+    A path is enough for every circuit in this project (chains and rings);
+    the router inserts SWAPs for the ring's closing gate, as on hardware.
+    """
+    adj: Dict[int, set] = {}
+    for a, b in backend.coupling_map.get_edges():
+        adj.setdefault(a, set()).add(b)
+        adj.setdefault(b, set()).add(a)
+    best: List[int] = []
+
+    def dfs(path: List[int]) -> bool:
+        nonlocal best
+        if len(path) > len(best):
+            best = list(path)
+        if len(path) >= n:
+            return True
+        for nb in sorted(adj.get(path[-1], ())):
+            if nb not in path:
+                path.append(nb)
+                if dfs(path):
+                    return True
+                path.pop()
+        return False
+
+    dfs([min(adj)])
+    if len(best) < n:
+        raise ValueError(f"no connected path of {n} qubits on {backend.name}")
+    return best[:n]
+
+
+def physical_qubits_of(result, k: int) -> Optional[List[int]]:
+    """Physical qubits recorded by `NoiseSpec.transpile` for circuit `k`.
+
+    None when the circuit was not placed on a device (ideal/synthetic levels).
+    Aer returns the circuit header either as an object or as a dict.
+    """
+    try:
+        header = result.results[k].header
+        meta = (header.get('metadata') if isinstance(header, dict)
+                else getattr(header, 'metadata', None))
+        if isinstance(meta, dict):
+            return meta.get('physical_qubits')
+        return getattr(meta, 'physical_qubits', None)
+    except Exception:
+        return None
+
+
 @dataclass
 class NoiseSpec:
     """Un peldano del eje de ruido, ya resuelto y listo para usar.
@@ -354,6 +404,10 @@ class NoiseSpec:
     #: [E-PROV] Channel strengths actually used, e.g. 'readout_p=0.03'.
     #: Recorded in every CSV row so a run is self-describing.
     params: str = ''
+    #: [E-HPC3] Fake-backend levels only: the device the noise model was
+    #: calibrated on. Circuits are transpiled against it (coupling map, gate
+    #: directions, native basis) so that the two-qubit errors apply.
+    backend: Optional[object] = None
 
     # ------------------------------------------------------------------ #
     @classmethod
@@ -389,7 +443,8 @@ class NoiseSpec:
         else:
             # Backend real: el modelo calibrado ya trae ambas partes juntas.
             from qiskit_aer.noise import NoiseModel
-            source = NoiseModel.from_backend(_resolve_fake_backend(lab))
+            _fake = _resolve_fake_backend(lab)
+            source = NoiseModel.from_backend(_fake)
 
         per_qubit, default = _extract_readout(source)
         if lab == 'readout':
@@ -399,7 +454,8 @@ class NoiseSpec:
         else:
             params = f"backend={lab}"
         return cls(label=lab, source_model=source, readout=per_qubit,
-                   default_readout=default, params=params)
+                   default_readout=default, params=params,
+                   backend=None if lab in ('readout', 'full') else _fake)
 
     # ------------------------------------------------------------------ #
     @property
@@ -463,6 +519,47 @@ class NoiseSpec:
         return {'method': 'density_matrix', 'noise_model': self.source_model}
 
     # ------------------------------------------------------------------ #
+    def transpile(self, qc, sim, **kwargs):
+        """Transpile `qc` for this noise level.
+
+        Ideal and synthetic levels: plain `transpile(qc, sim, **kwargs)`,
+        exactly as before (bit-identical results).
+
+        [E-HPC3] Fake-backend levels: the noise model defines two-qubit
+        errors only on the device's directed physical pairs. Transpiling
+        against a bare simulator produced two-qubit gates on logical pairs
+        such as (0, 1) that carry no error, so the "real backend" column had
+        no two-qubit noise at all. Here the circuit is placed on a connected
+        path of physical qubits and routed against the device target, so
+        every two-qubit gate lands on a pair that has its calibrated error.
+        Aer `save_*` instructions are not in the device target; they are
+        removed before transpiling and re-attached to the final physical
+        positions of the logical qubits, so outputs stay in logical order.
+        The physical qubits are stored in `metadata['physical_qubits']`.
+        """
+        from qiskit import transpile as _transpile
+        if self.backend is None:
+            return _transpile(qc, sim, **kwargs)
+        from qiskit_aer import AerSimulator
+        if getattr(self, '_target_sim', None) is None:
+            object.__setattr__(self, '_target_sim',
+                               AerSimulator.from_backend(self.backend))
+        saves = [ci for ci in qc.data if ci.operation.name.startswith('save_')]
+        core = qc.copy_empty_like()
+        for ci in qc.data:
+            if not ci.operation.name.startswith('save_'):
+                core.append(ci)
+        layout = _device_path(self.backend, qc.num_qubits)
+        t = _transpile(core, self._target_sim, initial_layout=layout,
+                       optimization_level=1, seed_transpiler=0)
+        final = t.layout.final_index_layout()
+        for ci in saves:
+            idx = [final[qc.find_bit(q).index] for q in ci.qubits]
+            t.append(ci.operation, [t.qubits[i] for i in idx])
+        t.metadata = dict(t.metadata or {}, physical_qubits=list(final))
+        return t
+
+    # ------------------------------------------------------------------ #
     def readout_matrix(self, qubit: int) -> Optional[np.ndarray]:
         """Matriz de confusion 2x2 del qubit dado, o None si no hay lectura.
 
@@ -477,7 +574,8 @@ class NoiseSpec:
         return self.default_readout
 
     # ------------------------------------------------------------------ #
-    def apply_readout(self, probs: np.ndarray, n_qubits: int) -> np.ndarray:
+    def apply_readout(self, probs: np.ndarray, n_qubits: int,
+                      physical_qubits: Optional[List[int]] = None) -> np.ndarray:
         """Aplica el canal de lectura en cerrado a un vector de probabilidades.
 
         Sobre n qubits el error de lectura es un producto tensorial de mapas
@@ -515,7 +613,9 @@ class NoiseSpec:
 
         out = p.reshape((b,) + (2,) * n_qubits)
         for q in range(n_qubits):
-            m = self.readout_matrix(q)
+            # [E-HPC3] logical qubit q sits on physical_qubits[q] on a device
+            m = self.readout_matrix(physical_qubits[q] if physical_qubits
+                                    else q)
             if m is None:
                 continue
             axis = n_qubits - q                      # +1 por el eje de lote

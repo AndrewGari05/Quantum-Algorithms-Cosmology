@@ -213,7 +213,10 @@ def _probs_from_result(res, k: int, n_qubits: int) -> np.ndarray:
         Vector de probabilidades de longitud `2**n_qubits`.
     """
     probs = np.asarray(res.data(k)['probabilities'], dtype=float)
-    return NOISE.apply_readout(probs, n_qubits)
+    # [E-HPC3] on a device-level noise model, logical qubit q was placed on a
+    # physical qubit; its readout matrix is that qubit's, not qubit q's.
+    phys = cnoise.physical_qubits_of(res, k)
+    return NOISE.apply_readout(probs, n_qubits, physical_qubits=phys)
 
 # ── Contrasting color convention used by EVERY overlay figure ────────────────
 #    (requirement 3: blue = classical, red/orange = quantum)
@@ -713,7 +716,7 @@ class QuantumProposalEngine:
             self.qc_run.save_probabilities()
             self.sim = _noisy_sim(counts_route=False)
         # [OPT] transpile the template ONCE
-        self._qc_t = transpile(self.qc_run, self.sim)
+        self._qc_t = NOISE.transpile(self.qc_run, self.sim)
         self.batch = batch
         self._queue: List[np.ndarray] = []
         # [M4 FIX] Calibrate the normalization ONCE, at construction, from a
@@ -917,7 +920,7 @@ def hadamard_accept_log(lp_cur: float, lp_prop: float) -> float:
         else:
             qc.save_probabilities()
             _HAD['sim'] = _noisy_sim(counts_route=False)
-        _HAD['qc_t'] = transpile(qc, _HAD['sim'])
+        _HAD['qc_t'] = NOISE.transpile(qc, _HAD['sim'])
         _HAD['par'] = par
         _HAD['noise'] = NOISE.label
     theta = 2.0 * np.arccos(np.sqrt(A))
@@ -981,7 +984,7 @@ def hadamard_accept_log_batch(lp_cur: np.ndarray,
             # posterior es atribuible al ruido y no al cambio de lectura.
             qc.save_probabilities()
             _HAD['sim'] = _noisy_sim(counts_route=False)
-        _HAD['qc_t'] = transpile(qc, _HAD['sim'])
+        _HAD['qc_t'] = NOISE.transpile(qc, _HAD['sim'])
         _HAD['par'] = par
         _HAD['noise'] = NOISE.label
     circs = [_HAD['qc_t'].assign_parameters({_HAD['par'][0]: float(t)})
@@ -1528,7 +1531,16 @@ class QVMCModular:
             # (save_statevector) porque save_probabilities difiere de |psi|^2
             # en 2.2e-16 y la columna ideal debe seguir siendo reproducible
             # bit a bit contra los resultados ya publicados.
-            b.save_statevector() if ideal else b.save_probabilities()
+            if ideal:
+                b.save_statevector()
+            else:
+                # [E-HPC3] on a device-level noise model the template was
+                # placed on physical qubits; save only those, in logical order
+                phys = (b.metadata or {}).get('physical_qubits')
+                if phys:
+                    b.save_probabilities([b.qubits[i] for i in phys])
+                else:
+                    b.save_probabilities()
             circs.append(b)
         res = self.sim.run(circs).result()
         P_s = (P_target + eps)
@@ -1564,7 +1576,7 @@ class QVMCModular:
         """
         qc, n_p = self._build_ansatz()
         qc_sv = qc.remove_final_measurements(inplace=False)
-        qc_t = transpile(qc_sv, self.sim)        # [OPT] transpile ONCE
+        qc_t = NOISE.transpile(qc_sv, self.sim)        # [OPT] transpile ONCE
         phi = 0.1 * RNG.standard_normal(n_p)
         history = []
         t0 = time.time()
@@ -1780,7 +1792,7 @@ class QVMCModular:
         if self.config.get('sampling', False):
             _sanity('QVMC.sample', 'quantum',
                     f'measured shots on Aer (n_shots={self.n_shots})')
-            bound_t = transpile(bound, self.sim)     # [OPT] once, not per chain
+            bound_t = NOISE.transpile(bound, self.sim)     # [OPT] once, not per chain
             # [M3 — documented policy] The simulator seeds are FIXED
             # (1000 + 137·chain) and deliberately independent of the run
             # seed: every rung of the ladder then sees IDENTICAL shot noise
@@ -1826,7 +1838,7 @@ class QVMCModular:
             sv_qc = bound.remove_final_measurements(inplace=False)
             if NOISE.is_ideal:
                 sv_qc.save_statevector()
-                sv = self.sim.run(transpile(sv_qc, self.sim)
+                sv = self.sim.run(NOISE.transpile(sv_qc, self.sim)
                                   ).result().get_statevector()
                 probs = np.abs(np.asarray(sv))**2
             else:
@@ -1834,7 +1846,7 @@ class QVMCModular:
                 # la misma cantidad; el canal de lectura se aplica en cerrado
                 # porque este circuito no mide.
                 sv_qc.save_probabilities()
-                res = self.sim.run(transpile(sv_qc, self.sim)).result()
+                res = self.sim.run(NOISE.transpile(sv_qc, self.sim)).result()
                 probs = _probs_from_result(res, 0, self.n_qubits)
             probs /= probs.sum()
             for _ in range(n_chains):

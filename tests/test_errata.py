@@ -210,3 +210,59 @@ def test_runner_forwards_rungs_and_qga_levels(tmp_path):
     lines = [l for l in out.splitlines() if "--sweep-all" in l]
     assert any("--rungs QMCMC50 QMCMC100" in l for l in lines)
     assert any("--sweep-qga-levels 67 100" in l for l in lines)
+
+
+# --------------------------------------------------------------------------- #
+# HPC-3: on a fake-backend level every two-qubit gate must carry noise, and
+# routing must keep the outputs in logical qubit order.
+# --------------------------------------------------------------------------- #
+def test_hpc3_fake_backend_two_qubit_noise_applies():
+    import numpy as np
+    from qiskit import QuantumCircuit, transpile
+    from qiskit.circuit import ParameterVector
+    from qiskit_aer import AerSimulator
+    import cosmo_noise as cn
+    from cosmo_core import make_simulator
+    spec = cn.NoiseSpec.from_level("fake_brisbane")
+    sim = make_simulator(**spec.simulator_kwargs(counts_route=False))
+    n = 4
+    th = ParameterVector("t", n)
+    qc = QuantumCircuit(n)
+    for q in range(n):
+        qc.ry(th[q], q)
+    for q in range(n - 1):
+        qc.cx(q, q + 1)
+    qc.cx(n - 1, 0)
+    qc.save_probabilities()
+    t = spec.transpile(qc, sim)
+    vals = np.random.default_rng(0).uniform(0, np.pi, n)
+    bound = t.assign_parameters(vals)
+    ideal = AerSimulator(method="statevector").run(
+        transpile(qc.assign_parameters(vals), AerSimulator())).result().data(0)["probabilities"]
+    routed_clean = AerSimulator(method="density_matrix").run(bound).result().data(0)["probabilities"]
+    assert np.allclose(routed_clean, ideal, atol=1e-10)          # logical order kept
+    noisy = sim.run(bound).result().data(0)["probabilities"]
+    old = sim.run(transpile(qc, sim).assign_parameters(vals)).result().data(0)["probabilities"]
+    tv = lambda a, b: 0.5 * np.abs(np.asarray(a) - np.asarray(b)).sum()
+    assert tv(noisy, ideal) > 3 * tv(old, ideal)                # 2q errors now act
+    for ci in t.data:                                          # every ECR on a
+        if ci.operation.num_qubits == 2 and ci.operation.name != "barrier":
+            pair = tuple(t.find_bit(q).index for q in ci.qubits)
+            assert pair in spec.backend.coupling_map.get_edges()   # device pair
+
+
+def test_qpu5_noisy_twin_jobs_are_not_replayed():
+    import numpy as np
+    from qiskit import QuantumCircuit
+    import cosmo_noise as cn
+    import qpu_noisy_simulation as qns
+    conn = qns.LocalNoisyConnection(cn.NoiseSpec.from_level("readout"), shots=256, seed=5)
+    qc = QuantumCircuit(3)
+    qc.h(range(3))
+    qc.measure_all()
+    isa = conn.transpile_isa(qc)
+    a = conn.run_pub(isa, np.zeros((1, 0)))[0]
+    b = conn.run_pub(isa, np.zeros((1, 0)))[0]
+    assert a != b
+    conn2 = qns.LocalNoisyConnection(cn.NoiseSpec.from_level("readout"), shots=256, seed=5)
+    assert conn2.run_pub(conn2.transpile_isa(qc), np.zeros((1, 0)))[0] == a  # reproducible

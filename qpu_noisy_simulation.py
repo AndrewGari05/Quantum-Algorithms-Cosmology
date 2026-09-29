@@ -134,8 +134,11 @@ class LocalNoisyConnection(qpu.QPUConnection):
         # que Aer aplica el canal de lectura por si mismo. Aplicarlo ademas en
         # cerrado seria doble conteo.
         kwargs = noise.simulator_kwargs(counts_route=True)
-        if seed is not None:
-            kwargs['seed_simulator'] = int(seed)
+        # [E-QPU5] The seed is NOT fixed on the simulator: a fixed
+        # seed_simulator made every job replay the same random stream, so
+        # repeated jobs returned identical counts. Each job gets its own seed
+        # derived from `seed` and a job counter (see run_pub).
+        self._job = 0
         self.backend = make_simulator(**kwargs)
 
         self.log.info("Simulador local: metodo=%s | peldano de ruido='%s' | "
@@ -169,8 +172,8 @@ class LocalNoisyConnection(qpu.QPUConnection):
         Returns:
             Circuito transpilado.
         """
-        from qiskit import transpile
-        return transpile(qc, self.backend, optimization_level=1)
+        # [E-HPC3] device-level noise: place and route on the device first
+        return self.noise.transpile(qc, self.backend, optimization_level=1)
 
     # ------------------------------------------------------------------ #
     def run_pub(self, isa_circuit, parameter_values: np.ndarray,
@@ -207,8 +210,12 @@ class LocalNoisyConnection(qpu.QPUConnection):
         else:
             binds = None
 
+        run_kw = {}
+        if self.seed is not None:
+            run_kw['seed_simulator'] = int(self.seed) * 1_000_003 + self._job
+        self._job += 1
         result = self.backend.run(isa_circuit, parameter_binds=binds,
-                                  shots=shots).result()
+                                  shots=shots, **run_kw).result()
         t_wall = time.time() - t0
         # Sin cola ni sobrecoste de API: el tiempo de pared ES el de
         # ejecucion, asi que se reporta como tal en vez de dejar que el

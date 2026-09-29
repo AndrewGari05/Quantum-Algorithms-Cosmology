@@ -138,6 +138,19 @@ def set_noise(spec: "cnoise.NoiseSpec") -> None:
     NOISE = spec
 
 
+def _transpile_for(qga, qc, **kwargs):
+    """Transpile a QGA circuit for the QGA's noise level.
+
+    Ideal and synthetic levels use the module-level `transpile` exactly as
+    before. [E-HPC3] Fake-backend levels place and route the circuit on the
+    device (see `cosmo_noise.NoiseSpec.transpile`) so two-qubit errors apply.
+    """
+    noise = getattr(qga, '_noise', None)
+    if noise is None or getattr(noise, 'backend', None) is None:
+        return transpile(qc, qga.sim, **kwargs)
+    return noise.transpile(qc, qga.sim, **kwargs)
+
+
 def _qga_sim():
     """AerSimulator del peldano de ruido actual, para la ruta por medicion.
 
@@ -976,6 +989,7 @@ class QGA(GeneticEvolver):
         # otro cambio porque ya lee por medicion.
         self.sim = _qga_sim()
         self.noise_label = NOISE.label
+        self._noise = NOISE        # [E-HPC3] transpiles for this noise level
         # [M3 FIX] Aer measurement seeds are now DERIVED from the run seed
         # (GAConfig.seed) plus a per-call counter. Previously the quantum
         # operators ran with Aer's own random seed, so QGA runs were NOT
@@ -1036,7 +1050,7 @@ class QGA(GeneticEvolver):
         qc_init = QuantumCircuit(n_init)
         qc_init.h(range(n_init))
         qc_init.measure_all()
-        self._qc_init = transpile(qc_init, self.sim)
+        self._qc_init = _transpile_for(self, qc_init)
 
         # (b) Quantum mutation template (nb qubits, nb angle parameters).
         #     State-prep is folded into the angle: a qubit representing bit b
@@ -1049,7 +1063,7 @@ class QGA(GeneticEvolver):
         for q in range(nb):
             qc_mut.ry(phi_m[q], q)
         qc_mut.measure_all()
-        self._qc_mut_t = transpile(qc_mut, self.sim)     # transpiled ONCE
+        self._qc_mut_t = _transpile_for(self, qc_mut)     # transpiled ONCE
         self._phi_m = phi_m
 
         # (c) Quantum crossover template (2·nb qubits). Parent bits are loaded
@@ -1136,7 +1150,7 @@ class QGA(GeneticEvolver):
             QuantumCircuit
         """
         try:
-            return transpile(qc_cx, self.sim)
+            return _transpile_for(self, qc_cx)
         except TypeError as exc:
             if 'unbound parameter' not in str(exc).lower():
                 raise
@@ -1153,7 +1167,7 @@ class QGA(GeneticEvolver):
                 "rzz/rxx/ryy en la base. Esta celda NO es comparable bit a "
                 "bit con una transpilada por la via principal.",
                 RuntimeWarning, stacklevel=2)
-            return transpile(qc_cx, self.sim, basis_gates=basis)
+            return _transpile_for(self, qc_cx, basis_gates=basis)
 
     # ── operator 1: quantum initialization ──────────────────────────────────
     def do_init(self) -> np.ndarray:
