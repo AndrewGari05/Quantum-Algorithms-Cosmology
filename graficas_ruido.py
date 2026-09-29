@@ -52,6 +52,8 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+
+import campaign_io
 import math
 import os
 import re
@@ -86,10 +88,6 @@ TRAZO_RUIDO = {
 # Los backends reales (FakeBrisbane, …) entran por este color de reserva: no
 # son un peldano sintetico y no tienen sitio fijo en la escala.
 COLOR_BACKEND = ['#2ca02c', '#9467bd', '#8c564b', '#e377c2']
-
-_RE_TAREA = re.compile(
-    r'^(?P<familia>samplers|genetic)_(?P<modelo>[a-z0-9]+)_'
-    r'(?:nqpp|nb)(?P<rejilla>\d+)_noise-(?P<ruido>.+)$')
 
 # Columnas que NO son parametros cosmologicos aunque terminen en _mean/_std.
 _NO_PARAM = {'Om_mean', 'Om_std'} - {'Om_mean', 'Om_std'}   # (ninguna)
@@ -146,30 +144,22 @@ def columnas_de_parametros(campos) -> list:
 
 
 def leer_campana(raiz: str) -> list:
-    """Todas las filas de una campana, cada una con su procedencia resuelta.
+    """All rows of one campaign, each with its provenance resolved.
 
-    Returns:
-        list[dict] con las claves del CSV mas `_familia`, `_modelo`,
-        `_rejilla` (nqpp o n_bits), `_ruido` (del nombre de la carpeta) y
-        `_ruido_csv` (lo que decia la columna, para poder contrastar).
+    [E-READ] Delegates to `campaign_io.read_campaign` (optional grid/noise
+    tags, no double counting) and maps its keys to the names used here:
+    `_familia`, `_modelo`, `_rejilla`, `_ruido` (from the folder),
+    `_ruido_csv` (the CSV column, kept to cross-check) and `_camp`.
     """
     filas = []
-    for tarea in sorted(os.listdir(raiz)):
-        m = _RE_TAREA.match(tarea)
-        if not m:
-            continue
-        d = m.groupdict()
-        patron = os.path.join(raiz, tarea, 'model_*', 'resultados_config.csv')
-        for ruta in sorted(glob.glob(patron)):
-            with open(ruta, newline='') as fh:
-                for r in csv.DictReader(fh):
-                    r['_familia'] = d['familia']
-                    r['_modelo'] = d['modelo']
-                    r['_rejilla'] = int(d['rejilla'])
-                    r['_ruido'] = d['ruido']
-                    r['_ruido_csv'] = (r.get('noise') or '').strip()
-                    r['_ruta'] = ruta
-                    filas.append(r)
+    for r in campaign_io.read_campaign(raiz):
+        r['_familia'] = r['_fam']
+        r['_modelo'] = r['_mod']
+        r['_rejilla'] = r['_g']
+        r['_ruido'] = r['_noi']
+        r['_ruido_csv'] = (r.get('noise') or '').strip()
+        r['_ruta'] = r['_path']
+        filas.append(r)
     return filas
 
 
@@ -239,9 +229,13 @@ METRICAS = {
 def valor(fila, metrica, indice_ideal):
     """Valor de una metrica en una fila, o None si no aplica ahi."""
     if metrica == 'desplazamiento':
+        # [E-QPU9] For the genetic family `*_std` is the spread of the final
+        # population, not an uncertainty, so a shift "in sigmas" is
+        # meaningless there (it produced 223-sigma artefacts).
+        if fila['_familia'] == 'genetic':
+            return None
         ideal = indice_ideal.get(
-            (fila['_familia'], fila['_modelo'], fila['_rejilla'],
-             fila['Method']))
+            campaign_io.cell_key_without_noise(fila) + (fila['Method'],))
         return None if ideal is None else desplazamiento_en_sigmas(fila, ideal)
     return _num(fila.get(METRICAS[metrica][1]))
 
@@ -253,7 +247,9 @@ def indice_de_celdas_ideales(filas) -> dict:
     desplazamiento de `none-counts` mide justamente el efecto de cambiar de
     ruta de lectura, que es para lo que existe ese control.
     """
-    return {(r['_familia'], r['_modelo'], r['_rejilla'], r['Method']): r
+    # [E-QPU8] Keyed by campaign, dataset, prior and seed as well, so a noisy
+    # row is never measured against another campaign's ideal row.
+    return {campaign_io.cell_key_without_noise(r) + (r['Method'],): r
             for r in filas if r['_ruido'] == 'none'}
 
 
@@ -306,7 +302,7 @@ def figura_vs_rejilla(filas, familia, modelo, metrica, indice_ideal,
     datos = defaultdict(lambda: defaultdict(list))     # metodo → peldano → pts
     for r in sub:
         v = valor(r, metrica, indice_ideal)
-        if v is not None:
+        if v is not None and r['_rejilla'] is not None:
             datos[r['Method']][r['_ruido']].append((r['_rejilla'], v))
     metodos = [m for m in metodos if datos[m]]
     if not metodos:
@@ -448,7 +444,7 @@ def figura_a_rejilla_fija(filas, familia, modelo, rejilla, metricas,
 def metricas_utiles(filas, familia) -> list:
     """Metricas que esta familia realmente llena; las vacias no se dibujan."""
     sub = [r for r in filas if r['_familia'] == familia]
-    out = ['desplazamiento']
+    out = [] if familia == 'genetic' else ['desplazamiento']   # [E-QPU9]
     for m, (_, col) in METRICAS.items():
         if col and any(_num(r.get(col)) is not None for r in sub):
             out.append(m)
@@ -495,7 +491,8 @@ def construir(carpetas, salida) -> list:
                     hechas.append(r1)
             # Peldano fijo: en las rejillas donde de verdad hay comparacion.
             for rej in sorted({r['_rejilla'] for r in sub
-                               if r['_modelo'] == modelo}):
+                               if r['_modelo'] == modelo
+                               and r['_rejilla'] is not None}):
                 cuantos = {r['_ruido'] for r in sub
                            if r['_modelo'] == modelo and r['_rejilla'] == rej}
                 if len(cuantos) < 2:

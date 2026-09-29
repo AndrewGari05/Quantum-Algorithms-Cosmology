@@ -3224,7 +3224,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 tag=f"genetic_sweep_{'gpu' if device == 'GPU' else 'cpu'}",
                 device=device, interval=0.5)
             profiler.start()
-        run_genetic_sweep_all(
+        status = run_genetic_sweep_all(
             sweep_models, qga_levels, methods, args.dataset, args.prior, ga,
             args.n_bits, args.shots, master_dir, logger, args.log_every,
             no_csv=args.no_csv, no_plot=args.no_plot,
@@ -3236,6 +3236,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             _prof.ResourceProfiler.plot(
                 result, master_dir,
                 title_extra=f"genetic sweep | {len(sweep_models)} models")
+        # [E-HPC1] A model that failed inside the sweep must make the process
+        # exit non-zero; otherwise the HPC runner records the task as OK.
+        failed = [m for m, st in status.items() if st != 'ok']
+        if failed:
+            logger.error(f"genetic sweep-all: {len(failed)} model(s) failed: {failed}")
+            return 3
         return 0
 
     if cli_mode:

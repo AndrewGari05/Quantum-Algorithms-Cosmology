@@ -40,6 +40,8 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+
+import campaign_io
 import math
 import os
 import re
@@ -58,9 +60,6 @@ C_GANA_Q = '#5347C4'
 C_GANA_C = '#A8651F'
 C_EMPATE = '#8A8A94'
 C_REF = '#3A3A44'
-
-_RE = re.compile(r'^(?P<fam>samplers|genetic)_(?P<mod>[a-z0-9]+)_'
-                 r'(?:nqpp|nb)(?P<g>\d+)_noise-(?P<noi>.+)$')
 
 PAREJAS_SAMPLERS = [
     ('Classical MCMC', 'QMCMC 100%'),
@@ -98,26 +97,13 @@ def _num(x):
 
 
 def leer(raices) -> list:
-    """Filas de todas las campanas, con modelo/rejilla/peldano resueltos."""
-    filas = []
-    for raiz in raices:
-        etiqueta = os.path.basename(os.path.normpath(raiz))
-        for tarea in sorted(os.listdir(raiz)):
-            m = _RE.match(tarea)
-            if not m:
-                continue
-            patron = os.path.join(raiz, tarea, 'model_*',
-                                  'resultados_config.csv')
-            for ruta in sorted(glob.glob(patron)):
-                with open(ruta, newline='') as fh:
-                    for r in csv.DictReader(fh):
-                        r['_camp'] = etiqueta
-                        r.update({'_fam': m.group('fam'),
-                                  '_mod': m.group('mod'),
-                                  '_g': int(m.group('g')),
-                                  '_noi': m.group('noi')})
-                        filas.append(r)
-    return filas
+    """All rows of every campaign, with model/grid/noise level resolved.
+
+    [E-READ] Delegates to `campaign_io.read_campaign`, which accepts task
+    folders with or without the grid and noise tags (HPC-8/QPU-10) and never
+    reads the cumulative CSV twice (QPU-6).
+    """
+    return campaign_io.read_campaigns(raices)
 
 
 def razones_samplers(filas, peldano='none') -> dict:
@@ -133,10 +119,11 @@ def razones_samplers(filas, peldano='none') -> dict:
     for r in filas:
         if r['_fam'] != 'samplers' or r['_noi'] != peldano:
             continue
-        celdas[(r['_camp'], r['_mod'], r['_g'])][r['Method']] = r
+        celdas[campaign_io.cell_key(r)][r['Method']] = r
 
     por_modelo = defaultdict(lambda: defaultdict(list))
-    for (camp, mod, g), v in celdas.items():
+    for key, v in celdas.items():
+        mod, g = key[5], key[6]
         for clasico, cuantico in PAREJAS_SAMPLERS:
             c, q = v.get(clasico), v.get(cuantico)
             if not (c and q):
@@ -290,7 +277,7 @@ def razones_sigma(filas, peldano='none') -> dict:
     celdas = defaultdict(dict)
     for r in filas:
         if r['_fam'] == 'samplers' and r['_noi'] == peldano:
-            celdas[(r['_camp'], r['_mod'], r['_g'])][r['Method']] = r
+            celdas[campaign_io.cell_key(r)][r['Method']] = r
 
     rel = defaultdict(lambda: defaultdict(list))
     for v in celdas.values():
@@ -430,10 +417,11 @@ def razones_genetico(filas, peldano='none') -> dict:
     celdas = defaultdict(dict)
     for r in filas:
         if r['_fam'] == 'genetic' and r['_noi'] == peldano:
-            celdas[(r['_camp'], r['_mod'], r['_g'])][r['Method']] = r
+            celdas[campaign_io.cell_key(r)][r['Method']] = r
 
     out = defaultdict(dict)
-    for (camp, mod, g), v in celdas.items():
+    for key, v in celdas.items():
+        mod, g = key[5], key[6]
         base = v.get(BASE_GENETICO)
         if not base:
             continue
@@ -620,7 +608,7 @@ def _jeffreys(d):
     return JEFFREYS[-1][1], JEFFREYS[-1][2]
 
 
-def comparar_modelos(filas, peldano='none') -> list:
+def comparar_modelos(filas, peldano='none', dataset=None, prior=None) -> list:
     """El mejor ajuste de cada modelo, con su AIC y su BIC.
 
     Se toma el chi2 MINIMO sobre todos los metodos y rejillas de ese
@@ -628,9 +616,19 @@ def comparar_modelos(filas, peldano='none') -> list:
     control cruzado entre familias (que el genetico y los samplers
     aterricen en el mismo chi2) es lo que justifica usarlo.
     """
+    # [E-QPU8] Model selection is only meaningful on one dataset and prior:
+    # rows with different n_data must never share a table.
+    grupos = {((r.get('dataset') or '').strip(), (r.get('prior') or '').strip())
+              for r in filas if r['_noi'] == peldano}
+    if dataset is None and len(grupos) > 1:
+        raise ValueError(f"comparar_modelos: several (dataset, prior) groups "
+                         f"{sorted(grupos)}; pass dataset=/prior= explicitly")
     mejor = {}
     for r in filas:
         if r['_noi'] != peldano:
+            continue
+        if dataset is not None and ((r.get('dataset') or '').strip() != dataset
+                                    or (r.get('prior') or '').strip() != prior):
             continue
         c = _num(r.get('chi2'))
         if c is None:
@@ -758,10 +756,16 @@ def sigma_contra_rejilla(filas, metodo='QVMC 100%', par='Om',
     celdas = defaultdict(dict)
     for r in filas:
         if r['_fam'] == 'samplers' and r['_noi'] == peldano:
-            celdas[(r['_mod'], r['_g'])][r['Method']] = r
+            celdas[campaign_io.cell_key(r)][r['Method']] = r
 
+    # [E-QPU8] One series per (model, campaign, dataset, prior, seed); the
+    # campaign is added to the label only when several are present.
+    series = {k[:4] for k in celdas}
     fuera = defaultdict(list)
-    for (mod, g), v in celdas.items():
+    for key, v in celdas.items():
+        mod, g = key[5], key[6]
+        if len(series) > 1:
+            mod = f"{mod} [{key[0]}|{key[1]}|seed {key[3] or '?'}]"
         ref, q = v.get(REFERENCIA), v.get(metodo)
         if not ref or not q:
             continue
@@ -874,12 +878,20 @@ def main(argv=None) -> int:
         if r:
             hechas.append(r)
 
-    mods = comparar_modelos(filas, peldano=a.peldano)
-    if mods:
-        tabla_modelos(mods)
-        r = figura_modelos(mods, a.salida)
-        if r:
-            hechas.append(r)
+    grupos = sorted({((r.get('dataset') or '').strip(),
+                      (r.get('prior') or '').strip())
+                     for r in filas if r['_noi'] == a.peldano})
+    for ds, pr in grupos:
+        mods = comparar_modelos(filas, peldano=a.peldano, dataset=ds, prior=pr)
+        if mods:
+            print(f"\n  dataset = {ds or '?'}   prior = {pr or '?'}")
+            tabla_modelos(mods)
+            if len(grupos) == 1:
+                r = figura_modelos(mods, a.salida)
+                if r:
+                    hechas.append(r)
+    if len(grupos) > 1:
+        print("  (model-selection figure skipped: several datasets present)")
 
     gen = razones_genetico(filas, peldano=a.peldano)
     if gen:

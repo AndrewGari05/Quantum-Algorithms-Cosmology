@@ -86,8 +86,20 @@ def test_diferencia_pequena_frente_a_la_dispersion_no_es_significativa():
 
 
 def test_diferencia_grande_frente_a_la_dispersion_si_lo_es():
-    _, _, ns = cs.en_sigmas([1.00, 1.01, 0.99], [2.00, 2.01, 1.99])
+    # [E-QPU7] paired test: a constant offset has zero SE (t undefined) and is
+    # reported as systematic; a noisy but consistent offset has a large t.
+    d, _, ns = cs.en_sigmas([1.00, 1.01, 0.99], [2.00, 2.01, 1.99])
+    assert ns is None and d == -1.0
+    _, _, ns = cs.en_sigmas([1.00, 1.02, 0.99], [2.00, 2.01, 1.98])
     assert abs(ns) > 3.0
+
+
+def test_paired_test_detects_offset_hidden_by_seed_spread():
+    # QPU-7 reproducer: per-seed spread is large, the paired offset is not.
+    a = [0.30, 0.25, 0.35, 0.28, 0.32]
+    b = [x - 0.01 + e for x, e in zip(a, [0.0005, -0.0004, 0.0003, -0.0002, 0.0001])]
+    _, _, t = cs.en_sigmas(a, b)
+    assert abs(t) > 10
 
 
 # ── emparejado de celdas ─────────────────────────────────────────────────
@@ -106,7 +118,7 @@ def test_el_rung_clasico_se_empareja_pese_a_tener_nqpp_distinto(tmp_path):
         ])
     salida = _captura([str(tmp_path / f'semilla_{s}') for s in (1, 2, 3)])
     assert 'Classical VI vs QVMC 100%' in salida
-    assert 'sigmas' in salida
+    assert 'paired' in salida
 
 
 def test_celda_faithful_que_falla_en_una_sola_semilla_se_denuncia(tmp_path):

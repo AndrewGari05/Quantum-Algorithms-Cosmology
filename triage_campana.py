@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import csv
 import glob
+
+import campaign_io
 import os
 import re
 import sys
@@ -218,8 +220,13 @@ def estado_de_tarea(carpeta):
         'sin_log'}.
     """
     tiene_csv = bool(glob.glob(os.path.join(carpeta, 'resultados_*.csv')))
-    logs = sorted(glob.glob(os.path.join(carpeta, '*.log')))
-    logs = [l for l in logs if os.path.getsize(l) > 0]
+    # [E-QPU11] Newest log by modification time, not alphabetical order
+    # (`sweep_all_*.log` sorts after `stdout.log`).
+    logs = [l for l in glob.glob(os.path.join(carpeta, '*.log'))
+            if os.path.getsize(l) > 0]
+    logs.sort(key=os.path.getmtime)
+    if logs and _log_has_failure(logs):
+        return 'fallo', _log_has_failure(logs)
     if tiene_csv:
         return 'ok', ''
     if not logs:
@@ -228,6 +235,23 @@ def estado_de_tarea(carpeta):
     if FIRMA_OOM in ult:
         return 'oom', 'el log corta al arrancar el QVMC (SIGKILL del OOM killer)'
     return 'corriendo', ult[-70:]
+
+
+def _log_has_failure(logs):
+    """First failure line found in the task logs, or '' if none.
+
+    [E-QPU11] A task that crashed (traceback) or had a model fail inside the
+    sweep used to be reported as still running.
+    """
+    for path in logs:
+        try:
+            with open(path, encoding='utf-8', errors='replace') as fh:
+                for line in fh:
+                    if ': FAILED — ' in line or line.startswith('Traceback (most recent call last)'):
+                        return line.strip()[-90:]
+        except OSError:
+            continue
+    return ''
 
 
 def revisar(master_dir):
@@ -253,13 +277,14 @@ def revisar(master_dir):
         print(f"\n1. TAREAS  ({len(subs)} carpetas)")
         for est, etiqueta in (('ok', 'terminadas'),
                               ('oom', 'MUERTAS (OOMKill)'),
+                              ('fallo', 'FAILED (traceback / model failure)'),
                               ('corriendo', 'aun corriendo'),
                               ('sin_log', 'sin log')):
             items = por_estado.get(est, [])
             if not items:
                 continue
             print(f"   {etiqueta}: {len(items)}")
-            if est in ('oom', 'sin_log'):
+            if est in ('oom', 'sin_log', 'fallo'):
                 for nombre, det in items:
                     print(f"      - {nombre}{_sufijo_qubits(nombre)}")
                     print(f"        {det}")
@@ -276,8 +301,9 @@ def revisar(master_dir):
     # archivos, no las de una fila cualquiera: mirar una sola daria siempre
     # "faltan columnas" aunque la campana sea del codigo corregido.
     filas, cols = [], set()
-    for p in glob.glob(os.path.join(master_dir, '**', 'resultados_*.csv'),
-                       recursive=True):
+    # [E-QPU6] Only the per-model CSV; the per-task cumulative file repeats
+    # the same rows and used to double every count.
+    for p in campaign_io.result_csvs_any_layout(master_dir):
         nuevas = _leer_csv(p)
         # El modelo no viene como columna: se anota desde la ruta para poder
         # agrupar por modelo en las secciones 2 y 4.

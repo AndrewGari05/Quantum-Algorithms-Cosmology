@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import csv
 import glob
+
+import campaign_io
 import math
 import os
 import re
@@ -158,8 +160,9 @@ def cargar(carpetas):
     semillas, columnas = set(), set()
     for carpeta in carpetas:
         raiz = os.path.abspath(carpeta)
-        patron = os.path.join(carpeta, '**', 'resultados_*.csv')
-        for p in glob.glob(patron, recursive=True):
+        # [E-QPU6] Only the per-model CSV: the per-task cumulative file
+        # repeats the same rows and used to double every cell.
+        for p in campaign_io.result_csvs_any_layout(carpeta):
             try:
                 filas = list(csv.DictReader(open(p, newline='')))
             except OSError:
@@ -207,34 +210,46 @@ def dispersion(valores):
 
 
 def en_sigmas(a_vals, b_vals):
-    """Separa dos conjuntos de valores en unidades de su propia dispersion.
+    """Paired comparison of two methods run with the same seeds.
 
-    Es la pregunta central del estudio de semillas: la diferencia entre dos
-    metodos, ¿es mayor que lo que cada uno se mueve solo por cambiar la
-    semilla?
+    [E-QPU7] Both methods share every seed, so the right test is a paired
+    t-test on the per-seed differences d_s = a_s - b_s. The previous version
+    divided the difference of means by sqrt(sa^2 + sb^2), the per-seed
+    spreads, which ignores the pairing and is sqrt(n) too conservative (a
+    systematic offset at t = 20.8 was reported as 0.54 "sigmas").
 
     Args:
-        a_vals, b_vals: los valores de cada metodo, uno por semilla.
+        a_vals, b_vals: values of each method, one per seed, same order.
 
     Returns:
-        `(dif, sigma_combinada, n_sigmas)`, o `(None, None, None)` si no hay
-        datos suficientes. `n_sigmas` es None cuando la dispersion es cero
-        (por ejemplo con una sola semilla): ahi no hay vara de medir.
+        `(mean_diff, standard_error, t_statistic)`, or `(None, None, None)`
+        with fewer than two usable pairs. `t_statistic` is None when every
+        difference is identical (zero standard error).
 
     Examples:
-        >>> d, s, n = en_sigmas([1.0, 1.1, 0.9], [2.0, 2.1, 1.9])
-        >>> round(d, 3), round(n, 1)
-        (-1.0, -7.1)
+        >>> d, se, t = en_sigmas([1.0, 1.1, 0.9], [2.0, 2.1, 1.9])
+        >>> round(d, 3), t is None
+        (-1.0, True)
+        >>> d, se, t = en_sigmas([1.00, 1.12, 0.93], [0.99, 1.10, 0.92])
+        >>> round(t, 2)
+        4.0
         >>> en_sigmas([1.0], [2.0])[2] is None
         True
     """
-    ma, sa, na = dispersion(a_vals)
-    mb, sb, nb = dispersion(b_vals)
-    if ma is None or mb is None:
+    pares = [(a, b) for a, b in zip(a_vals, b_vals)
+             if a is not None and b is not None]
+    if len(pares) < 2:
         return None, None, None
-    sc = math.sqrt(sa ** 2 + sb ** 2)
-    dif = ma - mb
-    return dif, sc, (dif / sc if sc > 0 else None)
+    d = [a - b for a, b in pares]
+    m, sd, n = dispersion(d)
+    se = sd / math.sqrt(n)
+    return m, se, (m / se if se > 1e-15 * max(1.0, abs(m)) else None)
+
+
+def p_value_two_sided(t, n):
+    """Two-sided p-value of a paired t statistic with n pairs (n-1 dof)."""
+    from scipy import stats
+    return float(2 * stats.t.sf(abs(t), n - 1))
 
 
 def revisar(carpetas):
@@ -334,8 +349,8 @@ def revisar(carpetas):
     print('\n' + '-' * 74)
     print('3. ¿SOBREVIVEN LAS DIFERENCIAS QUE QUIERES REPORTAR?')
     print('-' * 74)
-    print('   Una diferencia por debajo de 1 sigma NO se puede defender:')
-    print('   cae dentro de lo que el numero se mueve solo por la semilla.')
+    print('   Paired t-test over seeds (both methods share every seed).')
+    print('   A difference with p >= 0.05 cannot be defended.')
     algo = False
     for a, b, met, porque in COMPARACIONES:
         if met not in columnas:
@@ -356,18 +371,22 @@ def revisar(carpetas):
                 continue
             algo = True
             et = f'{clave[1]}/{clave[3]}  [{clave[0]}]'
+            # [E-QPU7] Verdict from the paired t-test p-value.
             if ns is None:
-                juicio = 'dispersion cero: no hay vara de medir'
-            elif abs(ns) < 1:
-                juicio = 'DENTRO del ruido de semilla — no reportable'
-            elif abs(ns) < 3:
-                juicio = 'marginal — reportar con la barra de error'
+                juicio = ('identical difference on every seed: systematic'
+                          if dif else 'no difference on any seed')
             else:
-                juicio = 'solida'
+                pv = p_value_two_sided(ns, len(sa))
+                if pv >= 0.05:
+                    juicio = f'p = {pv:.3g}: within seed-to-seed noise, not reportable'
+                elif pv >= 0.001:
+                    juicio = f'p = {pv:.3g}: marginal, report with its error bar'
+                else:
+                    juicio = f'p = {pv:.3g}: solid'
             print(f'\n   {a} vs {b}  [{met}]  — {porque}')
-            print(f'      {et}   ({len(sa)} semillas)')
-            print(f'      diferencia = {dif:+.6g}   sigma = {sc:.3g}'
-                  + (f'   ->  {ns:+.1f} sigmas' if ns is not None else ''))
+            print(f'      {et}   ({len(sa)} seeds, paired)')
+            print(f'      mean difference = {dif:+.6g}   SE = {sc:.3g}'
+                  + (f'   ->  t = {ns:+.2f}' if ns is not None else ''))
             print(f'      {juicio}')
     if not algo:
         print('\n   (no hay pares comparables con dos o mas semillas)')

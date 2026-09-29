@@ -733,6 +733,16 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
         # modo que una corrida ideal produce EXACTAMENTE las mismas rutas de
         # salida que antes de este eje y los CSV previos siguen alineando.
         noise_argv = (['--noise', noise] if noisy or sweeping_noise else [])
+        # [E-HPC2] Forward the channel strengths. They used to be parsed here
+        # and dropped, so every child ran with the defaults. Only non-default
+        # values are forwarded, which keeps default commands unchanged.
+        for flag, attr, default in (
+                ('--noise-readout-p', 'noise_readout_p', cnoise.DEFAULT_READOUT_P),
+                ('--noise-gate-p1', 'noise_gate_p1', cnoise.DEFAULT_GATE_P1),
+                ('--noise-gate-p2', 'noise_gate_p2', cnoise.DEFAULT_GATE_P2)):
+            val = getattr(args, attr, default)
+            if noisy and val != default:
+                noise_argv += [flag, repr(float(val))]
         route_argv = (['--proposal-route', proposal_route]
                       if proposal_route != 'auto' else [])
 
@@ -963,6 +973,11 @@ def run_pool(tasks: List[Task], max_parallel: int, threads_per_worker: int,
             rc = p.poll()
             if rc is not None:
                 t.t_end = time.time()
+                # [E-HPC1] Children written before this fix exit 0 even when a
+                # model failed inside --sweep-all; treat a "FAILED —" line in
+                # the task log as a failure as well.
+                if rc == 0 and _log_reports_failure(t.log_path):
+                    rc = 3
                 t.rc = rc
                 try:
                     p._logfh.close()  # type: ignore
@@ -986,6 +1001,19 @@ def run_pool(tasks: List[Task], max_parallel: int, threads_per_worker: int,
     for t in skipped:
         if t not in tasks:
             tasks.append(t)
+
+
+def _log_reports_failure(path: str) -> bool:
+    """True if a child's log contains a per-model failure line.
+
+    The sweep drivers print ``<model>: FAILED — <reason>`` when a model raises
+    and the batch continues. Used as a second check on top of the exit code.
+    """
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            return any(': FAILED — ' in line for line in fh)
+    except OSError:
+        return False
 
 
 def _apply_child_profile(t: Task) -> None:
@@ -1156,15 +1184,13 @@ def _to_float(s) -> float:
 
 
 def _find_result_csvs(master_dir: str) -> List[str]:
-    """Todos los CSV de resultados bajo `master_dir`, sin duplicados."""
-    import glob
-    found, seen, out = [], set(), []
-    for pat in ('resultados_TODOS_los_modelos.csv', 'resultados_config.csv'):
-        found += glob.glob(os.path.join(master_dir, '**', pat), recursive=True)
-    for f in found:
-        if f not in seen:
-            seen.add(f); out.append(f)
-    return out
+    """Per-model result CSVs under `master_dir`.
+
+    [E-QPU6] The cumulative `resultados_TODOS_los_modelos.csv` repeats the
+    rows of the per-model files, so reading both counted every run twice.
+    """
+    import campaign_io
+    return campaign_io.result_csvs_any_layout(master_dir)
 
 
 def _infer_model(path: str) -> str:

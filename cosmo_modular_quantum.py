@@ -3437,6 +3437,20 @@ def _write_csv_rows(rows: list, fields: list, csv_path: str) -> None:
     try:
         write_header = (not os.path.exists(csv_path)
                         or os.path.getsize(csv_path) == 0)
+        if not write_header:
+            # [E-QV5] Never append rows under a different header: DictWriter
+            # would write them positionally and every column after the first
+            # mismatch would be read back under the wrong name. The old file
+            # is moved aside (nothing is lost) and a fresh one is started.
+            with open(csv_path, newline='') as fh:
+                old_header = next(csv.reader(fh), [])
+            if old_header != list(fields):
+                stamp = time.strftime('%Y%m%d_%H%M%S')
+                moved = f"{os.path.splitext(csv_path)[0]}.old-schema-{stamp}.csv"
+                os.replace(csv_path, moved)
+                print(f"  [CSV] header of {csv_path} differs from the current "
+                      f"schema; old file moved to {moved}")
+                write_header = True
         with open(csv_path, 'a', newline='') as fh:
             wtr = csv.DictWriter(fh, fieldnames=fields, extrasaction='ignore')
             if write_header:
@@ -4165,7 +4179,7 @@ def main():
                 tag=f"sweep_{'gpu' if device == 'GPU' else 'cpu'}",
                 device=device, interval=0.5)
             profiler.start()
-        run_sweep_all(
+        status = run_sweep_all(
             sweep_models, args.dataset, args.prior, args.steps, args.qvmc_iter,
             args.nqpp, args.chains, args.shots, args.seed, master_dir, logger,
             args.log_every, no_csv=args.no_csv, no_plot=args.no_plot,
@@ -4173,6 +4187,12 @@ def main():
         _finish_profile(profiler, master_dir, logger.info,
                         f"sweep-all | {len(sweep_models)} models | "
                         f"steps={args.steps} iters={args.qvmc_iter}")
+        # [E-HPC1] A model that failed inside the sweep must make the process
+        # exit non-zero; otherwise the HPC runner records the task as OK.
+        failed = [m for m, st in status.items() if st != 'ok']
+        if failed:
+            logger.error(f"sweep-all: {len(failed)} model(s) failed: {failed}")
+            sys.exit(3)
         return
 
     # ── mode selection ───────────────────────────────────────────────────
