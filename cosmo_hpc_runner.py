@@ -776,7 +776,9 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
                             # from an explicit user override.
                             '--max-qubits', str(q_cap),
                             '--outdir', outdir] + common_data + noise_argv \
-                        + route_argv
+                        + route_argv \
+                        + (['--rungs'] + list(args.rungs)
+                           if getattr(args, 'rungs', None) else [])
                     tasks.append(Task(
                         name=name, script='cosmo_modular_quantum.py',
                         argv=argv, model=m, total_qubits=total_q,
@@ -816,7 +818,9 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
                             # or user override) so the child's own validation
                             # agrees with the plan built here.
                             '--max-qubits', str(g_cap),
-                            '--outdir', outdir] + common_data + noise_argv
+                            '--outdir', outdir] + common_data + noise_argv \
+                        + (['--sweep-qga-levels'] + [str(q) for q in args.qga_levels]
+                           if getattr(args, 'qga_levels', None) else [])
                     tasks.append(Task(
                         name=name, script='cosmo_genetic_optimizers.py',
                         argv=argv, model=m, total_qubits=total_q,
@@ -1899,6 +1903,14 @@ def build_parser() -> argparse.ArgumentParser:
                      help='cosmo_genetic_optimizers.py only')
     p.add_argument('--models', nargs='+', choices=ALL_MODELS, default=None,
                    help='Models to sweep (default: all)')
+    p.add_argument('--rungs', nargs='+', default=None, metavar='TAG',
+                   help='[E-RUNGS] samplers: run only these ladder rungs '
+                        '(C-MCMC QMCMC50 QMCMC100 C-VI QVMC33 QVMC67 QVMC100). '
+                        'Used to re-run only the rungs an errata fix affects.')
+    p.add_argument('--qga-levels', nargs='+', type=int, default=None,
+                   metavar='PCT',
+                   help='[E-RUNGS] genetic: run only these QGA quantumness '
+                        'levels (0 33 67 100); CGA is always included.')
 
     # --- node resources ---
     p.add_argument('--total-cores', type=int, default=detected_cores(),

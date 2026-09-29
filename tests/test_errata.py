@@ -180,3 +180,33 @@ def test_prov_convergence_flag():
     assert good == {"rhat": "1.0040", "mc_converged": "True"}
     assert bad["mc_converged"] == "False"
     assert cmq._convergence_fields({"kl_final": 0.1}) == {"rhat": "", "mc_converged": ""}
+
+
+# --------------------------------------------------------------------------- #
+# E-RUNGS: a rung run alone reproduces its rows from the full ladder.
+# --------------------------------------------------------------------------- #
+def test_rungs_subset_reproduces_full_ladder_rows(tmp_path):
+    import cosmo_core as cc
+    import cosmo_modular_quantum as cmq
+    post = cc.Posterior(cc.MODELS["lcdm"], dataset="CC+BAO")
+    kw = dict(n_steps_mcmc=80, max_iter_qvmc=2, nqpp=2, n_chains_mcmc=3,
+              n_chains_qvmc=2, n_shots=256, outdir=str(tmp_path), seed=7,
+              no_plot=True, log_every=10**9)
+    full = cmq.run_quantumness_ladder(post, **kw)
+    part = cmq.run_quantumness_ladder(post, rungs=["QMCMC100"], **kw)
+    assert [r["pct"] for r in part["qmcmc"]] == [100.0] and part["qvmc"] == []
+    ref = [r for r in full["qmcmc"] if r["pct"] == 100.0][0]
+    assert (part["qmcmc"][0]["chains"] == ref["chains"]).all()
+    with pytest.raises(ValueError):
+        cmq.run_quantumness_ladder(post, rungs=["QMCMC75"], **kw)
+
+
+def test_runner_forwards_rungs_and_qga_levels(tmp_path):
+    cmd = [sys.executable, os.path.join(ROOT, "cosmo_hpc_runner.py"), "--dry-run",
+           "--models", "cpl", "--rungs", "QMCMC50", "QMCMC100",
+           "--qga-levels", "67", "100", "--outdir", str(tmp_path / "dry")]
+    out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
+                         timeout=300).stdout
+    lines = [l for l in out.splitlines() if "--sweep-all" in l]
+    assert any("--rungs QMCMC50 QMCMC100" in l for l in lines)
+    assert any("--sweep-qga-levels 67 100" in l for l in lines)

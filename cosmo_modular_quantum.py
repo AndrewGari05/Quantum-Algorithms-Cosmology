@@ -64,7 +64,7 @@ import re
 import sys
 import time
 import warnings
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import numpy as np
 import matplotlib
@@ -2581,8 +2581,16 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
                            csv_paths: Optional[list] = None,
                            dataset_label: str = "", prior_type: str = "",
                            budget_mode: str = 'circuits',
-                           no_plot: bool = False) -> dict:
+                           no_plot: bool = False,
+                           rungs: Optional[Sequence[str]] = None) -> dict:
     """Run TWO independent, monotonic per-method quantumness ladders.
+
+    [E-RUNGS] `rungs` restricts the run to a subset of rung tags (keys of
+    `_TAGS_LOG`: 'C-MCMC', 'QMCMC50', 'QMCMC100', 'C-VI', 'QVMC33', 'QVMC67',
+    'QVMC100'). Every rung re-seeds with `seed` before it starts, so a rung
+    run alone produces exactly the rows it produces inside the full ladder;
+    this is what allows re-running only the rungs an errata fix affects.
+    Figures are skipped for partial ladders.
 
     This is the canonical benchmark: it sweeps each sampler along ITS OWN
     monotonic axis, adding one quantum component at a time:
@@ -2626,11 +2634,20 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
     say(f"PER-METHOD LADDERS — model {model.label}, dataset {post.dataset}")
 
     # ── QMCMC ladder ────────────────────────────────────────────────────────
+    if rungs is not None:
+        unknown = set(rungs) - set(_TAGS_LOG)
+        if unknown:
+            raise ValueError(f"unknown rung tag(s) {sorted(unknown)}; "
+                             f"valid: {sorted(_TAGS_LOG)}")
+        no_plot = True
+        say(f"  [E-RUNGS] partial ladder: only {sorted(rungs)} (figures skipped)")
     qmcmc_runs = []
     for cfg in qmcmc_ladder():
         pct = quantumness_qmcmc(cfg)
-        _reseed(seed)
         tag = 'C-MCMC' if pct == 0 else f'QMCMC{pct:.0f}'
+        if rungs is not None and tag not in rungs:
+            continue
+        _reseed(seed)
         mc = QMCMCModular(post, cfg, n_chains=n_chains_mcmc, n_burn=n_burn,
                           stop_on_convergence=False)
         _t0 = time.time()
@@ -2651,16 +2668,21 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
     # [ADAPTIVE GRID — option b] Compute the zoomed grid window ONCE (a quick
     # classical pre-fit) and share it across every rung AND the classical-VI
     # baseline, so all QVMC distributions live on the exact same grid.
-    _reseed(seed)
-    shared_window = estimate_grid_window(post)
-    say(f"  Adaptive QVMC grid window (shared): "
-        + ", ".join(f"{model.param_names[i]}∈[{lo:.4f},{hi:.4f}]"
-                    for i, (lo, hi) in enumerate(shared_window)))
     qvmc_runs = []
-    for cfg in qvmc_ladder():
-        pct = quantumness_qvmc(cfg)
+    want_qvmc = rungs is None or any(t in rungs for t in
+                                     ('C-VI', 'QVMC33', 'QVMC67', 'QVMC100'))
+    if want_qvmc:
         _reseed(seed)
+        shared_window = estimate_grid_window(post)
+        say(f"  Adaptive QVMC grid window (shared): "
+            + ", ".join(f"{model.param_names[i]}∈[{lo:.4f},{hi:.4f}]"
+                        for i, (lo, hi) in enumerate(shared_window)))
+    for cfg in (qvmc_ladder() if want_qvmc else []):
+        pct = quantumness_qvmc(cfg)
         tag = 'C-VI' if pct == 0 else f'QVMC{pct:.0f}'
+        if rungs is not None and tag not in rungs:
+            continue
+        _reseed(seed)
         qv = QVMCModular(post, cfg, n_qubits_per_param=nqpp, n_shots=n_shots,
                          grid_window=shared_window, budget_mode=budget_mode)
         _t0 = time.time()
@@ -3903,6 +3925,12 @@ def build_parser() -> argparse.ArgumentParser:
                         'clasico recibe el presupuesto EQUIVALENTE EN '
                         'CIRCUITOS, no el mismo numero de iteraciones — ver '
                         '--budget-mode.')
+    p.add_argument('--rungs', nargs='+', default=None, metavar='TAG',
+                   choices=sorted(_TAGS_LOG),
+                   help='[E-RUNGS] run only these ladder rungs (with '
+                        '--sweep-all/--benchmark), e.g. --rungs QMCMC50 '
+                        'QMCMC100. Each rung re-seeds, so its rows equal '
+                        'those of the full ladder.')
     p.add_argument('--budget-mode', type=str, default='circuits',
                    choices=('circuits', 'iters'),
                    help="[B-BUDGET] Como se iguala el presupuesto de "
@@ -4002,7 +4030,8 @@ def _print_summary_block(title: str, model, st: dict, extra: str,
 
 def run_sweep_all(models, dataset, prior, steps, qvmc_iter, nqpp, chains,
                   shots, seed, master_dir, logger, log_every,
-                  no_csv=False, no_plot=False, budget_mode='circuits'):
+                  no_csv=False, no_plot=False, budget_mode='circuits',
+                  rungs=None):
     """Run the full quantumness benchmark for EVERY requested model in one go.
 
     This is the HPC "launch once, get everything" mode. For each model it runs
@@ -4062,7 +4091,7 @@ def run_sweep_all(models, dataset, prior, steps, qvmc_iter, nqpp, chains,
                 outdir=model_dir, seed=seed, logger=logger,
                 log_every=log_every, n_chains_mcmc=chains, n_shots=shots,
                 csv_paths=csv_paths, dataset_label=dataset, prior_type=prior,
-                budget_mode=budget_mode, no_plot=no_plot)
+                budget_mode=budget_mode, no_plot=no_plot, rungs=rungs)
             status[model_name] = 'ok'
             say(f"[{i}/{len(models)}] {model_name}: DONE -> {model_dir}/")
         except Exception as exc:                      # keep the batch alive
@@ -4235,7 +4264,8 @@ def main():
             sweep_models, args.dataset, args.prior, args.steps, args.qvmc_iter,
             args.nqpp, args.chains, args.shots, args.seed, master_dir, logger,
             args.log_every, no_csv=args.no_csv, no_plot=args.no_plot,
-            budget_mode=getattr(args, 'budget_mode', 'circuits'))
+            budget_mode=getattr(args, 'budget_mode', 'circuits'),
+            rungs=getattr(args, 'rungs', None))
         _finish_profile(profiler, master_dir, logger.info,
                         f"sweep-all | {len(sweep_models)} models | "
                         f"steps={args.steps} iters={args.qvmc_iter}")
@@ -4337,7 +4367,10 @@ def main():
                                prior_type=prior,
                                budget_mode=getattr(args, 'budget_mode',
                                                    'circuits'),
-                               no_plot=args.no_plot)
+                               no_plot=args.no_plot,
+                               # [E-QV4] these flags were parsed and dropped
+                               n_chains_mcmc=args.chains, n_shots=args.shots,
+                               rungs=getattr(args, 'rungs', None))
         _finish_profile(profiler, args.outdir, say,
                         f"{model.label} benchmark | steps={steps} "
                         f"iters={qvmc_iter} nqpp={nqpp}")
