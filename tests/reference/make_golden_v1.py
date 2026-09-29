@@ -26,7 +26,7 @@ with contextlib.redirect_stdout(io.StringIO()):
     import cosmo_modular_quantum as cmq  # noqa: E402
     import cosmo_noise as cn  # noqa: E402
 
-SEED, STEPS, CHAINS = 42, 4000, 6
+SEED, STEPS, CHAINS = 42, 16000, 6
 
 
 def chain_summary(chains):
