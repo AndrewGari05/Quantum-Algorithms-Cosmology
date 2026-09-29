@@ -112,6 +112,11 @@ def read_campaign(root: str, warn: bool = True) -> List[dict]:
             continue
         tags = parse_task_name(name)
         paths = result_csvs(task_dir)
+        moved = glob.glob(os.path.join(task_dir, "model_*", "resultados_config.old-schema-*.csv"))
+        if warn and moved:
+            print(f"  [campaign_io] {camp}/{name}: {len(moved)} moved-aside CSV(s) with an "
+                  f"older header are not read: {[os.path.basename(m) for m in moved]}",
+                  file=sys.stderr)
         if tags is None:
             if paths:
                 skipped.append(name)
