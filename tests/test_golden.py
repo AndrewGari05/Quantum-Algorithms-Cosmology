@@ -95,7 +95,7 @@ def test_chains_agree_with_errata_code_within_mc_error(stats_ref, rung):
     prop = GaussianProposal(scale) if rung == "mcmc" else RandomCircuitProposal(scale)
     rng = np.random.default_rng(42)
     mh = MetropolisHastings(post.log_prob, 2, 6, proposal=prop, rng=rng)
-    mh.run_mcmc(box[:, 0] + rng.random((6, 2)) * (box[:, 1] - box[:, 0]), 4400)
+    mh.run_mcmc(box[:, 0] + rng.random((6, 2)) * (box[:, 1] - box[:, 0]), 16400)
     ch = np.swapaxes(mh.get_chain(discard=400), 0, 1)
     mean, sd = ch.reshape(-1, 2).mean(0), ch.reshape(-1, 2).std(0)
     ess = diagnostics.ess(ch)

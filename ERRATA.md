@@ -100,6 +100,12 @@ python cosmo_hpc_runner.py --only-genetic --dataset CC+BAO+Pantheon --seed 42 \
     --nbits-sweep 4 6 --noise FakeBrisbane --outdir results/errata_fakebrisbane_genetic
 ```
 
+The qubit ceilings of the runner are derived from the machine's RAM. Before
+launching, add the original campaign's `--max-qubits` / `--max-qubits-genetic`
+to `COMMON` (from its `PLAN` block), run each command with `--dry-run`, and
+check that the planned cells match the original ones; on a small machine
+the FakeBrisbane commands skip or trim the largest cells.
+
 The QMCMC rows do not depend on `nqpp` (the proposal uses max(2, d) qubits),
 so the `nqpp` sweeps above only restore one row per reported cell; running a
 single `nqpp` is enough if only the fidelity table is needed.
