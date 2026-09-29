@@ -1375,6 +1375,55 @@ def mcmc_converged(chains: np.ndarray, threshold: float = RHAT_THRESHOLD
     return bool(np.isfinite(r) and r < threshold)
 
 
+def _refine_best_fit(post: 'Posterior', theta0: np.ndarray) -> np.ndarray:
+    """Minimize chi2 inside the prior box, starting from `theta0`.
+
+    [E-CO3] The previous refinement rejected any optimum ON the box edge:
+    L-BFGS-B converges exactly onto a bound (CPL's Omega_m = 0.18), the
+    prior test is strict (lo < v < hi), so the candidate was discarded and
+    the posterior mean was reported instead (CPL chi2 too high by up to
+    1.1). Boundary optima are now moved inside the open box by 1e-9 of its
+    width, which changes chi2 by far less than the reported precision.
+
+    [E-CO4] L-BFGS-B on raw parameters (Omega_m ~ 0.3 next to H0 ~ 70) with
+    finite-difference gradients stopped early while reporting success
+    (GEDE: chi2 1.70 above the minimum from the fiducial start). The search
+    now runs in box-normalized coordinates u = (theta - lo) / (hi - lo) and
+    is polished with bounded Nelder-Mead; the lower chi2 is kept, and the
+    result is never worse than the starting point.
+    """
+    bounds = list(getattr(post.model, 'bounds', []) or [])
+    if not bounds:
+        return theta0
+    lo = np.array([b[0] for b in bounds], dtype=float)
+    hi = np.array([b[1] for b in bounds], dtype=float)
+    width = hi - lo
+    eps = 1e-9 * width
+
+    def to_theta(u):
+        return np.clip(lo + np.asarray(u, dtype=float) * width, lo + eps, hi - eps)
+
+    def f(u):
+        c = post.chi2(to_theta(u))[0]
+        return c if np.isfinite(c) else 1e300
+
+    u0 = np.clip((np.asarray(theta0, dtype=float) - lo) / width, 0.0, 1.0)
+    unit = [(0.0, 1.0)] * len(u0)
+    best_u, best_f = u0, f(u0)
+    r1 = minimize(f, u0, method='L-BFGS-B', bounds=unit,
+                  options={'maxiter': 2000, 'ftol': 1e-14, 'gtol': 1e-10})
+    if np.isfinite(r1.fun) and r1.fun < best_f:
+        best_u, best_f = r1.x, r1.fun
+    r2 = minimize(f, best_u, method='Nelder-Mead', bounds=unit,
+                  options={'maxiter': 4000, 'xatol': 1e-10, 'fatol': 1e-10})
+    if np.isfinite(r2.fun) and r2.fun < best_f:
+        best_u, best_f = r2.x, r2.fun
+    cand = to_theta(best_u)
+    if not np.isfinite(post.log_prior(cand)):
+        return theta0
+    return cand
+
+
 def fit_statistics(post: Posterior, theta_mean: np.ndarray,
                    refine: bool = True) -> dict:
     """Compute χ², reduced χ², AIC and BIC at the best fit.
@@ -1411,37 +1460,7 @@ def fit_statistics(post: Posterior, theta_mean: np.ndarray,
     """
     theta_best = np.asarray(theta_mean, dtype=float).copy()
     if refine:
-        # [B-BOUNDS] El refinamiento era Nelder-Mead SIN restricciones sobre
-        # `chi2`, que nunca ve el prior. Como chi2 es finito fuera de la caja
-        # (H(z) hace clip de E^2, ver [B-CLIP]), el simplex se salia y se
-        # reportaba como "mejor ajuste" un punto con probabilidad posterior
-        # CERO. Medido sobre las 15 combinaciones modelo x dataset, 5 se
-        # salian, incluida cpl/CC+BAO+Pantheon, y una llegaba a devolver
-        # H0 = 6.3e-5 km/s/Mpc. La penalizacion en chi2 era minima
-        # (Delta chi2 = 0.004 en esa celda), asi que AIC y BIC apenas
-        # cambiaban: el numero se veia perfectamente sano. Exactamente la
-        # clase de fallo silencioso que este proyecto ya ha sufrido tres
-        # veces.
-        #
-        # L-BFGS-B con las cotas del modelo mantiene el minimo DENTRO del
-        # soporte del prior, que es el unico sitio donde "mejor ajuste"
-        # significa algo. Se conserva Nelder-Mead como respaldo por si el
-        # gradiente numerico falla (chi2 puede ser no suave en el borde).
-        bounds = list(getattr(post.model, 'bounds', []) or []) or None
-        res = minimize(lambda t: post.chi2(t)[0], theta_best,
-                       method='L-BFGS-B', bounds=bounds,
-                       options={'maxiter': 800, 'ftol': 1e-12})
-        if not (res.success and np.isfinite(res.fun)):
-            res = minimize(lambda t: post.chi2(t)[0], theta_best,
-                           method='Nelder-Mead', bounds=bounds,
-                           options={'maxiter': 800, 'xatol': 1e-6,
-                                    'fatol': 1e-6})
-        if np.isfinite(res.fun):
-            cand = np.asarray(res.x, dtype=float)
-            # Cinturon y tirantes: si aun asi saliera del soporte, no se
-            # acepta. Un chi2 mas bajo fuera del prior no es un mejor ajuste.
-            if np.isfinite(post.log_prior(cand)):
-                theta_best = cand
+        theta_best = _refine_best_fit(post, theta_best)
     chi2, n = post.chi2(theta_best)
     k = post.model.n_params
     dof = max(n - k, 1)

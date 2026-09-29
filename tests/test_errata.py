@@ -319,3 +319,59 @@ def test_qpu5_noisy_twin_jobs_are_not_replayed():
     assert a != b
     conn2 = qns.LocalNoisyConnection(cn.NoiseSpec.from_level("readout"), shots=256, seed=5)
     assert conn2.run_pub(conn2.transpile_isa(qc), np.zeros((1, 0)))[0] == a  # reproducible
+
+
+# --------------------------------------------------------------------------- #
+# CO-3/4: the best fit must reach the chi2 minimum inside the prior box,
+# including a minimum on the boundary (CPL, Om = 0.18 on CC+BAO) and badly
+# scaled parameters (GEDE from the fiducial start stopped 1.7 too high).
+# Checked against an independent multi-start optimum.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("model,dataset,start", [
+    ("cpl", "CC+BAO", "fiducial"),
+    ("gede", "CC+BAO+Pantheon", "fiducial"),
+    ("cpl", "CC+BAO", "posterior-like"),
+])
+def test_co34_fit_statistics_reaches_minimum(model, dataset, start):
+    import contextlib
+    import io
+    import numpy as np
+    from scipy.optimize import minimize
+    import cosmo_core as cc
+    m = cc.MODELS[model]
+    with contextlib.redirect_stdout(io.StringIO()):
+        post = cc.Posterior(m, dataset=dataset)
+    lo = np.array([b[0] for b in m.bounds])
+    hi = np.array([b[1] for b in m.bounds])
+    theta0 = (np.asarray(m.fiducial, float) if start == "fiducial"
+              else np.array([0.20, 69.0, -0.9, 0.5]))
+    st = cc.fit_statistics(post, theta0)
+    assert np.isfinite(post.log_prior(st["theta_best"]))
+    rng = np.random.default_rng(0)
+    best = np.inf
+    for _ in range(8):
+        u0 = rng.uniform(0.05, 0.95, len(lo))
+        r = minimize(lambda u: post.chi2(np.clip(lo + u * (hi - lo), lo, hi))[0], u0,
+                     method="Nelder-Mead", bounds=[(0, 1)] * len(lo),
+                     options={"maxiter": 6000, "xatol": 1e-10, "fatol": 1e-10})
+        best = min(best, r.fun)
+    assert st["chi2"] <= best + 1e-6, (st["chi2"], best)
+
+
+# --------------------------------------------------------------------------- #
+# GA-1: the QGA grid floor (value from the bug report: 28.3992 at n_bits = 4).
+# --------------------------------------------------------------------------- #
+def test_ga1_grid_floor_value():
+    import errata_tools as et
+    g = et.grid_floor("lcdm", "CC+BAO", 4)
+    assert abs(g["chi2_grid_floor"] - 28.3992) < 1e-3
+    assert abs(g["floor_minus_continuous"] - 0.930) < 2e-3
+
+
+def test_refit_tool_reads_campaign(tmp_path):
+    import errata_tools as et
+    _task(tmp_path, "samplers_lcdm_nqpp3_noise-none",
+          [_row("Classical MCMC", 0.2574, chi2="27.9", n="51")])
+    os.chdir(tmp_path)
+    out = et.cmd_refit([str(tmp_path)], quiet=True)
+    assert len(out) == 1 and abs(out[0]["chi2_new"] - 27.469109) < 1e-4
