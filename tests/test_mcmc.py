@@ -80,3 +80,14 @@ def test_hastings_term_is_used():
     mh.run_mcmc(np.zeros((8, 1)), 6000)
     x = mh.get_chain(discard=500, flat=True)
     assert abs(x.mean()) < 0.1 and abs(x.std() - 1.0) < 0.06
+
+
+def test_reusing_a_proposal_instance_is_reproducible():
+    from qablate import RandomCircuitProposal
+    prop = RandomCircuitProposal(0.8)
+
+    def run():
+        mh = MetropolisHastings(gauss, 2, 3, proposal=prop, rng=9)
+        mh.run_mcmc(np.zeros((3, 2)), 60)
+        return mh.get_chain()
+    assert np.array_equal(run(), run())

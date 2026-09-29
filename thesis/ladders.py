@@ -42,6 +42,7 @@ from qablate import (
     MetropolisHastings,
     NoiseSpec,
     RandomCircuitProposal,
+    Study,
     diagnostics,
 )
 from qablate.cosmology import Posterior, fit_statistics
@@ -70,53 +71,76 @@ def _init_positions(post: Posterior, nchains: int, rng) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------- #
+MCMC_CONFIG = {"mcmc": {}, "qmcmc-proposal": {"proposal": True},
+               "qmcmc-full": {"proposal": True, "acceptance": True}}
+
+
+def mcmc_study(post: Posterior, *, n_steps: int, n_chains: int, noise: NoiseSpec,
+               route: str = "counts", shots: int | None = None) -> Study:
+    """The MCMC ladder as a :class:`~qablate.Study` (components: proposal, acceptance).
+
+    The exact amplitude-encoded acceptance is declared equivalent to
+    Metropolis on an ideal backend with exact probabilities.
+    """
+    backend = AerBackend(noise)
+    scale = STEP_FRACTION * np.array([hi - lo for lo, hi in post.model.sample_box])
+    burn = max(50, int(0.1 * n_steps))
+
+    def run(parts, rng):
+        t0 = time.time()
+        mh = MetropolisHastings(post.log_prob, post.ndim, n_chains, rng=rng, **parts)
+        mh.run_mcmc(_init_positions(post, n_chains, rng), burn + n_steps)
+        return {"chain": mh.get_chain(discard=burn), "acceptance": mh.acceptance_fraction,
+                "detailed_balance": parts["acceptance"].preserves_detailed_balance,
+                "time_s": time.time() - t0, "burn": burn}
+
+    exact_ideal = noise.is_ideal and shots is None
+    return Study(
+        {"proposal": (lambda: GaussianProposal(scale),
+                      lambda: RandomCircuitProposal(scale, backend=backend, route=route,
+                                                    shots=shots)),
+         "acceptance": (MetropolisAcceptance,
+                        lambda: AmplitudeEncodedMetropolis(backend=backend, shots=shots))},
+        run, equivalent=[(MCMC_CONFIG["qmcmc-proposal"], MCMC_CONFIG["qmcmc-full"])]
+        if exact_ideal else [])
+
+
 def mcmc_ladder(post: Posterior, *, n_steps: int, n_chains: int = 6, seed: int = 42,
                 noise: NoiseSpec | None = None, route: str = "counts",
                 shots: int | None = None, rungs: Sequence[str] = MCMC_RUNGS) -> list[dict]:
     """Run the MCMC rungs and return one result row per rung."""
     noise = noise or NoiseSpec.from_level("none")
-    backend = AerBackend(noise)
-    scale = STEP_FRACTION * np.array([hi - lo for lo, hi in post.model.sample_box])
-    burn = max(50, int(0.1 * n_steps))
-    rows, chains = [], {}
     for rung in rungs:
         if rung not in MCMC_RUNGS:
             raise ValueError(f"unknown MCMC rung {rung!r}")
-        rng = np.random.default_rng(seed)
-        prop = (GaussianProposal(scale) if rung == "mcmc" else
-                RandomCircuitProposal(scale, backend=backend, route=route, shots=shots))
-        acc = (AmplitudeEncodedMetropolis(backend=backend, shots=shots)
-               if rung == "qmcmc-full" else MetropolisAcceptance())
-        t0 = time.time()
-        mh = MetropolisHastings(post.log_prob, post.ndim, n_chains, proposal=prop,
-                                acceptance=acc, rng=rng)
-        mh.run_mcmc(_init_positions(post, n_chains, rng), burn + n_steps)
-        ch = mh.get_chain(discard=burn)
-        chains[rung] = ch
+    study = mcmc_study(post, n_steps=n_steps, n_chains=n_chains, noise=noise, route=route,
+                       shots=shots)
+    runs = study.run([MCMC_CONFIG[r] for r in rungs], seed=seed)
+    study.check_equivalences(runs, keys=["chain"], strict=True)
+    rows = []
+    for rung, run in zip(rungs, runs, strict=True):
+        out = run.outputs
+        ch = out["chain"]
         flat = ch.reshape(-1, post.ndim)
         per_chain = np.swapaxes(ch, 0, 1)
-        fs_est = post.chi2(flat.mean(axis=0))
         fs = fit_statistics(post, flat.mean(axis=0))
         row = _base(post, noise, family="mcmc", rung=rung,
-                    components={"mcmc": "", "qmcmc-proposal": "proposal",
-                                "qmcmc-full": "proposal+acceptance"}[rung],
-                    seed=seed, route="" if rung == "mcmc" else route, backend=backend.name,
-                    shots=shots, n_steps=n_steps, n_chains=n_chains, burn=burn,
-                    acceptance=float(mh.acceptance_fraction.mean()),
-                    detailed_balance=bool(acc.preserves_detailed_balance),
+                    components="+".join(n for n, q in run.config.items() if q),
+                    seed=seed, route="" if rung == "mcmc" else route,
+                    backend=f"aer:{noise.label}", shots=shots, n_steps=n_steps,
+                    n_chains=n_chains, burn=out["burn"],
+                    acceptance=float(np.mean(out["acceptance"])),
+                    detailed_balance=bool(out["detailed_balance"]),
                     rhat_max=float(np.max(diagnostics.rhat(per_chain))),
                     ess_min=float(np.min(diagnostics.ess(per_chain))),
                     corr_01=float(np.corrcoef(flat[:, 0], flat[:, 1])[0, 1]),
-                    chi2_estimate=fs_est, chi2_map=fs["chi2"], chi2_red=fs["chi2_red"],
-                    AIC=fs["AIC"], BIC=fs["BIC"], time_s=time.time() - t0)
+                    chi2_estimate=post.chi2(flat.mean(axis=0)), chi2_map=fs["chi2"],
+                    chi2_red=fs["chi2_red"], AIC=fs["AIC"], BIC=fs["BIC"],
+                    time_s=out["time_s"])
         row["converged"] = bool(row["rhat_max"] < diagnostics.RHAT_THRESHOLD
                                 and row["ess_min"] >= diagnostics.ESS_MIN)
         _moments(row, post.model.param_names, flat.mean(axis=0), flat.std(axis=0))
         rows.append(row)
-    if {"qmcmc-proposal", "qmcmc-full"} <= set(chains) and noise.is_ideal and shots is None:
-        if not np.array_equal(chains["qmcmc-proposal"], chains["qmcmc-full"]):
-            raise AssertionError("plumbing check failed: exact amplitude-encoded acceptance "
-                                 "differs from Metropolis on an ideal backend")
     return rows
 
 
@@ -138,36 +162,49 @@ def prefit_window(post: Posterior, grid_bits: int, seed: int, sigma_mult: float 
     return grid, outside
 
 
+VI_CONFIG = {"vi-cobyla-exact": {}, "vi-cobyla-shots": {"sampling": True},
+             "vi-pshift-shots": {"sampling": True, "training": True}}
+
+
 def vi_ladder(post: Posterior, *, grid_bits: int, max_iter: int, n_samples: int = 4096,
               seed: int = 42, noise: NoiseSpec | None = None, n_layers: int = 3,
               rungs: Sequence[str] = VI_RUNGS) -> list[dict]:
-    """Run the Born-machine VI rungs on one shared grid."""
+    """Run the Born-machine VI rungs on one shared grid.
+
+    Components: ``sampling`` (classical draws from the exact Q, or circuit
+    measurements) and ``training`` (COBYLA, or parameter-shift gradients).
+    """
     noise = noise or NoiseSpec.from_level("none")
     backend = AerBackend(noise)
-    grid, outside = prefit_window(post, grid_bits, seed)
-    p = grid.target(post.log_prob)
-    rows = []
     for rung in rungs:
         if rung not in VI_RUNGS:
             raise ValueError(f"unknown VI rung {rung!r}")
-        rng = np.random.default_rng(seed + 1)
+    grid, outside = prefit_window(post, grid_bits, seed)
+    p = grid.target(post.log_prob)
+
+    def run(parts, rng):
         t0 = time.time()
-        opt = "parameter-shift" if rung == "vi-pshift-shots" else "cobyla"
-        vi = BornMachineVI(grid, n_layers=n_layers, optimizer=opt, backend=backend)
+        vi = BornMachineVI(grid, n_layers=n_layers, optimizer=parts["training"], backend=backend)
         res = vi.fit(p, max_iter, rng)
-        samples = vi.sample(res, n_samples, rng,
-                            shots_backend=None if rung == "vi-cobyla-exact" else backend)
+        samples = vi.sample(res, n_samples, rng, shots_backend=parts["sampling"])
+        return {"result": res, "samples": samples, "time_s": time.time() - t0}
+
+    study = Study({"sampling": (lambda: None, lambda: backend),
+                   "training": (lambda: "cobyla", lambda: "parameter-shift")}, run)
+    runs = study.run([VI_CONFIG[r] for r in rungs], seed=seed + 1)
+    rows = []
+    for rung, run_ in zip(rungs, runs, strict=True):
+        res, samples = run_.outputs["result"], run_.outputs["samples"]
         mean, std = samples.mean(axis=0), samples.std(axis=0)
         fs = fit_statistics(post, mean)
         row = _base(post, noise, family="vi", rung=rung,
-                    components={"vi-cobyla-exact": "", "vi-cobyla-shots": "sampling",
-                                "vi-pshift-shots": "sampling+training"}[rung],
+                    components="+".join(n for n, q in run_.config.items() if q),
                     seed=seed, backend=backend.name, grid=grid_bits, shots=n_samples,
                     max_iter=max_iter, kl=res.kl, grid_mass_outside=outside,
                     corr_01=float(res.correlation[0, 1]),
                     circuit_evaluations=res.circuit_evaluations,
                     chi2_estimate=post.chi2(mean), chi2_map=fs["chi2"], chi2_red=fs["chi2_red"],
-                    AIC=fs["AIC"], BIC=fs["BIC"], time_s=time.time() - t0)
+                    AIC=fs["AIC"], BIC=fs["BIC"], time_s=run_.outputs["time_s"])
         _moments(row, post.model.param_names, mean, std)
         rows.append(row)
     return rows

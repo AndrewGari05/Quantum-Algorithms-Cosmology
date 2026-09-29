@@ -54,6 +54,13 @@ def test_ideal_components_sample_the_target(case, seed):
     _check(mh, 2500)
 
 
+def test_noisy_circuit_proposal_samples_the_target_quick():
+    """Always-on noisy case (exact probabilities under readout noise)."""
+    mh = MetropolisHastings(gauss, 2, 6, proposal=RandomCircuitProposal(
+        0.9, backend=AerBackend("readout")), rng=13)
+    _check(mh, 2000)
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("level", ["readout", "full"])
 def test_noisy_circuit_proposal_still_samples_the_target(level):

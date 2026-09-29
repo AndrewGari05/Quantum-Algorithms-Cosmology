@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from scipy import stats  # noqa: E402
 
-from qablate import MetropolisHastings, RandomCircuitProposal  # noqa: E402
+from qablate import MetropolisHastings, RandomCircuitProposal, diagnostics  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BLUE, ORANGE, INK, MUTED = "#2a78d6", "#eb6834", "#1f1f1e", "#6b6a64"
@@ -52,14 +52,16 @@ def main():
     fig, axes = plt.subplots(1, 2, figsize=(9, 3.4), sharey=True)
     x = np.linspace(-4, 4, 400)
     for ax, (label, ch), color in zip(axes, chains.items(), (ORANGE, BLUE), strict=True):
-        s = ch[:, :, 0].ravel()
-        p = stats.kstest(ch[::50, :, 0].ravel(), "norm").pvalue
+        s = ch[:, :, 1].ravel()
+        ess = diagnostics.ess(np.swapaxes(ch, 0, 1))[1]
+        thin = int(np.ceil(s.size / ess))                 # ~independent draws
+        p = stats.kstest(ch[::thin, :, 1].ravel(), "norm").pvalue
         ax.hist(s, bins=60, range=(-4, 4), density=True, color=color, alpha=0.85,
                 edgecolor="white", linewidth=0.5)
         ax.plot(x, stats.norm.pdf(x), color=INK, lw=2, label="target N(0, 1)")
         ax.axvline(s.mean(), color=INK, lw=1, ls="--")
-        ax.set_title(f"{label}\nmean = {s.mean():+.3f},  KS p = {p:.2g}", fontsize=10, color=INK)
-        ax.set_xlabel(r"$x_0$", color=MUTED)
+        ax.set_title(f"{label}\nmean = {s.mean():+.3f},  KS p = {p:.3g}", fontsize=10, color=INK)
+        ax.set_xlabel(r"$x_1$", color=MUTED)
         for sp in ("top", "right"):
             ax.spines[sp].set_visible(False)
     axes[0].set_ylabel("density", color=MUTED)

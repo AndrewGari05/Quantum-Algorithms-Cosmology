@@ -99,6 +99,12 @@ class RandomCircuitProposal(Proposal):
         self._circuit = None
         self._queue: list[np.ndarray] = []
 
+    def reset(self) -> None:
+        """Forget the calibration and queued increments (called by the sampler)."""
+        self.ndim = None
+        self.rms = None
+        self._queue = []
+
     def _raw(self, n: int, rng) -> np.ndarray:
         phis = rng.uniform(0.0, 2.0 * np.pi, size=(n, self._circuit.num_parameters))
         if self.route == "statevector":

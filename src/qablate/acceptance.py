@@ -60,7 +60,8 @@ class AmplitudeEncodedMetropolis(Acceptance):
     breaks detailed balance: every candidate is accepted with probability at
     least ``p``. ``readout_mitigation=True`` inverts the readout confusion
     matrix of the measured qubit; that restores detailed balance only when
-    readout is the sole noise source.
+    readout is the sole noise source (with ``shots``, the mitigated estimate
+    is clipped to [0, 1] and is then no longer exactly unbiased).
 
     Args:
         backend: Where the one-qubit circuits run; ideal Aer by default.

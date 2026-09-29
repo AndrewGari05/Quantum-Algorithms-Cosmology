@@ -66,3 +66,63 @@ def test_best_fit_not_worse_than_multistart(name, dataset):
                                                          "fatol": 1e-10})
         best = min(best, r.fun)
     assert st["chi2"] <= best + 1e-6
+
+
+# --------------------------------------------------------------------------- #
+# Tier (c): statistical agreement with the post-errata thesis code
+# (tests/golden/errata_statistics.npz, made by tests/reference/make_golden_v1.py
+# on branch thesis-errata): LCDM on CC+BAO, seed 42.
+# --------------------------------------------------------------------------- #
+from qablate import (  # noqa: E402
+    BornMachineVI,
+    GaussianProposal,
+    MetropolisHastings,
+    RandomCircuitProposal,
+    diagnostics,
+)
+
+
+@pytest.fixture(scope="module")
+def stats_ref():
+    return np.load(os.path.join(GOLDEN, "errata_statistics.npz"))
+
+
+@pytest.mark.parametrize("rung", ["mcmc", "qmcmc"])
+def test_chains_agree_with_errata_code_within_mc_error(stats_ref, rung):
+    post = Posterior("lcdm", "CC+BAO")
+    box = np.array(post.model.sample_box)
+    scale = 0.06 * (box[:, 1] - box[:, 0])
+    prop = GaussianProposal(scale) if rung == "mcmc" else RandomCircuitProposal(scale)
+    rng = np.random.default_rng(42)
+    mh = MetropolisHastings(post.log_prob, 2, 6, proposal=prop, rng=rng)
+    mh.run_mcmc(box[:, 0] + rng.random((6, 2)) * (box[:, 1] - box[:, 0]), 4400)
+    ch = np.swapaxes(mh.get_chain(discard=400), 0, 1)
+    mean, sd = ch.reshape(-1, 2).mean(0), ch.reshape(-1, 2).std(0)
+    ess = diagnostics.ess(ch)
+    ref_mean, ref_sd, ref_ess = stats_ref[f"{rung}/summary"]
+    se_mean = np.sqrt(sd ** 2 / ess + ref_sd ** 2 / ref_ess)
+    se_sd = np.sqrt(sd ** 2 / (2 * ess) + ref_sd ** 2 / (2 * ref_ess))
+    assert np.all(np.abs(mean - ref_mean) < 4 * se_mean), (mean, ref_mean, se_mean)
+    assert np.all(np.abs(sd - ref_sd) < 4 * se_sd), (sd, ref_sd, se_sd)
+
+
+def test_classical_vi_agrees_with_errata_code(stats_ref):
+    post = Posterior("lcdm", "CC+BAO")
+    grid = Grid(stats_ref["vi/window"], 3)
+    res = BornMachineVI(grid, optimizer="cobyla").fit(grid.target(post.log_prob), 20,
+                                                      np.random.default_rng(43))
+    ref_mean, ref_sd = stats_ref["vi/summary"]
+    n = int(stats_ref["vi/n_samples"][0])
+    assert res.kl == pytest.approx(float(stats_ref["vi/kl"][0]), abs=1e-6)
+    assert np.all(np.abs(res.mean - ref_mean) < 4 * ref_sd / np.sqrt(n))
+    assert np.all(np.abs(res.std - ref_sd) < 4 * ref_sd / np.sqrt(2 * n))
+
+
+def test_continuous_ga_reaches_the_errata_optimum(stats_ref):
+    from qablate.experimental import GAConfig, GeneticAlgorithm
+    post = Posterior("lcdm", "CC+BAO")
+    r = GeneticAlgorithm(post.log_prob, post.model.bounds, GAConfig(pop_size=60, n_generations=30),
+                         init_box=post.model.sample_box, rng=42).run()
+    assert post.chi2(r.theta_best) < float(stats_ref["ga/chi2_best"][0]) + 0.05
+    assert fit_statistics(post, r.theta_best)["chi2"] == pytest.approx(
+        float(stats_ref["ga/chi2_map"][0]), abs=1e-5)

@@ -222,4 +222,4 @@ class IBMRuntimeBackend(Backend):
         if circuit.num_parameters:
             return np.array([counts_to_frequencies(data.get_counts(k), n)
                              for k in range(len(pv))])
-        return counts_to_frequencies(data.get_counts(), n)[None, :]
+        return np.repeat(counts_to_frequencies(data.get_counts(), n)[None, :], len(pv), axis=0)

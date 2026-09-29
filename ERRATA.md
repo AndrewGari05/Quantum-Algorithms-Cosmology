@@ -4,9 +4,11 @@ This file lists every defect found in the adversarial review of 27 September
 2026 that affects the thesis code, what was done about it, and whether it
 changes numbers that were already computed.
 
-* **Frozen code of the running campaign:** tag `v0.8.1-thesis` (= `c2f2004`).
-* **Defense numbers:** reproduced only from tag `v0.8.2-thesis-defense`
-  (created when the corrected numbers are final).
+* **Legacy baseline:** tag `v0.8.1-thesis` (= `c2f2004`), the code of the
+  running campaign. It is not the source of the defense numbers.
+* **Defense numbers:** reproduced only from tag `v0.8.2-thesis-defense`, created
+  on this branch when the corrected numbers are final and approved. Until
+  that tag exists, no number in this branch is final.
 * Each fix is one commit on branch `thesis-errata`. Commits that change
   results say so in their message (`Changes-results: <ID>, <outputs>`) and
   regenerate `tests/reference/` in the same commit; every other commit
@@ -25,14 +27,14 @@ changes numbers that were already computed.
 | QPU-2 | Same drift in the hardware engine, calibrated on a single 64-draw block (up to 0.3σ in a dry run). | Same fix. | QMCMC-QPU runs only. | — |
 | HPC-3 | FakeBrisbane: circuits were transpiled against a bare simulator, so two-qubit gates landed on logical pairs (0,1), (1,2)… that carry no ECR error in the device noise model. The "real backend" column had no two-qubit noise. | Place the circuit on a connected path of physical qubits and route it against the device target; Aer `save_*` instructions are re-attached to the final physical positions so outputs stay in logical order; readout matrices are taken from the physical qubits. | Every `fake_brisbane` cell (samplers quantum rungs, QGA, noisy QPU twin). Example: 6-qubit ring ansatz, total-variation distance to the ideal output 0.009 → 0.185. | see §4 |
 | CO-3/4 | `fit_statistics` discarded a best fit on the prior boundary (strict prior test) and L-BFGS-B stopped early on badly scaled parameters. | Box-normalized L-BFGS-B + bounded Nelder-Mead polish; boundary optima moved 1e-9 of the box width inside. Never worse than the start. | `chi2`, `chi2_red`, `AIC`, `BIC` (mostly CPL and GEDE) and the model-selection table. | see §4 |
+| HPC-2 | `--noise-readout-p`, `--noise-gate-p1`, `--noise-gate-p2` were parsed by the runner and never forwarded, so every child ran with the defaults. | Forwarded when not default. | Every run launched through the runner with non-default channel strengths (for example a readout-p curve: all its points were the default p = 0.03). | identical runs → the requested p |
+| QPU-5 | The noisy QPU twin fixed `seed_simulator`, so repeated jobs returned identical counts (committed together with HPC-3 in errata(4)). | One seed per job, derived from `--seed` and a job counter. | Noisy QPU-twin runs (`qpu_noisy_simulation.py`) only. | repeated jobs no longer replay the same shot noise |
 
 ## 2. Fixes that do not change results
 
 | ID | Defect | Fix |
 |---|---|---|
 | HPC-1 | A model that failed inside `--sweep-all` exited 0, so the runner recorded the task as OK. | Children exit 3; the runner also checks the log for `FAILED —`. |
-| HPC-2 | `--noise-readout-p`, `--noise-gate-p1`, `--noise-gate-p2` were parsed by the runner and never forwarded. | Forwarded when not default. |
-| QPU-5 | The noisy QPU twin fixed `seed_simulator`, so repeated jobs returned identical counts. | One seed per job, derived from `--seed` and a job counter. |
 | QPU-6 | Analysis tools read both the per-model and the per-task cumulative CSV: every task counted twice. | Shared reader `campaign_io.py`. |
 | HPC-8 / QPU-10 | Task folders without grid/noise tags were skipped silently. | Tags optional; grid falls back to the `nqpp` column, noise to `none`. |
 | QPU-7 | Seed comparison divided by per-seed spreads instead of a paired test (a t = 20.8 offset was reported as 0.54 "sigmas"). | Paired t-test with p-value. |
@@ -68,9 +70,90 @@ changes numbers that were already computed.
 * **QPU-4.** χ²/AIC/BIC reported for hardware runs are the classical MAP
   polish, identical whatever the hardware returned; quote them only as such.
 
-## 4. Before/after tables
+## 4. Re-runs and before/after tables
 
-To be filled from the reference re-runs (see `errata_tools.py`).
+### 4.1 What has to be re-run (on the workstation, after the running campaign ends)
+
+Use the settings of the original campaign (read them from the `PLAN` block at
+the top of its log; below, the values of `hpc_20260907_130425`). Every
+command writes a new, self-contained campaign folder that includes the
+classical rung it is compared with (`C-MCMC`, `CGA`), so the corrected
+comparison never pairs rows across campaigns.
+
+```bash
+COMMON="--dataset CC+BAO+Pantheon --steps 20000 --qvmc-iter 15000 --chains 8 --shots 4096 --seed 42"
+
+# QM-1: QMCMC rungs, ideal cells nqpp 3..9 (amplitude route and the counts control)
+python cosmo_hpc_runner.py --only-samplers $COMMON --nqpp-sweep 3 9 --noise-sweep none \
+    --rungs C-MCMC QMCMC50 QMCMC100 --outdir results/errata_qm1_ideal
+python cosmo_hpc_runner.py --only-samplers $COMMON --nqpp-sweep 3 9 --noise-sweep none \
+    --proposal-route counts --rungs C-MCMC QMCMC50 QMCMC100 --outdir results/errata_qm1_counts
+
+# QM-1: QMCMC rungs, noisy cells nqpp 3..5 (readout and full; FakeBrisbane below)
+python cosmo_hpc_runner.py --only-samplers $COMMON --nqpp-sweep 3 5 --noise-sweep readout,full \
+    --rungs C-MCMC QMCMC50 QMCMC100 --outdir results/errata_qm1_noisy
+
+# HPC-3 (+QM-1): every FakeBrisbane cell, all sampler rungs and the genetic ladder
+python cosmo_hpc_runner.py --only-samplers $COMMON --nqpp-sweep 3 5 --noise FakeBrisbane \
+    --outdir results/errata_fakebrisbane
+python cosmo_hpc_runner.py --only-genetic --dataset CC+BAO+Pantheon --seed 42 \
+    --nbits-sweep 4 6 --noise FakeBrisbane --outdir results/errata_fakebrisbane_genetic
+```
+
+The QMCMC rows do not depend on `nqpp` (the proposal uses max(2, d) qubits),
+so the `nqpp` sweeps above only restore one row per reported cell; running a
+single `nqpp` is enough if only the fidelity table is needed.
+
+No re-run is needed for CO-3/4 (`errata_tools.py refit <campaign>`), GA-1
+(`errata_tools.py grid-floor ...`) or QM-3 (`errata_tools.py mc-error <campaign>`);
+they recompute from the stored CSVs.
+
+### 4.2 QM-1: QMCMC 50 % minus Classical MCMC, before and after
+
+CC+BAO+Pantheon, seed 42, 20 000 steps x 8 chains, ideal simulator. Shift of
+the QMCMC 50 % mean from the Classical MCMC mean, in units of the Classical
+MCMC sigma. `MC SE` is the Monte Carlo standard error of that shift,
+sqrt(1/ESS_C + 1/ESS_Q); shifts well below 3 MC SE are consistent with zero.
+Script: `tests/reference/before_after_qm1.py`.
+
+| model | route | parameter | before (σ) | after (σ) | MC SE |
+|---|---|---|---|---|---|
+| lcdm | amplitude | Om | -0.005 | +0.015 | 0.017 |
+| lcdm | amplitude | H0 | +0.010 | -0.012 | 0.017 |
+| lcdm | counts | Om | +0.074 | +0.023 | 0.017 |
+| lcdm | counts | H0 | -0.049 | -0.028 | 0.017 |
+| pede | amplitude | Om | +0.003 | +0.025 | 0.017 |
+| pede | amplitude | H0 | +0.007 | -0.019 | 0.017 |
+| pede | counts | Om | +0.088 | +0.035 | 0.017 |
+| pede | counts | H0 | -0.060 | -0.035 | 0.017 |
+| wcdm | amplitude | Om | -0.013 | -0.021 | 0.029 |
+| wcdm | amplitude | H0 | +0.033 | +0.022 | 0.029 |
+| wcdm | amplitude | w | -0.007 | +0.006 | 0.029 |
+| wcdm | counts | Om | -0.016 | -0.028 | 0.027 |
+| wcdm | counts | H0 | +0.077 | +0.034 | 0.027 |
+| wcdm | counts | w | -0.030 | +0.007 | 0.027 |
+| gede | amplitude | Om | -0.020 | -0.020 | 0.027 |
+| gede | amplitude | H0 | +0.022 | +0.023 | 0.027 |
+| gede | amplitude | Delta | -0.005 | -0.005 | 0.027 |
+| gede | counts | Om | -0.029 | -0.011 | 0.025 |
+| gede | counts | H0 | +0.103 | +0.026 | 0.025 |
+| gede | counts | Delta | +0.042 | +0.007 | 0.025 |
+| cpl | amplitude | Om | -0.206 | -0.079 | 0.056 |
+| cpl | amplitude | H0 | +0.030 | +0.033 | 0.056 |
+| cpl | amplitude | w0 | -0.014 | +0.035 | 0.056 |
+| cpl | amplitude | wa | +0.215 | +0.052 | 0.056 |
+| cpl | counts | Om | -0.159 | +0.029 | 0.056 |
+| cpl | counts | H0 | +0.083 | +0.011 | 0.056 |
+| cpl | counts | w0 | +0.040 | -0.011 | 0.056 |
+| cpl | counts | wa | +0.106 | -0.023 | 0.056 |
+
+Reading: before the fix the counts-route shifts reach 4-6 MC SE for ΛCDM,
+PEDE and GEDE (H0 +0.10σ for GEDE) and the CPL amplitude-route shifts reach
+about 4 MC SE (Ωm −0.21σ, wa +0.22σ), in line with the drift predicted from
+the calibration offsets. After the fix every shift is within about 2 MC SE of
+zero. The ideal amplitude-route cells of ΛCDM, PEDE, wCDM and GEDE were
+already within Monte Carlo error before the fix. (MC SE treats the two chains
+as independent; they share the seed, so it is approximate.)
 
 ## 5. Terminology
 

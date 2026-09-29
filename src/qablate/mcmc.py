@@ -84,9 +84,10 @@ class MetropolisHastings:
         self._lnp = np.empty((0, self.nchains))
         self._accepted = np.zeros(self.nchains, dtype=int)
         self._state: State | None = None
-        if not self.proposal.symmetric and not getattr(
-                self.proposal, "returns_hastings_term", True):
-            raise ValueError("an asymmetric proposal must return its Hastings term")
+        # A proposal with internal state (calibration, queued increments)
+        # starts fresh in every sampler, so a run depends only on `rng`.
+        if hasattr(self.proposal, "reset"):
+            self.proposal.reset()
         if not self.acceptance.preserves_detailed_balance:
             warnings.warn(
                 f"{type(self.acceptance).__name__} does not satisfy detailed "
