@@ -384,3 +384,28 @@ def test_rungs_qmcmc_only_rerun_is_not_clamped_by_the_qvmc_grid(tmp_path):
     out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300).stdout
     lines = [l for l in out.splitlines() if "--sweep-all" in l]
     assert len(lines) >= 2 and all("--nqpp 3" in l for l in lines)
+
+
+# --------------------------------------------------------------------------- #
+# QPU-12: the hardware QVMC must run the simulator's circuit (ring closure,
+# three layers) from the simulator's initialization.
+# --------------------------------------------------------------------------- #
+def test_qpu12_hardware_ansatz_is_the_simulator_ansatz():
+    import contextlib
+    import io
+
+    from qiskit.quantum_info import Operator
+    with contextlib.redirect_stdout(io.StringIO()):
+        import cosmo_core as cc
+        import cosmo_modular_quantum as cmq
+        import qpu_cosmo_samplers as qpu
+    post = cc.Posterior(cc.MODELS["lcdm"], dataset="CC+BAO")
+    sim = cmq.QVMCModular(post, {}, n_qubits_per_param=3)
+    qc_sim, n_p = sim._build_ansatz()
+    qc_hw = qpu.build_ansatz(6, __import__("inspect").signature(qpu.QVMC_QPU).parameters["n_layers"].default)
+    assert qc_hw.num_parameters == n_p
+    vals = __import__("numpy").random.default_rng(0).uniform(0, 6.3, n_p)
+    a = qc_sim.remove_final_measurements(inplace=False).assign_parameters(vals)
+    b = qc_hw.remove_final_measurements(inplace=False).assign_parameters(vals)
+    assert Operator(a).equiv(Operator(b))
+    assert qpu.build_parser().parse_args([]).layers == 3

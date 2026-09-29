@@ -578,7 +578,9 @@ def build_proposal_circuit(n_qubits: int, n_layers: int = 3) -> QuantumCircuit:
 
 
 def build_ansatz(n_qubits: int, n_layers: int = 3) -> QuantumCircuit:
-    """Hardware-efficient ansatz (RY·RZ + chained CX) WITH measurement.
+    """Hardware-efficient ansatz (RY·RZ + CX ring) WITH measurement.
+
+    Identical to the simulator ansatz (``QVMCModular._build_ansatz``).
 
     Args:
         n_qubits: ancho del circuito en qubits.
@@ -598,6 +600,9 @@ def build_ansatz(n_qubits: int, n_layers: int = 3) -> QuantumCircuit:
             qc.rz(phi[idx], q); idx += 1
         for q in range(n_qubits - 1):
             qc.cx(q, q + 1)
+        # QPU-12: ring closure, as in cosmo_modular_quantum.QVMCModular._build_ansatz
+        # (the hardware ansatz must be the simulator ansatz for the timing comparison)
+        qc.cx(n_qubits - 1, 0)
     for q in range(n_qubits):
         qc.ry(phi[idx], q); idx += 1
     qc.measure_all()
@@ -1002,7 +1007,7 @@ class QVMC_QPU:
     """
 
     def __init__(self, post: Posterior, conn: QPUConnection,
-                 n_qubits_per_param: int = 3, n_layers: int = 2,
+                 n_qubits_per_param: int = 3, n_layers: int = 3,
                  a0: float = 0.15, c0: float = 0.1, log_every: int = 500,
                  logger: Optional[logging.Logger] = None):
         """QVMC ejecutado contra la QPU, entrenado con SPSA.
@@ -1050,7 +1055,7 @@ class QVMC_QPU:
         Returns:
             np.ndarray
         """
-        phi = RNG.uniform(0, 2 * np.pi, self.n_phi)
+        phi = 0.1 * RNG.standard_normal(self.n_phi)   # QPU-12: simulator initialization
         t0 = time.time()
         for k in range(n_iters):
             ak, ck = spsa_gains(k, self.a0, self.c0)
@@ -1246,7 +1251,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help='QMCMC proposals per hardware job')
     p.add_argument('--nqpp', type=int, default=3,
                    help='Qubits per physical parameter (QVMC grid)')
-    p.add_argument('--layers', type=int, default=2,
+    p.add_argument('--layers', type=int, default=3,   # QPU-12: thesis value
                    help='Ansatz / proposal-circuit layers')
     p.add_argument('--shots', type=int, default=4096,
                    help='Shots per circuit (KL estimation and sampling)')
