@@ -108,9 +108,9 @@ def test_legacy_reader_no_double_counting_and_optional_tags(tmp_path):
     assert sorted((r["_noi"], r["_g"]) for r in rows) == [("none", 5), ("none", 5), ("readout", 3)]
 
 
-def test_legacy_refit_uses_legacy_dataset_names(tmp_path):
+def test_legacy_refit_uses_legacy_dataset_names(tmp_path, monkeypatch):
     _legacy_task(tmp_path, "samplers_lcdm", [_lrow("Classical MCMC", 0.2574, dataset="CC")])
-    os.chdir(tmp_path)
+    monkeypatch.chdir(tmp_path)
     out = errata_tools.cmd_refit([str(tmp_path)], quiet=True)
     assert out[0]["dataset"] == "CC+BAO"
     assert abs(out[0]["chi2_new"] - 27.469109) < 1e-4
