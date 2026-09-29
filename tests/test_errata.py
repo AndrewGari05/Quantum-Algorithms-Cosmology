@@ -375,3 +375,12 @@ def test_refit_tool_reads_campaign(tmp_path):
     os.chdir(tmp_path)
     out = et.cmd_refit([str(tmp_path)], quiet=True)
     assert len(out) == 1 and abs(out[0]["chi2_new"] - 27.469109) < 1e-4
+
+
+def test_rungs_qmcmc_only_rerun_is_not_clamped_by_the_qvmc_grid(tmp_path):
+    cmd = [sys.executable, os.path.join(ROOT, "cosmo_hpc_runner.py"), "--dry-run",
+           "--only-samplers", "--models", "cpl", "--nqpp", "3", "--noise-sweep", "none,readout",
+           "--rungs", "QMCMC50", "QMCMC100", "--outdir", str(tmp_path / "dry")]
+    out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300).stdout
+    lines = [l for l in out.splitlines() if "--sweep-all" in l]
+    assert len(lines) >= 2 and all("--nqpp 3" in l for l in lines)

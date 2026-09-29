@@ -750,11 +750,18 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
             d = MODEL_DIM[m]
 
             # ---- Samplers tasks (QMCMC + QVMC), one per nqpp value ----
+            # [E-RUNGS] A QMCMC-only re-run builds no QVMC grid: its circuits
+            # use max(2, d) qubits whatever nqpp is, so the grid ceiling must
+            # not clamp nqpp (that would relabel the rows' grid column).
+            _rungs = getattr(args, 'rungs', None) or []
+            mcmc_only = bool(_rungs) and not any(
+                t in _rungs for t in ('C-VI', 'QVMC33', 'QVMC67', 'QVMC100'))
+            s_cap = 64 if mcmc_only else q_cap
             if not args.only_genetic:
                 for nqpp in grid_values_for_model(
-                        args.nqpp, args.nqpp_sweep, d, q_cap, strict,
+                        args.nqpp, args.nqpp_sweep, d, s_cap, strict,
                         notices, 'nqpp', m):
-                    total_q = nqpp * d
+                    total_q = max(2, d) if mcmc_only else nqpp * d
                     # visible tag if sweeping or if the clamp changed the value
                     tag = (f"nqpp{nqpp}"
                            if (sweeping_nqpp or nqpp != args.nqpp) else "")
@@ -774,7 +781,7 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
                             # raw --max-qubits (which may be unset): correct
                             # whether the cap came from RAM-auto-detection or
                             # from an explicit user override.
-                            '--max-qubits', str(q_cap),
+                            '--max-qubits', str(max(q_cap, nqpp * d) if mcmc_only else q_cap),
                             '--outdir', outdir] + common_data + noise_argv \
                         + route_argv \
                         + (['--rungs'] + list(args.rungs)
