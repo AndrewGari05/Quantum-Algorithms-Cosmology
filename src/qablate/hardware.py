@@ -52,9 +52,11 @@ class JobTiming:
 
     ``wall_s`` is measured locally from submission to result. On the device,
     ``queue_s`` (created -> running), ``execution_s`` (execution span on the
-    QPU) and ``quantum_s`` (billed usage) come from IBM's job metadata; on
-    simulators ``execution_s`` is the simulator's own run time and the other
-    two are 0.
+    QPU) and ``quantum_s`` (billed usage) come from IBM's job metadata, whose
+    retrieval takes ``metadata_s``; ``quantum_estimated`` is True when the
+    billed time was not yet final and IBM's estimate (or the execution span,
+    whichever is larger) was charged instead. On simulators ``execution_s``
+    is the simulator's own run time and the device-only fields are 0.
     """
 
     location: str
@@ -69,6 +71,8 @@ class JobTiming:
     queue_s: float
     execution_s: float
     quantum_s: float
+    metadata_s: float = 0.0
+    quantum_estimated: bool = False
     job_id: str = ""
     label: str = ""
 
@@ -92,6 +96,23 @@ def _fingerprint(circuit) -> str:
     return h.hexdigest()[:16]
 
 
+def _drop_idle_delays(isa):
+    """Remove the delays that scheduling puts on qubits the circuit never uses.
+
+    Padding covers every device qubit; on the unused ones it only makes the
+    simulators carry (and apply relaxation to) the whole device.
+    """
+    used = {q for ins in isa.data if ins.operation.name not in ("delay", "barrier")
+            for q in ins.qubits}
+    out = isa.copy_empty_like()
+    for ins in isa.data:
+        if ins.operation.name == "delay" and not set(ins.qubits) & used:
+            continue
+        out.append(ins)
+    out._op_start_times = None       # the schedule of the dropped delays no longer applies
+    return out
+
+
 class DeviceCompiler:
     """Transpile logical circuits once for a device and cache the ISA circuits.
 
@@ -102,6 +123,9 @@ class DeviceCompiler:
         device: A ``qiskit_ibm_runtime`` backend (real or fake).
         optimization_level: Preset pass-manager level.
         seed_transpiler: Seed of the layout and routing passes.
+
+    Circuits are scheduled (ALAP) and idle periods padded with delays, so the
+    noisy twin applies the same idle (T1/T2) noise the device experiences.
     """
 
     def __init__(self, device, optimization_level: int = 3, seed_transpiler: int = 0):
@@ -111,7 +135,12 @@ class DeviceCompiler:
         self.optimization_level = optimization_level
         self.seed_transpiler = seed_transpiler
         self._pm = generate_preset_pass_manager(optimization_level=optimization_level,
-                                                backend=device, seed_transpiler=seed_transpiler)
+                                                backend=device, seed_transpiler=seed_transpiler,
+                                                scheduling_method="alap")
+        try:
+            self.calibration_date = str(device.properties().last_update_date)
+        except Exception:  # noqa: BLE001  (not every backend exposes properties)
+            self.calibration_date = ""
         self._cache: dict[str, tuple] = {}
         self._keys: dict[int, str] = {}
         self._alive: list = []
@@ -135,7 +164,7 @@ class DeviceCompiler:
         t0 = time.perf_counter()
         qc = circuit.remove_final_measurements(inplace=False)
         qc.measure_all()
-        isa = self._pm.run(qc)
+        isa = _drop_idle_delays(self._pm.run(qc))
         dt = time.perf_counter() - t0
         names = [p.name for p in circuit.parameters]
         cols = np.array([names.index(p.name) for p in isa.parameters], dtype=int)
@@ -152,11 +181,23 @@ class DeviceCompiler:
         for key, (isa, _, dt) in self._cache.items():
             out.append({"logical": key, "isa": _fingerprint(isa), "depth": isa.depth(),
                         "two_qubit_gates": self.two_qubit_gates(isa),
+                        "duration_us": self.duration_us(isa),
                         "physical_qubits": sorted({isa.find_bit(q).index for ins in isa.data
                                                    if ins.operation.name != "barrier"
                                                    for q in ins.qubits}),
                         "compile_s": dt})
         return out
+
+    def duration_us(self, isa) -> float:
+        """Scheduled duration of one shot in microseconds (0 if unknown)."""
+        try:
+            return round(float(isa.estimate_duration(self.device.target)) * 1e6, 3)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def compile_all(self, circuits) -> float:
+        """Compile ``circuits`` ahead of time; returns the seconds spent."""
+        return float(sum(self.compile(c)[2] for c in circuits))
 
     @staticmethod
     def two_qubit_gates(isa) -> int:
@@ -176,12 +217,20 @@ class DeviceBackend(Backend):
             billed quantum seconds reach this value.
         log: List that receives one :class:`JobTiming` per job (a new list by
             default, available as ``backend.log``).
+        seed: Seed of the simulator seeds (also for a fake device in local mode).
+
+    Unlike the other backends, a ``DeviceBackend`` never draws from the
+    caller's ``rng``: its simulator seeds come from its own ``seed``. The
+    caller's random stream (SPSA directions, proposal angles, genetic draws)
+    is therefore identical at every location whatever the measurement
+    outcomes are.
     """
 
     exact = False
 
     def __init__(self, compiler: DeviceCompiler, location: str, *, mode=None,
-                 max_quantum_seconds: float | None = None, log: list | None = None):
+                 max_quantum_seconds: float | None = None, log: list | None = None,
+                 seed: int | None = None):
         if location not in LOCATIONS:
             raise ValueError(f"location must be one of {LOCATIONS}")
         self.compiler = compiler
@@ -191,12 +240,20 @@ class DeviceBackend(Backend):
         self.max_quantum_seconds = max_quantum_seconds
         self.log: list[JobTiming] = log if log is not None else []
         self.label = ""                      # set by callers to tag jobs (e.g. 'spsa')
+        self._seeds = np.random.default_rng(seed)
+        self._local = location == "device" and getattr(compiler.device, "name", "").startswith("fake")
         if location == "device":
             import warnings
 
             from qiskit_ibm_runtime import SamplerV2
             with warnings.catch_warnings():       # deprecated from 0.50; the extra pins <0.51
                 warnings.simplefilter("ignore", DeprecationWarning)
+                if mode is None and self._local:
+                    # Local testing mode on the same simulator as the noisy twin
+                    # (the fake backend's own local noise model rejects qubits
+                    # whose stored T2 exceeds 2 T1 once delays are present).
+                    from qiskit_aer import AerSimulator
+                    mode = AerSimulator.from_backend(compiler.device)
                 self._sampler = SamplerV2(mode=mode if mode is not None else compiler.device)
             # Raw execution, like the simulators: no dynamical decoupling, no twirling.
             opts = self._sampler.options
@@ -207,6 +264,11 @@ class DeviceBackend(Backend):
             from qiskit_aer import AerSimulator
             self._sim = (AerSimulator() if location == "ideal"
                          else AerSimulator.from_backend(compiler.device))
+
+    def reseed(self, seed) -> None:
+        """Restart the simulator-seed stream (e.g. once per algorithm, so an
+        algorithm's results do not depend on which ones ran before it)."""
+        self._seeds = np.random.default_rng(seed)
 
     @property
     def quantum_seconds(self) -> float:
@@ -219,15 +281,16 @@ class DeviceBackend(Backend):
             raise ValueError("DeviceBackend only samples: pass shots >= 1")
         shots = int(shots)
         pv = _as_rows(parameter_values, circuit.num_parameters)
+        n_rows = len(pv)
+        if circuit.num_parameters == 0 and n_rows != 1:
+            raise ValueError("a circuit without parameters runs once: pass one row and "
+                             "ask for n * shots instead of n rows")
         isa, cols, compile_s = self.compiler.compile(circuit)
         pv_isa = pv[:, cols]
-        n_rows = len(pv)
-        queue_s = execution_s = quantum_s = 0.0
+        queue_s = execution_s = quantum_s = metadata_s = 0.0
+        estimated = False
         job_id = ""
-        # Drawn at every location (and ignored on the device) so the caller's
-        # random stream -- SPSA directions, proposal angles -- is identical in
-        # the ideal, noisy and device runs.
-        sim_seed = int(rng.integers(_SEED_MAX))
+        sim_seed = int(self._seeds.integers(_SEED_MAX))
         t0 = time.perf_counter()
         if self.location == "device":
             if (self.max_quantum_seconds is not None
@@ -236,36 +299,34 @@ class DeviceBackend(Backend):
                     f"{self.quantum_seconds:.1f} s of the {self.max_quantum_seconds:.1f} s "
                     "quantum budget used; no further device jobs are submitted")
             pub = (isa, pv_isa) if isa.num_parameters else (isa,)
+            if self._local:
+                self._sampler.options.simulator.seed_simulator = sim_seed
             job = self._sampler.run([pub], shots=shots)
             full = job.result()
             wall_s = time.perf_counter() - t0
             job_id = job.job_id()
-            queue_s, execution_s, quantum_s = _ibm_times(job, full)
+            t1 = time.perf_counter()
+            queue_s, execution_s, quantum_s, estimated = _ibm_times(job, full, local=self._local,
+                                                                   n_executions=n_rows * shots)
+            metadata_s = time.perf_counter() - t1
             data = full[0].data.meas
-            if memory:
-                rows = ([data.get_bitstrings(k) for k in range(n_rows)] if isa.num_parameters
-                        else [data.get_bitstrings()] * n_rows)
-            else:
-                rows = ([data.get_counts(k) for k in range(n_rows)] if isa.num_parameters
-                        else [data.get_counts()] * n_rows)
+            get = data.get_bitstrings if memory else data.get_counts
+            rows = [get(k) for k in range(n_rows)] if isa.num_parameters else [get()]
         else:
             binds = ([{p: list(pv_isa[:, i]) for i, p in enumerate(isa.parameters)}]
                      if isa.num_parameters else None)
-            nb = n_rows if isa.num_parameters else 1
             res = self._sim.run(isa, parameter_binds=binds, shots=shots, memory=memory,
                                 seed_simulator=sim_seed).result()
             wall_s = time.perf_counter() - t0
             execution_s = float(getattr(res, "time_taken", wall_s) or wall_s)
             get = res.get_memory if memory else res.get_counts
-            rows = [get(k) for k in range(nb)]
-            if nb == 1 and n_rows > 1:
-                rows = rows * n_rows
+            rows = [get(k) for k in range(n_rows)]
         self.log.append(JobTiming(
             location=self.location, circuit=self.compiler._keys[id(circuit)], n_qubits=circuit.num_qubits,
             depth=isa.depth(), two_qubit_gates=self.compiler.two_qubit_gates(isa),
             n_circuits=n_rows, shots=shots, compile_s=compile_s, wall_s=wall_s,
-            queue_s=queue_s, execution_s=execution_s, quantum_s=quantum_s, job_id=job_id,
-            label=self.label))
+            queue_s=queue_s, execution_s=execution_s, quantum_s=quantum_s,
+            metadata_s=metadata_s, quantum_estimated=estimated, job_id=job_id, label=self.label))
         return rows
 
     def probabilities(self, circuit, parameter_values, rng, shots=None) -> np.ndarray:
@@ -279,22 +340,63 @@ class DeviceBackend(Backend):
         return np.array([[int(b.replace(" ", ""), 2) for b in r] for r in rows])
 
 
-def _ibm_times(job, result) -> tuple[float, float, float]:
-    """(queue, execution span, billed quantum seconds) of a runtime job; 0 when unknown."""
-    queue = execution = quantum = 0.0
-    try:
-        m = job.metrics()
-        ts = m.get("timestamps", {})
-        if ts.get("created") and ts.get("running"):
-            from datetime import datetime
-            f = lambda s: datetime.fromisoformat(s.replace("Z", "+00:00"))  # noqa: E731
-            queue = (f(ts["running"]) - f(ts["created"])).total_seconds()
-        quantum = float(m.get("usage", {}).get("quantum_seconds", 0.0) or 0.0)
-    except Exception:  # noqa: BLE001  (metadata is best effort; never lose the result)
-        pass
+#: Conservative billed-time model used when IBM has not finalized a job's usage.
+PER_JOB_S = 2.0
+PER_SHOT_US = 250.0
+
+
+def conservative_quantum_seconds(n_executions: int) -> float:
+    """Pessimistic billed time of one job with ``n_executions`` = circuits x shots."""
+    return PER_JOB_S + n_executions * PER_SHOT_US * 1e-6
+
+
+def _ibm_times(job, result, *, local: bool = False, polls: int = 10, wait_s: float = 3.0,
+               n_executions: int = 0) -> tuple[float, float, float, bool]:
+    """(queue, execution span, billed quantum seconds, estimated?) of a runtime job.
+
+    IBM finalizes the billed time shortly after the result is available
+    (``usage.status == 'pending'`` until then), so it is polled (at most
+    ``polls * wait_s`` seconds per job). If it is still unknown, the largest
+    of IBM's usage estimate, the execution span and
+    :func:`conservative_quantum_seconds` is charged and flagged, so a budget
+    built on it stops early rather than late. Both the current
+    (``qpu_charge_time_seconds`` + ``status``) and the older
+    (``quantum_seconds``) usage schemas are read.
+    """
+    from datetime import datetime
+
+    def ts(s):
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+
+    queue = execution = 0.0
     try:
         spans = result.metadata["execution"]["execution_spans"]
-        execution = float(sum((s.stop - s.start).total_seconds() for s in spans))
+        execution = float(sum((sp.stop - sp.start).total_seconds() for sp in spans))
+    except Exception:  # noqa: BLE001  (metadata is best effort; never lose the result)
+        pass
+    if local:
+        return queue, execution, 0.0, False
+    usage: dict = {}
+    for i in range(max(1, polls)):
+        try:
+            m = job.metrics()
+        except Exception:  # noqa: BLE001
+            m = {}
+        stamps = m.get("timestamps", {}) or {}
+        if stamps.get("created") and stamps.get("running"):
+            queue = (ts(stamps["running"]) - ts(stamps["created"])).total_seconds()
+        usage = m.get("usage", {}) or {}
+        charge = usage.get("qpu_charge_time_seconds", usage.get("quantum_seconds"))
+        status = usage.get("status", "completed" if "quantum_seconds" in usage else "pending")
+        if status != "pending" and charge is not None and float(charge) > 0:   # a device job never bills 0 s
+            return queue, execution, float(charge), False
+        if i + 1 < polls:
+            time.sleep(wait_s)
+    estimate = 0.0
+    try:
+        estimate = float(job.usage_estimation().get("quantum_seconds") or 0.0)
     except Exception:  # noqa: BLE001
         pass
-    return queue, execution, quantum
+    partial = float(usage.get("qpu_charge_time_seconds") or usage.get("quantum_seconds") or 0.0)
+    return queue, execution, max(estimate, execution, partial,
+                                 conservative_quantum_seconds(n_executions)), True

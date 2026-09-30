@@ -243,12 +243,16 @@ class GeneticAlgorithm:
         genes = np.empty((P, d), dtype=int)
         for j, cells in enumerate(self._init_cells):
             if "init" in self.quantum:
-                # rejection sampling of uniform circuit outcomes onto init_box cells
+                # Rejection sampling of uniform circuit outcomes onto init_box
+                # cells. One job almost always suffices (4x the expected number
+                # of shots), so the job count does not depend on the outcomes.
+                keep = set(int(c) for c in cells)
+                shots = int(np.ceil(4 * P * self.levels / len(cells)))
                 out: list[int] = []
                 while len(out) < P:
                     s = self.backend.sample(self._circuit("init"), np.zeros((1, 0)),
-                                            self.rng, shots=2 * P)[0]
-                    out += [int(v) for v in s if v in set(cells)]
+                                            self.rng, shots=shots)[0]
+                    out += [int(v) for v in s if v in keep]
                 genes[:, j] = out[:P]
             else:
                 genes[:, j] = self.rng.choice(cells, size=P)

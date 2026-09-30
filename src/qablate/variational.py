@@ -18,8 +18,12 @@ shifted circuits, chain rule through ``Q``) and ``'spsa'`` (Spall 1998: a
 gradient estimate from 2 circuits per iteration whatever the number of
 parameters). COBYLA and parameter-shift need exact probabilities; SPSA also
 trains from measured frequencies (``shots``), which is what hardware
-provides, and then minimizes the plug-in estimate ``KL(Q_hat || P)``
-(biased low for few shots). Every circuit evaluation is counted in
+provides, and then minimizes an estimate of ``KL(Q || P)`` from the
+measured frequencies. The plug-in estimate ``KL(Q_hat || P)`` is biased
+upward by about ``(m - 1) / (2 N)`` (``m`` outcomes observed in ``N``
+shots: the entropy of ``Q_hat`` is biased low), a bias that rewards
+concentrating ``Q``; the default ``kl_estimator='miller-madow'`` subtracts
+it (Miller 1955). Every circuit evaluation is counted in
 :attr:`VIResult.circuit_evaluations`, so budgets can be matched.
 """
 from __future__ import annotations
@@ -155,6 +159,8 @@ class BornMachineVI:
             Only ``'spsa'`` accepts shots.
         spsa_gains: ``(a, c)`` of the SPSA schedule ``a_k = a / (k + 1)**0.602``,
             ``c_k = c / (k + 1)**0.101`` (the thesis hardware values).
+        kl_estimator: With shots: ``'miller-madow'`` (bias-corrected, default)
+            or ``'plugin'``.
         learning_rate: Initial step of parameter-shift gradient descent; the
             step decays as ``lr / (1 + decay * i)`` and the gradient norm is
             clipped to 1 (the schedule of the thesis runs).
@@ -164,7 +170,8 @@ class BornMachineVI:
     def __init__(self, grid: Grid, *, n_layers: int = 3, optimizer: str = "cobyla",
                  backend: Backend | None = None, learning_rate: float = 0.05,
                  decay: float | None = None, shots: int | None = None,
-                 spsa_gains: tuple[float, float] = (0.15, 0.1)):
+                 spsa_gains: tuple[float, float] = (0.15, 0.1),
+                 kl_estimator: str = "miller-madow"):
         from .circuits import hardware_efficient_ansatz
         if optimizer not in ("cobyla", "parameter-shift", "spsa"):
             raise ValueError("optimizer must be 'cobyla', 'parameter-shift' or 'spsa'")
@@ -177,6 +184,9 @@ class BornMachineVI:
             raise ValueError("this backend only samples: use optimizer='spsa' with shots")
         self.shots = None if shots is None else int(shots)
         self.spsa_gains = (float(spsa_gains[0]), float(spsa_gains[1]))
+        if kl_estimator not in ("miller-madow", "plugin"):
+            raise ValueError("kl_estimator must be 'miller-madow' or 'plugin'")
+        self.kl_estimator = kl_estimator
         self.circuit = hardware_efficient_ansatz(grid.n_qubits, n_layers)
         self.n_params = self.circuit.num_parameters
         self.learning_rate = float(learning_rate)
@@ -188,6 +198,18 @@ class BornMachineVI:
         phis = np.atleast_2d(phis)
         self._evals += len(phis)
         return self.backend.probabilities(self.circuit, phis, rng, shots=self.shots)
+
+    def kl(self, q: np.ndarray, p: np.ndarray) -> np.ndarray:
+        """KL estimate for distributions ``q`` produced by :meth:`distributions`.
+
+        Exact ``q`` (no shots) or ``kl_estimator='plugin'``: :func:`reverse_kl`.
+        Otherwise the Miller-Madow correction ``-(m - 1) / (2 N)`` is applied.
+        """
+        kl = reverse_kl(q, p)
+        if self.shots is None or self.kl_estimator == "plugin":
+            return kl
+        m = np.count_nonzero(np.atleast_2d(q) > 0, axis=1)
+        return kl - (m - 1) / (2.0 * self.shots)
 
     def fit(self, p: np.ndarray, max_iter: int, rng, *, budget: str = "circuits",
             initial: np.ndarray | None = None) -> VIResult:
@@ -219,7 +241,7 @@ class BornMachineVI:
                 ak, ck = a / (k + 1) ** 0.602, c / (k + 1) ** 0.101
                 delta = rng.choice([-1.0, 1.0], size=self.n_params)
                 qs = self.distributions(np.vstack([phi + ck * delta, phi - ck * delta]), rng)
-                f_plus, f_minus = reverse_kl(qs, p)
+                f_plus, f_minus = self.kl(qs, p)
                 phi = phi - ak * (f_plus - f_minus) / (2.0 * ck) * delta
                 history.append(0.5 * float(f_plus + f_minus))
                 phi_history[k] = phi
@@ -256,7 +278,7 @@ class BornMachineVI:
                            options={"maxiter": cap, "rhobeg": 0.3}).x
         q = self.distributions(phi, rng)[0]
         mu, sd, corr = self.grid.moments(q)
-        return VIResult(phi=phi, q=q, kl=float(reverse_kl(q, p)[0]), mean=mu, std=sd,
+        return VIResult(phi=phi, q=q, kl=float(self.kl(q, p)[0]), mean=mu, std=sd,
                         correlation=corr, history=history,
                         circuit_evaluations=self._evals, phi_history=phi_history)
 
@@ -269,7 +291,11 @@ class BornMachineVI:
         """
         if shots_backend is None:
             idx = rng.choice(len(result.q), size=n, p=result.q / result.q.sum())
-        else:
-            f = shots_backend.probabilities(self.circuit, result.phi, rng, shots=n)[0]
-            idx = np.repeat(np.arange(len(f)), np.rint(f * n).astype(int))
+            return self.grid.points[idx]
+        return self.measure(result.phi, n, rng, shots_backend)
+
+    def measure(self, phi: np.ndarray, n: int, rng, backend: Backend) -> np.ndarray:
+        """``n`` grid points measured from the circuit at angles ``phi`` on ``backend``."""
+        f = backend.probabilities(self.circuit, phi, rng, shots=n)[0]
+        idx = np.repeat(np.arange(len(f)), np.rint(f * n).astype(int))
         return self.grid.points[idx]

@@ -114,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--vi-init", choices=["warm", "cold"], default=None)
     h.add_argument("--spsa-a", type=float, default=None)
     h.add_argument("--spsa-c", type=float, default=None)
+    h.add_argument("--vi-kl-estimator", choices=["plugin", "miller-madow"], default=None)
 
     lg = sub.add_parser("legacy", help="tools for campaigns written by the v0.8 thesis code")
     lg.add_argument("args", nargs=argparse.REMAINDER)
@@ -194,15 +195,16 @@ def _hardware(args) -> int:
         print(f"  device total ~{total / 60:.1f} min (rough; the run stops submitting at "
               f"{args.max_quantum_seconds / 60:.1f} min of billed time)")
     if args.dry_run:
-        from qablate.circuits import hardware_efficient_ansatz, random_proposal_circuit
         from qablate.hardware import DeviceCompiler
         comp = DeviceCompiler(device, args.optimization_level, cfg.seed)
-        for name, qc in (("vi ansatz", hardware_efficient_ansatz(post.ndim * cfg.vi_grid,
-                                                                 cfg.vi_layers)),
-                         ("mcmc proposal", random_proposal_circuit(max(2, post.ndim), 3))):
+        for name, qc in hw.logical_circuits(post, cfg, args.algorithms).items():
             isa, _, dt = comp.compile(qc)
-            print(f"  {name:14s} -> depth {isa.depth():4d}, "
-                  f"{comp.two_qubit_gates(isa):3d} two-qubit gates (compiled in {dt:.1f} s)")
+            print(f"  {name:14s} -> depth {isa.depth():4d}, {comp.two_qubit_gates(isa):3d} "
+                  f"two-qubit gates, {comp.duration_us(isa):7.2f} us per shot "
+                  f"(compiled in {dt:.1f} s)")
+        if args.device == "least_busy":
+            print(f"  least_busy resolved to {getattr(device, 'name', '?')}: pass that name to "
+                  "the real run so it uses the same device")
         return 0
     rows = hw.run(cfg, device, locations=args.locations, algorithms=args.algorithms,
                   out=args.out, max_quantum_seconds=args.max_quantum_seconds,
