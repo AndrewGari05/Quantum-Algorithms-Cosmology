@@ -5,8 +5,8 @@ different regular expressions and two different CSV globs. That caused three
 confirmed errors (see ERRATA.md):
 
 * QPU-6 / HPC-11c — the glob ``**/resultados_*.csv`` matched both the per-model
-  CSV and the per-task cumulative ``resultados_TODOS_los_modelos.csv``, so
-  every task was counted twice;
+  CSV and the per-task cumulative file (legacy name
+  ``resultados_TODOS_los_modelos.csv``), so every task was counted twice;
 * HPC-8 / QPU-10 — task folders only carry the grid tag (``_nqpp5``/``_nb6``)
   and the noise tag (``_noise-readout``) when the campaign sweeps them, but the
   regexes required both, so whole campaigns were skipped without a warning;
@@ -15,9 +15,14 @@ confirmed errors (see ERRATA.md):
 
 This module is the single place that knows the on-disk layout::
 
-    <campaign>/<family>_<model>[_nqpp<g>|_nb<g>][_noise-<level>]/model_<model>/resultados_config.csv
+    <campaign>/<family>_<model>[_nqpp<g>|_nb<g>][_noise-<level>]/model_<model>/results_config.csv
 
-It reads both the original CSV schema and the provenance-extended one.
+It reads both the original CSV schema and the provenance-extended one, and
+both file-name generations: the current English names (``results_config.csv``,
+cumulative ``results_all_models.csv``, ``results_<model>.csv``) and the legacy
+Spanish names that older campaigns on disk still carry
+(``resultados_config.csv``, cumulative ``resultados_TODOS_los_modelos.csv``,
+``resultados_<model>.csv``). A cumulative file is never read, whatever its name.
 """
 from __future__ import annotations
 
@@ -29,8 +34,22 @@ import sys
 from collections.abc import Iterable
 
 #: Per-model result file written by every task. The per-task cumulative file
-#: (``resultados_TODOS_los_modelos.csv``) duplicates these rows and is ignored.
-RESULT_CSV = "resultados_config.csv"
+#: (``results_all_models.csv``) duplicates these rows and is ignored.
+RESULT_CSV = "results_config.csv"
+#: Legacy (pre-translation) name of the per-model result file.
+LEGACY_RESULT_CSV = "resultados_config.csv"
+#: Every accepted name of the per-model result file, current name first.
+RESULT_CSV_NAMES = (RESULT_CSV, LEGACY_RESULT_CSV)
+
+#: Per-task cumulative file; it repeats the rows of the per-model files.
+CUMULATIVE_CSV = "results_all_models.csv"
+#: Legacy (pre-translation) name of the per-task cumulative file.
+LEGACY_CUMULATIVE_CSV = "resultados_TODOS_los_modelos.csv"
+#: Every name of the cumulative file; files with these names are never read.
+CUMULATIVE_CSV_NAMES = (CUMULATIVE_CSV, LEGACY_CUMULATIVE_CSV)
+
+#: File-name prefixes of result CSVs (current, legacy).
+RESULT_PREFIXES = ("results_", "resultados_")
 
 TASK_RE = re.compile(
     r"^(?P<fam>samplers|genetic)_(?P<mod>[a-z0-9]+)"
@@ -55,31 +74,75 @@ def parse_task_name(name: str) -> dict[str, str | None] | None:
     return m.groupdict() if m else None
 
 
+def is_cumulative_csv(path: str) -> bool:
+    """True for the per-task cumulative file, under its current or legacy name.
+
+    Examples:
+        >>> is_cumulative_csv('t/results_all_models.csv')
+        True
+        >>> is_cumulative_csv('t/resultados_TODOS_los_modelos.csv')
+        True
+        >>> is_cumulative_csv('t/model_lcdm/results_config.csv')
+        False
+    """
+    return os.path.basename(path) in CUMULATIVE_CSV_NAMES
+
+
+def canonical_csv_name(path: str) -> str:
+    """``path`` with a legacy result-file prefix rewritten to the current one.
+
+    Used where the file path is part of a cell identity (seed comparison), so
+    a legacy campaign and a new one still pair up cell by cell.
+
+    Examples:
+        >>> canonical_csv_name('model_lcdm/resultados_config.csv')
+        'model_lcdm/results_config.csv'
+        >>> canonical_csv_name('model_lcdm/results_config.csv')
+        'model_lcdm/results_config.csv'
+    """
+    head, base = os.path.split(path)
+    if base.startswith("resultados_"):
+        base = "results_" + base[len("resultados_"):]
+    return os.path.join(head, base) if head else base
+
+
 def result_csvs(task_dir: str) -> list[str]:
     """Per-model result CSVs of one task (never the cumulative file)."""
-    return sorted(glob.glob(os.path.join(task_dir, "model_*", RESULT_CSV)))
+    return sorted(p for name in RESULT_CSV_NAMES
+                  for p in glob.glob(os.path.join(task_dir, "model_*", name)))
 
 
 def all_result_csvs(root: str) -> list[str]:
     """Per-model result CSVs anywhere under ``root`` (recursive)."""
-    return sorted(glob.glob(os.path.join(root, "**", "model_*", RESULT_CSV),
-                            recursive=True))
-
-
-#: Per-task cumulative file; it repeats the rows of the per-model files.
-CUMULATIVE_CSV = "resultados_TODOS_los_modelos.csv"
+    return sorted(p for name in RESULT_CSV_NAMES
+                  for p in glob.glob(os.path.join(root, "**", "model_*", name),
+                                     recursive=True))
 
 
 def result_csvs_any_layout(root: str) -> list[str]:
-    """Every ``resultados_*.csv`` under ``root`` except the cumulative copy.
+    """Every ``results_*.csv`` / ``resultados_*.csv`` under ``root`` except
+    the cumulative copy (current or legacy name).
 
     Older campaigns also used ``resultados_<model>.csv`` and flat layouts, so
     tools that must read them (triage, seed comparison) glob broadly but drop
     the per-task cumulative file, which is what caused the double counting.
     """
-    return sorted(p for p in glob.glob(os.path.join(root, "**", "resultados_*.csv"),
-                                       recursive=True)
-                  if os.path.basename(p) != CUMULATIVE_CSV)
+    return sorted(p for prefix in RESULT_PREFIXES
+                  for p in glob.glob(os.path.join(root, "**", prefix + "*.csv"),
+                                     recursive=True)
+                  if not is_cumulative_csv(p))
+
+
+def moved_aside_csvs(task_dir: str) -> list[str]:
+    """Per-model CSVs moved aside after a header change (QV-5), either name.
+
+    They look like ``results_config.old-schema-<stamp>.csv`` (or the legacy
+    ``resultados_config.old-schema-<stamp>.csv``) and are never read.
+    """
+    return sorted(p for name in RESULT_CSV_NAMES
+                  for p in glob.glob(os.path.join(
+                      task_dir, "model_*",
+                      os.path.splitext(name)[0] + ".old-schema-*.csv")))
 
 
 def _int_or_none(x) -> int | None:
@@ -112,7 +175,7 @@ def read_campaign(root: str, warn: bool = True) -> list[dict]:
             continue
         tags = parse_task_name(name)
         paths = result_csvs(task_dir)
-        moved = glob.glob(os.path.join(task_dir, "model_*", "resultados_config.old-schema-*.csv"))
+        moved = moved_aside_csvs(task_dir)
         if warn and moved:
             print(f"  [campaign_io] {camp}/{name}: {len(moved)} moved-aside CSV(s) with an "
                   f"older header are not read: {[os.path.basename(m) for m in moved]}",

@@ -120,3 +120,13 @@ def test_legacy_grid_floor():
     g = errata_tools.grid_floor("lcdm", "CC+BAO", 4)
     assert abs(g["chi2_grid_floor"] - 28.3992) < 1e-3
     assert np.isfinite(g["floor_minus_continuous"])
+
+
+def test_legacy_reader_accepts_the_english_csv_names(tmp_path):
+    _legacy_task(tmp_path, "samplers_lcdm", [_lrow("Classical MCMC", 0.2574, nqpp="—")])
+    d = tmp_path / "samplers_cpl" / "model_cpl"
+    d.mkdir(parents=True)
+    (tmp_path / "samplers_lcdm" / "model_lcdm" / "resultados_config.csv").rename(
+        tmp_path / "samplers_lcdm" / "model_lcdm" / "results_config.csv")
+    rows = campaign_io.read_campaign(str(tmp_path))
+    assert len(rows) == 1 and rows[0]["_mod"] == "lcdm"
