@@ -1,49 +1,49 @@
-# Fase 4 — Primera corrida del eje de ruido: resultados
+# Phase 4 — First run of the noise axis: results
 
-Corrida de calibración del instrumento, no de producción. ΛCDM, CC+BAO,
-`nqpp=3` (6 qubits), 600 pasos, 4 cadenas, 25 iteraciones QVMC, `--seed 42`,
-25 generaciones × 60 individuos para el genético, `n_bits=3`. Tamaños
-pequeños a propósito: el objetivo es ver si el eje **mide algo** y en qué
-dirección, no producir números citables.
+A calibration run of the instrument, not a production run. ΛCDM, CC+BAO,
+`nqpp=3` (6 qubits), 600 steps, 4 chains, 25 QVMC iterations, `--seed 42`,
+25 generations × 60 individuals for the genetic algorithm, `n_bits=3`. Sizes
+are small on purpose: the goal is to see whether the axis **measures
+anything** and in which direction, not to produce quotable numbers.
 
-Cinco columnas, no cuatro. La quinta (`none-counts`) es el control, y sin
-ella tres de las cinco conclusiones de abajo habrían salido al revés.
+Five columns, not four. The fifth (`none-counts`) is the control, and without
+it three of the five conclusions below would have come out backwards.
 
 ---
 
-## 1. El control era imprescindible
+## 1. The control was indispensable
 
-`--noise none` usa por defecto la ruta de amplitudes; cualquier peldaño con
-ruido usa la ruta por conteos. Comparar la primera columna contra las
-ruidosas mezcla **el ruido con el cambio de operador de lectura**. La columna
-`none-counts` corre el peldaño ideal por la ruta de conteos y separa ambos.
+`--noise none` uses the amplitude route by default; any noisy rung uses the
+counts route. Comparing the first column against the noisy ones mixes **the
+noise with the change of readout operator**. The `none-counts` column runs the
+ideal rung through the counts route and separates the two.
 
 QMCMC 50%:
 
-| | none (amplitud) | none-counts | readout | full | FakeBrisbane |
+| | none (amplitude) | none-counts | readout | full | FakeBrisbane |
 |---|---|---|---|---|---|
 | σ(Ωm) | 0.0208 | **0.0176** | **0.0176** | 0.0172 | 0.0175 |
-| aceptación | 0.4756 | **0.5092** | **0.5092** | 0.5144 | 0.5078 |
+| acceptance | 0.4756 | **0.5092** | **0.5092** | 0.5144 | 0.5078 |
 | ESS | 101.3 | **140.8** | **140.8** | 151.7 | 142.7 |
 
-Leyendo solo `none` → `readout` se concluiría que **el ruido de lectura
-estrecha el posterior y mejora el mezclado** — σ baja 15%, ESS sube 39%. Es
-falso. `none-counts` y `readout` son **idénticas hasta el último dígito
-impreso**: el canal de lectura no le hace absolutamente nada a la propuesta.
-Todo el salto es el cambio de ruta.
+Reading only `none` → `readout` one would conclude that **readout noise
+narrows the posterior and improves mixing** — σ drops 15%, ESS rises 39%. That
+is false. `none-counts` and `readout` are **identical to the last printed
+digit**: the readout channel does absolutely nothing to the proposal. The
+whole jump is the change of route.
 
-Es la invariancia demostrada en el módulo: la lectura uniforme reescala
-`⟨Z_q⟩` por `(1−2p)` y la calibración a std unitaria lo divide. Aquí se ve
-en una corrida completa, no solo en el test unitario.
+This is the invariance proven in the module: uniform readout rescales
+`⟨Z_q⟩` by `(1−2p)` and calibration to unit std divides it out. Here it is
+seen in a complete run, not just in the unit test.
 
-**Conclusión operativa:** cualquier tabla del eje de ruido que compare contra
-`none` sin el control está midiendo dos cosas a la vez.
+**Operational conclusion:** any noise-axis table that compares against
+`none` without the control is measuring two things at once.
 
 ---
 
-## 2. La identidad FAITHFUL se rompe exactamente donde debe
+## 2. The FAITHFUL identity breaks exactly where it should
 
-QMCMC 50% (propuesta cuántica) vs 100% (propuesta + aceptación cuánticas):
+QMCMC 50% (quantum proposal) vs 100% (quantum proposal + acceptance):
 
 | | none-counts | readout | full | FakeBrisbane |
 |---|---|---|---|---|
@@ -52,109 +52,106 @@ QMCMC 50% (propuesta cuántica) vs 100% (propuesta + aceptación cuánticas):
 | ESS 50% | 140.8 | 140.8 | 151.7 | 142.7 |
 | ESS 100% | **140.8** | **117.2** | 118.2 | 115.9 |
 
-En el límite ideal las dos filas son **idénticas**: la aceptación cuántica
-reproduce Metropolis exactamente, que es la afirmación de fidelidad del
-proyecto. Con ruido dejan de serlo.
+In the ideal limit the two rows are **identical**: the quantum acceptance
+reproduces Metropolis exactly, which is the project's fidelity claim. With
+noise they stop being so.
 
-La señal más limpia es el **ESS: 140.8 → 117.2 en cuanto se enciende la
-lectura**, un 17% de pérdida de mezclado que la fila del 50% no sufre. Es
-decir: el componente FAITHFUL es el que paga el ruido, y lo paga en
-eficiencia de muestreo antes que en el valor central.
+The cleanest signal is **ESS: 140.8 → 117.2 as soon as readout is switched
+on**, a 17% loss of mixing that the 50% row does not suffer. That is: the
+FAITHFUL component is the one that pays for the noise, and it pays in sampling
+efficiency before the central value.
 
-Esto convierte "identidad a 1.1e-16" en una **curva de degradación**, que es
-lo que buscabas. El número ideal sigue ahí como punto de partida; ahora tiene
-pendiente.
+This turns "identity to 1.1e-16" into a **degradation curve**, which is what
+was being sought. The ideal number is still there as the starting point; now
+it has a slope.
 
-Mecanismo, ya medido en el módulo: la lectura pone un suelo de ~p sobre la
-aceptación, así que los movimientos que deberían rechazarse casi siempre se
-aceptan de más (A = 0.0025 → 0.0323 con p = 0.03, 13×). La cadena acepta
-basura y mezcla peor.
+Mechanism, already measured in the module: readout sets a floor of ~p on the
+acceptance, so moves that should almost always be rejected are
+over-accepted (A = 0.0025 → 0.0323 with p = 0.03, 13×). The chain accepts
+garbage and mixes worse.
 
 ---
 
-## 3. La ventaja del entrenamiento cuántico se erosiona de forma monótona
+## 3. The advantage of quantum training erodes monotonically
 
-El salto 33% → 67% del QVMC es la celda ALGORITHMIC: entrenamiento por
-parameter-shift exacto en vez de COBYLA. Su ganancia en KL:
+The 33% → 67% jump of QVMC is the ALGORITHMIC cell: training with exact
+parameter-shift instead of COBYLA. Its gain in KL:
 
-| peldaño | KL 33% | KL 67% | **ganancia** |
+| rung | KL 33% | KL 67% | **gain** |
 |---|---|---|---|
 | none | 12.0885 | 10.5892 | **1.499** |
 | readout | 12.5115 | 11.1595 | **1.352** |
 | full | 12.7569 | 11.5727 | **1.184** |
 | FakeBrisbane | 12.7339 | 11.6417 | **1.092** |
 
-**−27% de la ventaja cuántica al llegar al ruido de un dispositivo real**, y
-la erosión es monótona en los cuatro peldaños. Este es el resultado central
-de la corrida: no es que el QVMC deje de funcionar, es que *aquello que lo
-hacía mejor que su baseline* se encoge a un ritmo medible.
+**−27% of the quantum advantage on reaching the noise of a real device**, and
+the erosion is monotonic across the four rungs. This is the central result of
+the run: it is not that QVMC stops working, it is that *what made it better
+than its baseline* shrinks at a measurable rate.
 
 ---
 
-## 4. Tres invariancias que confirman que el eje está bien cableado
+## 4. Three invariances that confirm the axis is wired correctly
 
-**El MCMC clásico es idéntico en las cinco columnas** (Ωm 0.2569, σ 0.0160,
-aceptación 0.5269, ESS 101.6). Es NumPy puro y nunca toca un circuito, así
-que el eje no puede moverlo. Que no se mueva ni en el último dígito es la
-mejor evidencia de que el ruido está entrando solo por donde debe.
+**Classical MCMC is identical in all five columns** (Ωm 0.2569, σ 0.0160,
+acceptance 0.5269, ESS 101.6). It is pure NumPy and never touches a circuit,
+so the axis cannot move it. That it does not move even in the last digit is
+the best evidence that the noise enters only where it should.
 
-**QVMC 67% y 100% coinciden en todas las columnas.** Ya estaba anticipado:
-`quantum_amplitude_normalization` ejecuta su circuito pero descarta el
-resultado — devuelve la suma exacta. Ese componente es **inmune al eje por
-construcción**, y cualquier degradación entre 67% y 100% vendría de otro
-sitio.
+**QVMC 67% and 100% agree in every column.** This was anticipated:
+`quantum_amplitude_normalization` executes its circuit but discards the
+result — it returns the exact sum. That component is **immune to the axis by
+construction**, and any degradation between 67% and 100% would come from
+somewhere else.
 
-**QGA 0% es bit-idéntico al CGA en los cuatro peldaños.** Con todos los
-operadores apagados no corre ningún circuito, así que el ruido no tiene por
-dónde entrar.
+**QGA 0% is bit-identical to CGA on all four rungs.** With all operators
+switched off no circuit runs, so the noise has no way in.
 
 ---
 
-## 5. El VI clásico NO es invariante, y eso hay que declararlo
+## 5. Classical VI is NOT invariant, and that must be declared
 
 | | none | readout | full | FakeBrisbane |
 |---|---|---|---|---|
-| KL del VI clásico | 12.0885 | 12.5115 | 12.7569 | 12.7339 |
+| Classical VI KL | 12.0885 | 12.5115 | 12.7569 | 12.7339 |
 
-El MCMC clásico no se mueve; el VI clásico sí. No es un bug: en este
-framework el VI clásico es `QVMCModular` con todos los componentes apagados,
-y **sigue representando Q con el circuito del ansatz** — solo optimiza y
-muestrea de forma clásica. El circuito es el sustrato, no un componente
-conmutable, así que bajo ruido el sustrato es ruidoso para toda la escalera
-del QVMC.
+Classical MCMC does not move; classical VI does. It is not a bug: in this
+framework classical VI is `QVMCModular` with all components switched off, and
+**it still represents Q with the ansatz circuit** — it only optimizes and
+samples classically. The circuit is the substrate, not a switchable
+component, so under noise the substrate is noisy for the entire QVMC ladder.
 
-Es defendible físicamente (en un dispositivo ruidoso, un estado variacional
-optimizado clásicamente también es ruidoso), pero tiene una consecuencia que
-no se puede pasar por alto: **el "0%" de la escalera QVMC no es una
-referencia fija bajo ruido**, mientras que el "0%" de la escalera QMCMC sí lo
-es. Las dos escaleras no son simétricas en este eje, y una tabla que las
-ponga lado a lado invita a leerlas como si lo fueran.
+It is physically defensible (on a noisy device, a classically optimized
+variational state is also noisy), but it has a consequence that cannot be
+overlooked: **the "0%" of the QVMC ladder is not a fixed reference under
+noise**, whereas the "0%" of the QMCMC ladder is. The two ladders are not
+symmetric on this axis, and a table that puts them side by side invites
+reading them as if they were.
 
-Decisión pendiente tuya: dejarlo así y documentarlo, o añadir una opción que
-fuerce el baseline del QVMC a correr siempre sin ruido.
+Decision pending: leave it like this and document it, or add an option that
+forces the QVMC baseline to always run without noise.
 
 ---
 
-## 6. El ESS miente bajo ruido
+## 6. ESS lies under noise
 
 | QVMC | none | readout | full | FakeBrisbane |
 |---|---|---|---|---|
 | ESS 67% | 91.2 | 106.9 | 116.0 | **125.2** |
 | KL 67% | 10.5892 | 11.1595 | 11.5727 | **11.6417** |
 
-El ESS **sube** un 37% mientras el ajuste **empeora**. El ruido aplana la
-distribución, y una distribución más plana da muestras menos correlacionadas.
-Cualquier lectura que use ESS como métrica de calidad concluiría que el ruido
-ayuda.
+ESS **rises** by 37% while the fit **gets worse**. Noise flattens the
+distribution, and a flatter distribution yields less correlated samples. Any
+reading that uses ESS as a quality metric would conclude that noise helps.
 
-σ(H0) crece de forma monótona en la misma escalera (2.876 → 2.907 → 2.949 →
-2.976), así que el ensanchamiento real está ahí: es el ESS el que no sirve
-como métrica de calidad en este eje. **Reportar ESS junto a KL o σ, nunca
-solo.**
+σ(H0) grows monotonically along the same ladder (2.876 → 2.907 → 2.949 →
+2.976), so the real broadening is there: it is ESS that is useless as a
+quality metric on this axis. **Report ESS together with KL or σ, never
+alone.**
 
 ---
 
-## 7. El QGA sale casi invariante — con una advertencia grande
+## 7. QGA comes out almost invariant — with a big caveat
 
 | Ωm | none | readout | full | FakeBrisbane |
 |---|---|---|---|---|
@@ -163,44 +160,44 @@ solo.**
 | QGA 67% | 0.2800 | 0.2800 | 0.2800 | 0.2800 |
 | QGA 100% | 0.2800 | 0.2800 | 0.2800 | **0.2400** |
 
-Tu predicción se sostiene: el QGA es con diferencia el más robusto. Pero
-atribuirlo solo al algoritmo sería precipitado.
+The prediction holds: QGA is by far the most robust. But attributing it to
+the algorithm alone would be premature.
 
-Con `n_bits=3` la rejilla tiene **8 niveles por eje**. Los valores de arriba
-son puntos de rejilla, no números continuos: para que el ruido mueva el
-resultado tiene que voltear bits suficientes para saltar a *otra celda* Y
-sobrevivir a selección y elitismo, que preservan al mejor individuo intacto.
-La discretización gruesa está cuantizando el ruido hasta hacerlo desaparecer.
+With `n_bits=3` the grid has **8 levels per axis**. The values above are grid
+points, not continuous numbers: for noise to move the result it has to flip
+enough bits to jump to *another cell* AND survive selection and elitism, which
+preserve the best individual intact. The coarse discretization is quantizing
+the noise until it disappears.
 
-Dicho de otro modo: parte de la robustez observada es del **operador** (mide,
-y un bit volteado se parece a mutación extra) y parte es de la **rejilla**.
-Separarlas exige repetir esto con `n_bits` 5–6, donde una celda es mucho más
-estrecha. Hasta entonces, "el QGA es el más robusto" está apoyado pero no
-aislado.
+Put differently: part of the observed robustness belongs to the **operator**
+(it measures, and a flipped bit looks like extra mutation) and part belongs to
+the **grid**. Separating them requires repeating this with `n_bits` 5–6,
+where a cell is much narrower. Until then, "QGA is the most robust" is
+supported but not isolated.
 
-El χ² no discrimina nada aquí (27.4691 en las 20 celdas) porque se reporta en
-el MAP refinado con Nelder-Mead, que borra las diferencias del GA. Para este
-eje hay que mirar Ωm/H0 crudos, no el χ² refinado.
+χ² discriminates nothing here (27.4691 in all 20 cells) because it is
+reported at the MAP refined with Nelder-Mead, which erases the GA
+differences. For this axis one must look at raw Ωm/H0, not at the refined χ².
 
 ---
 
-## 8. Qué NO se puede concluir todavía
+## 8. What can NOT be concluded yet
 
-- Tamaños pequeños (600 pasos, 25 iteraciones). Las diferencias de tercer
-  decimal en Ωm están dentro del ruido de Monte Carlo de una sola semilla.
-  **Nada de aquí es citable sin repetir con varias semillas.**
-- Un solo modelo (ΛCDM, d=2) y una sola resolución (nqpp=3).
-- El eje mide ruido **sin supresión de error** — DD y twirling quedan
-  inertes en simulación. Es una cota inferior de lo alcanzable en hardware.
-- La curva de degradación tiene cuatro puntos, y tres de ellos son modelos
-  sintéticos. Para una curva de verdad hace falta barrer `p` de forma
-  continua, no cuatro peldaños con nombre.
+- Small sizes (600 steps, 25 iterations). Third-decimal differences in Ωm are
+  within the Monte Carlo noise of a single seed. **Nothing here is quotable
+  without repeating with several seeds.**
+- A single model (ΛCDM, d=2) and a single resolution (nqpp=3).
+- The axis measures noise **without error suppression** — DD and twirling are
+  inert in simulation. It is a lower bound on what is achievable on hardware.
+- The degradation curve has four points, and three of them are synthetic
+  models. A real curve requires sweeping `p` continuously, not four named
+  rungs.
 
-## 9. Lo siguiente que valdría la pena
+## 9. What would be worth doing next
 
-1. Barrer `--noise-readout-p` de forma continua sobre el QMCMC 100% y ajustar
-   la pendiente de la pérdida de ESS. Es barato (2–4 qubits) y da la curva
-   real en vez de cuatro puntos.
-2. Repetir el genético con `n_bits` 5–6 para separar robustez del operador de
-   robustez de la rejilla.
-3. Varias semillas antes de citar cualquier número.
+1. Sweep `--noise-readout-p` continuously over QMCMC 100% and fit the slope of
+   the ESS loss. It is cheap (2–4 qubits) and gives the real curve instead of
+   four points.
+2. Repeat the genetic run with `n_bits` 5–6 to separate operator robustness
+   from grid robustness.
+3. Several seeds before quoting any number.

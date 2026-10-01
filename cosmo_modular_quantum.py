@@ -95,9 +95,9 @@ def set_headless_backend():
 
 from qiskit import QuantumCircuit, transpile
 from qiskit.circuit import ParameterVector
-from qiskit_aer import AerSimulator      # noqa: F401  (sonda: el simulador
-# se construye via cosmo_core.make_simulator, pero este import verifica que
-# qiskit-aer esta instalado antes de que falle a mitad de una campana)
+from qiskit_aer import AerSimulator      # noqa: F401  (probe: the simulator
+# is built via cosmo_core.make_simulator, but this import checks that
+# qiskit-aer is installed before a campaign fails halfway through)
 
 import cosmo_core as core
 import cosmo_noise as cnoise
@@ -112,65 +112,65 @@ from cosmo_core import (MODELS, Posterior, RNG, ess_chains, ess_weights,
 USE_GPU = False
 
 # =============================================================================
-#  [NOISE] Segundo eje de ablacion — nivel de ruido del modulo.
+#  [NOISE] Second ablation axis — the module's noise level.
 # =============================================================================
 #
-#  Mismo patron que USE_GPU: main() lo fija desde --noise y TODA ruta cuantica
-#  de este modulo lo consulta, de modo que el nivel de ruido es consistente en
-#  todo el proceso. El valor por defecto es el peldano ideal.
+#  Same pattern as USE_GPU: main() sets it from --noise and EVERY quantum route
+#  in this module reads it, so the noise level is consistent across the whole
+#  process. The default is the ideal rung.
 #
-#  REGLA DE ORO de este eje: con NOISE.is_ideal, cada ruta debe ejecutar
-#  EXACTAMENTE el codigo previo al eje de ruido — no una version equivalente.
-#  Por eso las rutas ruidosas se anaden como ramas separadas en vez de
-#  unificarse: `save_probabilities` difiere de `|psi|^2` en 2.2e-16, suficiente
-#  para que la columna ideal dejara de ser reproducible bit a bit contra los
-#  resultados ya publicados.
+#  GOLDEN RULE of this axis: with NOISE.is_ideal, every route must execute
+#  EXACTLY the code that existed before the noise axis — not an equivalent one.
+#  That is why the noisy routes are added as separate branches instead of
+#  being unified: `save_probabilities` differs from `|psi|^2` by 2.2e-16, enough
+#  for the ideal column to stop being bit-for-bit reproducible against the
+#  already published results.
 NOISE: "cnoise.NoiseSpec" = cnoise.NoiseSpec.from_level('none')
 
-#  Ruta de lectura del motor de propuesta: 'auto' | 'amplitude' | 'counts'.
+#  Readout route of the proposal engine: 'auto' | 'amplitude' | 'counts'.
 #
-#  La propuesta lee Re(psi)*sign(Im(psi)), que es sensible a fase relativa y
-#  por tanto NO sobrevive a un estado mezclado: es la unica de las lecturas del
-#  simulador ideal que el ruido rompe de verdad. Bajo ruido hay que leerla por
-#  conteos (<Z_q> por qubit), que es un OPERADOR DISTINTO, no una version
-#  ruidosa del mismo.
+#  The proposal reads Re(psi)*sign(Im(psi)), which is sensitive to relative
+#  phase and therefore does NOT survive a mixed state: it is the only one of
+#  the ideal-simulator readouts that noise genuinely breaks. Under noise it has
+#  to be read from counts (<Z_q> per qubit), which is a DIFFERENT OPERATOR, not
+#  a noisy version of the same one.
 #
-#  Comparar la columna ideal (amplitudes) contra las ruidosas (conteos)
-#  mezclaria entonces dos efectos: el ruido y el cambio de lectura. Para poder
-#  separarlos, 'counts' esta disponible TAMBIEN en el peldano ideal: asi el eje
-#  de ruido se mide DENTRO de una sola ruta y el cambio de ruta queda como una
-#  comparacion aparte y controlada.
+#  Comparing the ideal column (amplitudes) against the noisy ones (counts)
+#  would then mix two effects: the noise and the change of readout. To be able
+#  to separate them, 'counts' is ALSO available on the ideal rung: that way the
+#  noise axis is measured WITHIN a single route and the route change remains a
+#  separate, controlled comparison.
 #
-#  'auto' (por defecto) elige amplitudes en el peldano ideal y conteos en
-#  cuanto hay ruido, que es lo unico posible.
+#  'auto' (default) picks amplitudes on the ideal rung and counts as soon as
+#  there is noise, which is the only possible choice.
 PROPOSAL_ROUTE: str = 'auto'
 
-#: [B-PROV] Semilla de la corrida en curso, publicada a nivel de modulo para
-#: que los escritores de CSV puedan anotarla en cada fila sin tener que
-#: recibirla por parametro a traves de seis niveles de llamada.
+#: [B-PROV] Seed of the current run, published at module level so that the
+#: CSV writers can record it on every row without having to receive it as a
+#: parameter through six levels of calls.
 RUN_SEED: Optional[int] = None
 
 
 def set_noise(spec: "cnoise.NoiseSpec", proposal_route: str = 'auto') -> None:
-    """Fija el nivel de ruido y la ruta de propuesta del modulo.
+    """Set the module's noise level and proposal route.
 
-    Invalida ademas las cachés de simuladores que dependen del nivel de ruido
-    (`_HAD`), porque conservarlas entre niveles haria que un cambio de peldano
-    siguiera usando el simulador del peldano anterior — un fallo silencioso
-    que devolveria resultados del nivel equivocado.
+    Also invalidates the simulator caches that depend on the noise level
+    (`_HAD`), because keeping them across levels would make a rung change
+    keep using the previous rung's simulator — a silent failure that would
+    return results for the wrong level.
 
     Args:
-        spec: peldano del eje, de `cosmo_noise.NoiseSpec`.
-        proposal_route: 'auto', 'amplitude' o 'counts'.
+        spec: axis rung, from `cosmo_noise.NoiseSpec`.
+        proposal_route: 'auto', 'amplitude' or 'counts'.
     """
     global NOISE, PROPOSAL_ROUTE
     if proposal_route not in ('auto', 'amplitude', 'counts'):
-        raise ValueError(f"proposal_route invalida: {proposal_route!r}")
+        raise ValueError(f"invalid proposal_route: {proposal_route!r}")
     if proposal_route == 'amplitude' and not spec.is_ideal:
         raise ValueError(
-            "[NOISE] proposal_route='amplitude' es imposible con ruido: "
-            "Re(psi)*sign(Im(psi)) no esta definido para un estado mezclado. "
-            "Usa 'counts' o 'auto'.")
+            "[NOISE] proposal_route='amplitude' is impossible with noise: "
+            "Re(psi)*sign(Im(psi)) is not defined for a mixed state. "
+            "Use 'counts' or 'auto'.")
     NOISE = spec
     PROPOSAL_ROUTE = proposal_route
     _HAD.update({'sim': None, 'qc_t': None, 'par': None, 'noise': None})
@@ -182,35 +182,36 @@ def _sim(method: str = 'statevector', **kwargs):
 
 
 def _noisy_sim(counts_route: bool, **kwargs):
-    """AerSimulator del peldano de ruido actual.
+    """AerSimulator for the current noise rung.
 
     Args:
-        counts_route: True si el circuito MIDE (Aer aplica la lectura), False
-            si el resultado se lee del estado y la lectura se aplica luego con
-            `NOISE.apply_readout`.
-        **kwargs: extras para `make_simulator`.
+        counts_route: True if the circuit MEASURES (Aer applies the readout),
+            False if the result is read from the state and the readout is
+            applied afterwards with `NOISE.apply_readout`.
+        **kwargs: extras for `make_simulator`.
 
     Returns:
-        AerSimulator configurado para `NOISE`.
+        AerSimulator configured for `NOISE`.
     """
     return make_simulator(prefer_gpu=USE_GPU,
                           **NOISE.simulator_kwargs(counts_route), **kwargs)
 
 
 def _probs_from_result(res, k: int, n_qubits: int) -> np.ndarray:
-    """diag(rho) del circuito k, con el canal de lectura ya aplicado.
+    """diag(rho) of circuit k, with the readout channel already applied.
 
-    Centraliza el paso que, de omitirse, dejaria la columna `readout` del eje
-    identica a la ideal: el error de lectura es un canal clasico posterior a
-    la medicion y no aparece en `rho`, asi que hay que aplicarlo en cerrado.
+    Centralizes the step that, if omitted, would leave the axis's `readout`
+    column identical to the ideal one: readout error is a classical channel
+    after the measurement and does not appear in `rho`, so it has to be
+    applied in closed form.
 
     Args:
-        res: `Result` de Aer de un circuito con `save_probabilities()`.
-        k: indice del circuito dentro del job.
-        n_qubits: ancho del registro.
+        res: Aer `Result` of a circuit with `save_probabilities()`.
+        k: index of the circuit within the job.
+        n_qubits: register width.
 
     Returns:
-        Vector de probabilidades de longitud `2**n_qubits`.
+        Probability vector of length `2**n_qubits`.
     """
     probs = np.asarray(res.data(k)['probabilities'], dtype=float)
     # [E-HPC3] on a device-level noise model, logical qubit q was placed on a
@@ -253,38 +254,39 @@ def _ref_specs(param_name: str):
 def _draw_ref_lines(ax, param_name: str, axis: str = 'x', band: bool = True):
     """Draw Planck/SH0ES reference line(s) (+/-1 sigma band) for a parameter.
 
-    [B-REFCLIP] Las bandas se dibujan DESPUES de que los ejes ya estan
-    fijados a los datos, asi que una referencia que cae fuera salia cortada
-    a la mitad: se veia el color pero no donde acababa, y no habia forma de
-    saber si el limite del eje era el borde de la banda o del panel. Ahora
-    hay tres casos:
+    [B-REFCLIP] The bands are drawn AFTER the axes are already fitted to the
+    data, so a reference falling outside was cut in half: the color showed
+    but not where it ended, and there was no way to tell whether the axis
+    limit was the edge of the band or of the panel. There are now three
+    cases:
 
-      * la banda entera cabe            -> se dibuja tal cual;
-      * la linea cabe pero la banda no  -> se estira el eje lo justo para
-                                           que quepa completa;
-      * la linea queda fuera del rango  -> NO se dibuja media banda; se
-                                           anota en una esquina, igual que
-                                           ya hacian las figuras del
-                                           genetico ("fiducial = X, fuera
-                                           de rango").
+      * the whole band fits              -> drawn as is;
+      * the line fits but the band not   -> the axis is stretched just enough
+                                            for it to fit completely;
+      * the line is out of range         -> NO half band is drawn; it is
+                                            annotated in a corner, as the
+                                            genetic figures already did
+                                            ("fiducial = X, out of
+                                            range").
 
     Args:
-        ax: los ejes sobre los que dibujar.
-        param_name: nombre del parametro ('Om', 'H0', ...).
-        axis: 'x' o 'y', el eje sobre el que va la referencia.
-        band: si dibujar la banda de +/-1 sigma ademas de la linea.
+        ax: the axes to draw on.
+        param_name: parameter name ('Om', 'H0', ...).
+        axis: 'x' or 'y', the axis the reference goes on.
+        band: whether to draw the +/-1 sigma band in addition to the line.
 
     Returns:
-        Lista de las etiquetas que quedaron fuera de rango y se anotaron.
+        List of the labels that fell out of range and were annotated.
     """
-    fuera = []
+    out_of_range = []
     for label, val, sig, col, ls in _ref_specs(param_name):
         lo, hi = ax.get_xlim() if axis == 'x' else ax.get_ylim()
         if not (lo <= val <= hi):
-            # La referencia no cae en el rango de los datos. Estirar el eje
-            # hasta ella aplastaria los datos en una franja ilegible, que es
-            # lo que [B-FIDSCALE] arreglo; y media banda confunde. Se anota.
-            fuera.append(f"{label} = {val:g} ({'>' if val > hi else '<'} rango)")
+            # The reference is not within the data range. Stretching the axis
+            # to reach it would squash the data into an unreadable strip,
+            # which is what [B-FIDSCALE] fixed; and half a band is confusing.
+            # It is annotated instead.
+            out_of_range.append(f"{label} = {val:g} ({'>' if val > hi else '<'} range)")
             continue
         if axis == 'x':
             ax.axvline(val, color=col, ls=ls, lw=1.8, label=label, zorder=5)
@@ -296,10 +298,10 @@ def _draw_ref_lines(ax, param_name: str, axis: str = 'x', band: bool = True):
             if band and sig:
                 ax.axhspan(val - sig, val + sig, color=col, alpha=0.12, zorder=0)
                 ax.set_ylim(min(lo, val - sig), max(hi, val + sig))
-    if fuera:
-        ax.text(0.98, 0.02, '\n'.join(fuera), transform=ax.transAxes,
+    if out_of_range:
+        ax.text(0.98, 0.02, '\n'.join(out_of_range), transform=ax.transAxes,
                 ha='right', va='bottom', fontsize=6, color='0.45')
-    return fuera
+    return out_of_range
 
 
 def _overplot_refs_corner(fig, model):
@@ -371,10 +373,10 @@ def _reseed(seed: int):
     rng = np.random.default_rng(seed)
     core.RNG = rng
     globals()['RNG'] = rng
-    # [B-PROV] Publicar la semilla base para que las filas del CSV la lleven.
-    # Se guarda solo la primera vez de cada corrida: las llamadas posteriores
-    # usan derivadas (seed+1 para el flujo del QVMC), y lo que interesa anotar
-    # es la semilla que el usuario paso.
+    # [B-PROV] Publish the base seed so the CSV rows carry it.
+    # Stored only the first time in each run: later calls use derived seeds
+    # (seed+1 for the QVMC stream), and what we want to record is the seed
+    # the user passed.
     if globals().get('RUN_SEED') is None:
         globals()['RUN_SEED'] = int(seed)
 
@@ -482,13 +484,13 @@ def compute_quantumness(config: dict) -> float:
     quantum — an ablation index, NOT a quantum-resource metric.
 
     Args:
-        config: que componentes del algoritmo son cuanticos.
+        config: which components of the algorithm are quantum.
 
     Returns:
         float
     Examples:
-        El indice es la fraccion de componentes cuanticos, no una suma de
-        pesos elegidos a mano:
+        The index is the fraction of quantum components, not a sum of
+        hand-picked weights:
 
         >>> compute_quantumness({})
         0.0
@@ -508,7 +510,7 @@ def legacy_weighted_index(config: dict) -> float:
     secondary number — never as the primary index.
 
     Args:
-        config: que componentes del algoritmo son cuanticos.
+        config: which components of the algorithm are quantum.
 
     Returns:
         float
@@ -527,7 +529,7 @@ def component_kinds(config: dict) -> dict:
     treatment cells (expected to differ).
 
     Args:
-        config: que componentes del algoritmo son cuanticos.
+        config: which components of the algorithm are quantum.
 
     Returns:
         dict
@@ -540,7 +542,7 @@ def quantumness_label(pct: float) -> str:
     """Human-readable label for a global ablation level (#quantum / 5).
 
     Args:
-        pct: porcentaje de quantumness.
+        pct: quantumness percentage.
 
     Returns:
         str
@@ -577,13 +579,13 @@ def quantumness_qmcmc(config: dict) -> float:
     """QMCMC-only ablation index: (#active of proposal, acceptance)/2 · 100.
 
     Args:
-        config: que componentes del algoritmo son cuanticos.
+        config: which components of the algorithm are quantum.
 
     Returns:
         float
     Examples:
-        La escalera del QMCMC tiene DOS componentes, asi que sus peldanos son
-        0, 50 y 100 %:
+        The QMCMC ladder has TWO components, so its rungs are
+        0, 50 and 100 %:
 
         >>> quantumness_qmcmc({})
         0.0
@@ -600,14 +602,14 @@ def quantumness_qvmc(config: dict) -> float:
     """QVMC-only ablation index: (#active of sampling, training, norm)/3 · 100.
 
     Args:
-        config: que componentes del algoritmo son cuanticos.
+        config: which components of the algorithm are quantum.
 
     Returns:
         float
     Examples:
-        La del QVMC tiene TRES, asi que sus peldanos son 0, 33, 67 y 100 %.
-        El salto de 33 a 67 es el que cambia el optimizador (COBYLA ->
-        parameter-shift) y por tanto el unico marcado ALGORITHMIC:
+        The QVMC one has THREE, so its rungs are 0, 33, 67 and 100 %.
+        The step from 33 to 67 is the one that changes the optimizer (COBYLA ->
+        parameter-shift) and is therefore the only one tagged ALGORITHMIC:
 
         >>> quantumness_qvmc({'sampling': True})
         33.3
@@ -648,8 +650,8 @@ def build_proposal_circuit(n_qubits: int, n_layers: int = 3) -> QuantumCircuit:
     the first n_params amplitudes define the displacement.
 
     Args:
-        n_qubits: ancho del circuito en qubits.
-        n_layers: capas del circuito. Por defecto 3.
+        n_qubits: circuit width in qubits.
+        n_layers: circuit layers. Defaults to 3.
 
     Returns:
         QuantumCircuit
@@ -688,22 +690,23 @@ class QuantumProposalEngine:
 
     def __init__(self, n_phys: int, n_layers: int = 3, batch: int = 256,
                  n_calib: int = 1024):
-        """Motor de propuestas cuanticas para el QMCMC.
+        """Quantum proposal engine for the QMCMC.
 
         Args:
-            n_phys: parametros fisicos del modelo (el circuito usa max(2, n_phys)
-                qubits, porque con uno solo no hay entrelazamiento que proponer).
-            n_layers: capas del circuito de propuesta.
-            batch: propuestas por trabajo de Aer.
-            n_calib: muestras de calibracion de la escala de la propuesta.
+            n_phys: physical model parameters (the circuit uses max(2, n_phys)
+                qubits, because with a single one there is no entanglement to
+                propose).
+            n_layers: layers of the proposal circuit.
+            batch: proposals per Aer job.
+            n_calib: calibration samples for the proposal scale.
         """
         self.d = n_phys
         self.n_qubits = max(2, n_phys)
         self.qc = build_proposal_circuit(self.n_qubits, n_layers)
         self.n_phi = self.qc.num_parameters
-        # [NOISE] Ruta de lectura fijada UNA vez, en construccion: la
-        # calibracion (_mu, _sigma) se estima con la ruta activa y no seria
-        # valida si la ruta cambiara despues.
+        # [NOISE] Readout route fixed ONCE, at construction: the calibration
+        # (_mu, _sigma) is estimated with the active route and would not be
+        # valid if the route changed afterwards.
         self.route = ('counts'
                       if (PROPOSAL_ROUTE == 'counts' or not NOISE.is_ideal)
                       else 'amplitude')
@@ -749,21 +752,21 @@ class QuantumProposalEngine:
     def _raw_block(self, n: int) -> np.ndarray:
         """Generate `n` RAW (uncalibrated) displacements in a single job.
 
-        Despacha a la ruta fijada en construccion. Ver `PROPOSAL_ROUTE` para
-        por que las dos rutas son operadores distintos y no versiones ideal /
-        ruidosa del mismo.
+        Dispatches to the route fixed at construction. See `PROPOSAL_ROUTE`
+        for why the two routes are different operators and not ideal / noisy
+        versions of the same one.
         """
         if self.route == 'amplitude':
             return self._raw_block_amplitude(n)
         return self._raw_block_counts(n)
 
     def _raw_block_amplitude(self, n: int) -> np.ndarray:
-        """Ruta original: Re(psi)*sign(Im(psi)) de las d primeras amplitudes.
+        """Original route: Re(psi)*sign(Im(psi)) of the first d amplitudes.
 
-        Solo existe en el limite ideal — la fase relativa que lee esta
-        expresion no esta definida para un estado mezclado. Se conserva
-        literalmente para que el peldano ideal siga siendo reproducible bit a
-        bit contra los resultados ya publicados.
+        Only exists in the ideal limit — the relative phase this expression
+        reads is not defined for a mixed state. Kept verbatim so that the
+        ideal rung remains bit-for-bit reproducible against the already
+        published results.
         """
         circs = []
         for _ in range(n):
@@ -781,44 +784,43 @@ class QuantumProposalEngine:
         return raw
 
     def _raw_block_counts(self, n: int) -> np.ndarray:
-        """Ruta por medicion: <Z_q> = 1 - 2*P(q=1) por qubit, en [-1, 1]^d.
+        """Measurement route: <Z_q> = 1 - 2*P(q=1) per qubit, in [-1, 1]^d.
 
-        Es EXACTAMENTE la regla de `qpu_cosmo_samplers.QPUProposalEngine.
-        _counts_to_shift`, que es lo que corre en hardware real. La regla se
-        replica aqui en vez de importarse porque `qpu_cosmo_samplers.py` se
-        mantiene intacto para las corridas de QPU; `test_noise_axis.py` fija
-        la equivalencia de ambas implementaciones sobre los mismos conteos,
-        de modo que no puedan divergir en silencio.
+        This is EXACTLY the rule of `qpu_cosmo_samplers.QPUProposalEngine.
+        _counts_to_shift`, which is what runs on real hardware. The rule is
+        replicated here instead of imported because `qpu_cosmo_samplers.py`
+        is kept untouched for the QPU runs; `test_noise_axis.py` pins the
+        equivalence of both implementations on the same counts, so they
+        cannot diverge silently.
 
-        A diferencia del hardware, aqui P(q=1) se obtiene EXACTA de
-        `diag(rho)` (con el canal de lectura ya aplicado) en vez de estimarse
-        con disparos. Es deliberado: el eje mide degradacion por ruido, y
-        superponerle ruido de muestreo confundiria las dos cosas. La version
-        con disparos vive en el gemelo QPU.
+        Unlike on hardware, here P(q=1) is obtained EXACTLY from `diag(rho)`
+        (with the readout channel already applied) instead of being estimated
+        from shots. This is deliberate: the axis measures noise degradation,
+        and layering sampling noise on top would conflate the two. The
+        shot-based version lives in the QPU twin.
 
-        [INVARIANCIA] Esta ruta es EXACTAMENTE invariante a un canal de
-        lectura UNIFORME, y conviene saberlo antes de leer la tabla de
-        resultados. Con probabilidad de volteo p simetrica e igual en todos
-        los qubits:
+        [INVARIANCE] This route is EXACTLY invariant to a UNIFORM readout
+        channel, and it is worth knowing before reading the results table.
+        With a flip probability p that is symmetric and equal on all qubits:
 
             P'(q=1) = (1-p)P(q=1) + p(1-P(q=1))
             => <Z_q>' = 1 - 2P'(q=1) = (1-2p) <Z_q>
 
-        es decir, un reescalado escalar. La calibracion a media cero y std
-        unitaria de `__init__` divide ese factor, asi que el desplazamiento
-        calibrado no cambia en absoluto. Verificado a 8e-15 (precision de
-        punto flotante) incluso con p = 0.20.
+        i.e. a scalar rescaling. The zero-mean / unit-std calibration in
+        `__init__` divides that factor out, so the calibrated displacement
+        does not change at all. Verified to 8e-15 (floating-point precision)
+        even with p = 0.20.
 
-        Consecuencia: en la fila de la propuesta, la columna `readout` sale
-        IDENTICA a la columna ideal-por-conteos. Eso NO es el bug [B-RO],
-        que producia el mismo sintoma: es una invariancia demostrable, y la
-        forma de distinguirlas es la prueba de arriba mas el hecho de que el
-        ruido de COMPUERTA si sobrevive (0.11 en `full`, 0.023 en
-        FakeBrisbane sobre desplazamientos de std 1).
+        Consequence: in the proposal row, the `readout` column comes out
+        IDENTICAL to the ideal-by-counts column. That is NOT the [B-RO] bug,
+        which produced the same symptom: it is a provable invariance, and the
+        way to tell them apart is the proof above plus the fact that GATE
+        noise does survive (0.11 in `full`, 0.023 on FakeBrisbane over
+        displacements of std 1).
 
-        Responde ademas a la pregunta abierta del diseno: la calibracion no
-        absorbe "parte" del efecto del ruido, absorbe el 100% del componente
-        de lectura uniforme y nada del de compuerta.
+        It also answers the open design question: the calibration does not
+        absorb "part" of the noise effect, it absorbs 100% of the uniform
+        readout component and none of the gate component.
         """
         probs = np.empty((n, 2 ** self.n_qubits))
         circs = []
@@ -829,8 +831,8 @@ class QuantumProposalEngine:
         for k in range(n):
             probs[k] = _probs_from_result(res, k, self.n_qubits)
 
-        # P(qubit q = 1): suma de las celdas cuyo bit q vale 1.
-        # Qiskit es little-endian, el bit q del indice i es (i >> q) & 1.
+        # P(qubit q = 1): sum of the cells whose bit q equals 1.
+        # Qiskit is little-endian; bit q of index i is (i >> q) & 1.
         idx = np.arange(2 ** self.n_qubits)
         raw = np.empty((n, self.d))
         for q in range(self.d):
@@ -868,9 +870,9 @@ class QuantumProposalEngine:
 
 
 # ── Quantum acceptance via a single-qubit amplitude encoding ─────────────────
-# [NOISE] La clave 'noise' guarda la etiqueta del peldano con el que se
-# construyo la caché. Sin ella, cambiar de peldano dentro del mismo proceso
-# seguiria usando el simulador del peldano anterior sin decir nada.
+# [NOISE] The 'noise' key stores the label of the rung the cache was built
+# with. Without it, changing rung within the same process would keep using
+# the previous rung's simulator without any warning.
 _HAD = {'sim': None, 'qc_t': None, 'par': None, 'noise': None}
 
 
@@ -908,8 +910,8 @@ def hadamard_accept_log(lp_cur: float, lp_prop: float) -> float:
     differently.
 
     Args:
-        lp_cur: log-posterior del punto actual.
-        lp_prop: log-posterior del punto propuesto.
+        lp_cur: log-posterior of the current point.
+        lp_prop: log-posterior of the proposed point.
 
     Returns:
         float
@@ -921,10 +923,10 @@ def hadamard_accept_log(lp_cur: float, lp_prop: float) -> float:
     # baseline so the quantum acceptance reproduces it exactly.
     A = min(1.0, float(np.exp(delta)))
     A = min(max(A, 1e-12), 1.0)
-    # [NOISE] Comparte la caché `_HAD` con la version por lotes, asi que debe
-    # construirla con el MISMO criterio: si una version cacheara un simulador
-    # ideal y la otra leyera esperando ruido (o al reves), el resultado seria
-    # del peldano equivocado sin ningun aviso.
+    # [NOISE] Shares the `_HAD` cache with the batched version, so it must
+    # build it with the SAME criterion: if one version cached an ideal
+    # simulator and the other read it expecting noise (or vice versa), the
+    # result would belong to the wrong rung without any warning.
     if _HAD['qc_t'] is None or _HAD['noise'] != NOISE.label:
         par = ParameterVector('theta', 1)
         qc = QuantumCircuit(1)
@@ -967,8 +969,8 @@ def hadamard_accept_log_batch(lp_cur: np.ndarray,
         lp_prop) return -inf (rejected).
 
     Args:
-        lp_cur: log-posterior del punto actual.
-        lp_prop: log-posterior del punto propuesto.
+        lp_cur: log-posterior of the current point.
+        lp_prop: log-posterior of the proposed point.
 
     Returns:
         np.ndarray
@@ -992,11 +994,11 @@ def hadamard_accept_log_batch(lp_cur: np.ndarray,
             qc.save_statevector()
             _HAD['sim'] = _sim('statevector')
         else:
-            # [NOISE] Con ruido la amplitud deja de existir, pero P(|0>) no:
-            # es rho[0,0], que save_probabilities entrega directamente. El
-            # puente es EXACTO — rho[0,0] reproduce |psi_0|^2 con diferencia
-            # 0.0 en el limite sin ruido — asi que cualquier desviacion
-            # posterior es atribuible al ruido y no al cambio de lectura.
+            # [NOISE] With noise the amplitude no longer exists, but P(|0>)
+            # does: it is rho[0,0], which save_probabilities returns directly.
+            # The bridge is EXACT — rho[0,0] reproduces |psi_0|^2 with a
+            # difference of 0.0 in the noiseless limit — so any later
+            # deviation is attributable to noise and not to the readout change.
             qc.save_probabilities()
             _HAD['sim'] = _noisy_sim(counts_route=False)
         _HAD['qc_t'] = NOISE.transpile(qc, _HAD['sim'])
@@ -1007,8 +1009,8 @@ def hadamard_accept_log_batch(lp_cur: np.ndarray,
     res = _HAD['sim'].run(circs).result()          # ONE job, all chains
     logs = np.empty(len(thetas))
     if NOISE.is_ideal:
-        # Ruta original, intacta: el peldano ideal debe seguir siendo
-        # reproducible bit a bit contra los resultados ya publicados.
+        # Original route, untouched: the ideal rung must remain bit-for-bit
+        # reproducible against the already published results.
         for k in range(len(thetas)):
             sv = np.asarray(res.get_statevector(k))
             logs[k] = np.log(float(np.abs(sv[0]) ** 2) + 1e-12)
@@ -1048,17 +1050,18 @@ class QMCMCModular:
                  step_frac: float = 0.06, n_burn: int = 200,
                  n_layers: int = 3, rhat_every: int = 50,
                  stop_on_convergence: bool = True):
-        """QMCMC con componentes cuanticos conmutables.
+        """QMCMC with switchable quantum components.
 
         Args:
-            post: posterior objetivo.
-            config: que componentes son cuanticos ('proposal', 'acceptance').
-            n_chains: cadenas en paralelo.
-            step_frac: paso de la propuesta como fraccion de la caja.
-            n_burn: pasos de calentamiento descartados.
-            n_layers: capas del circuito de propuesta.
-            rhat_every: cada cuantos pasos se recalcula R-hat.
-            stop_on_convergence: parar al converger en vez de agotar los pasos.
+            post: target posterior.
+            config: which components are quantum ('proposal', 'acceptance').
+            n_chains: parallel chains.
+            step_frac: proposal step as a fraction of the box.
+            n_burn: discarded burn-in steps.
+            n_layers: layers of the proposal circuit.
+            rhat_every: how many steps between R-hat recomputations.
+            stop_on_convergence: stop on convergence instead of exhausting
+                the steps.
         """
         self.post = post
         self.model = post.model
@@ -1240,16 +1243,16 @@ def quantum_amplitude_normalization(P_unnorm: np.ndarray) -> np.ndarray:
     circuit is executed for pedagogical fidelity and the normalization
     uses the exact sum.
 
-    [NOISE] Consecuencia que hay que declarar al leer el eje de ruido: el
-    circuito se EJECUTA bajo el peldano activo, pero su resultado se descarta
-    y el valor devuelto es la suma exacta. Este componente es por tanto
-    INMUNE al eje de ruido por construccion — el peldano del 100% del QVMC no
-    puede degradarse por su culpa. Cualquier degradacion observada entre el
-    67% y el 100% viene de otro sitio, y atribuirla a la normalizacion seria
-    un error de lectura de la escalera.
+    [NOISE] A consequence that must be stated when reading the noise axis:
+    the circuit is EXECUTED under the active rung, but its result is
+    discarded and the returned value is the exact sum. This component is
+    therefore IMMUNE to the noise axis by construction — the QVMC 100% rung
+    cannot be degraded because of it. Any degradation observed between 67%
+    and 100% comes from somewhere else, and attributing it to the
+    normalization would be a misreading of the ladder.
 
     Args:
-        P_unnorm: distribucion sin normalizar.
+        P_unnorm: unnormalized distribution.
 
     Returns:
         np.ndarray
@@ -1267,35 +1270,35 @@ def quantum_amplitude_normalization(P_unnorm: np.ndarray) -> np.ndarray:
         sim = _noisy_sim(counts_route=False)
         qc.save_probabilities()
     sim.run(transpile(qc, sim)).result()
-    # [B-EPS15] El divisor es `norm`, NO `norm + 1e-15`.
+    # [B-EPS15] The divisor is `norm`, NOT `norm + 1e-15`.
     #
-    # La rama clasica de `build_target` hace `P / total`; esta hacia
-    # `P / (total + 1e-15)`. Como `build_target` normaliza con
-    # max(log_p) = 0, se tiene max(P) = 1 y por tanto total >= 1: la
-    # diferencia relativa entre los dos divisores es <= 1e-15, o sea entre
-    # CERO y DOS ULPs segun cuantos puntos tenga la rejilla (medido: 2 ULPs
-    # con 64 puntos, 2 con 256, exactamente 0 con 4096).
+    # The classical branch of `build_target` does `P / total`; this one did
+    # `P / (total + 1e-15)`. Since `build_target` normalizes with
+    # max(log_p) = 0, max(P) = 1 and therefore total >= 1: the relative
+    # difference between the two divisors is <= 1e-15, i.e. between ZERO
+    # and TWO ULPs depending on how many points the grid has (measured: 2
+    # ULPs with 64 points, 2 with 256, exactly 0 with 4096).
     #
-    # Suena despreciable y no lo es, por dos razones:
+    # It sounds negligible and it is not, for two reasons:
     #
-    #   1. Rompe la afirmacion FIEL. `QVMC 67%` y `QVMC 100%` solo se
-    #      diferencian en este componente y deben salir identicas dígito a
-    #      dígito. Con el epsilon no lo son cuando la rejilla es chica.
-    #   2. El entrenamiento variacional amplifica la perturbacion. Medido en
-    #      la campana de Saptiva `hpc_20260907_182345`: en
-    #      `samplers_pede_nqpp3_noise-fakebrisbane` y
-    #      `samplers_pede_nqpp4_noise-fakebrisbane` la KL final coincide a
-    #      seis decimales pero Om_mean difiere en 1.1e-5 y H0_mean en 4.6e-4
-    #      (~0.001 sigma). Cientificamente nulo; para una celda que por
-    #      construccion debe ser exacta, es un fallo.
+    #   1. It breaks the FAITHFUL claim. `QVMC 67%` and `QVMC 100%` differ
+    #      only in this component and must come out identical digit for
+    #      digit. With the epsilon they are not when the grid is small.
+    #   2. Variational training amplifies the perturbation. Measured in the
+    #      Saptiva campaign `hpc_20260907_182345`: in
+    #      `samplers_pede_nqpp3_noise-fakebrisbane` and
+    #      `samplers_pede_nqpp4_noise-fakebrisbane` the final KL agrees to
+    #      six decimals but Om_mean differs by 1.1e-5 and H0_mean by 4.6e-4
+    #      (~0.001 sigma). Scientifically null; for a cell that must be exact
+    #      by construction, it is a bug.
     #
-    # El epsilon era una guarda contra division por cero que ya no hace
-    # falta: `build_target` levanta [B-EMPTY] si `total <= 0` antes de
-    # llegar aqui, asi que `norm > 0` esta garantizado.
+    # The epsilon was a guard against division by zero that is no longer
+    # needed: `build_target` raises [B-EMPTY] if `total <= 0` before
+    # reaching this point, so `norm > 0` is guaranteed.
     #
-    # AVISO: esto CAMBIA los numeros del peldano QVMC 100% al nivel de 1e-5
-    # respecto a las campanas ya corridas. Es el precio de que la celda fiel
-    # sea de verdad fiel.
+    # WARNING: this CHANGES the numbers of the QVMC 100% rung at the 1e-5
+    # level relative to the campaigns already run. That is the price of the
+    # faithful cell being truly faithful.
     return P_unnorm / norm
 
 
@@ -1305,10 +1308,10 @@ def estimate_grid_window(post: Posterior, sigma_mult: float = 4.0,
     simulator and QPU pipelines (single source of truth). See
 
     Args:
-        post: posterior cosmologico activo (`cosmo_core.Posterior`).
-        sigma_mult: semiancho de la ventana en sigmas. Por defecto 4.0.
-        n_steps: pasos de la cadena. Por defecto 400.
-        n_chains: numero de cadenas en paralelo. Por defecto 4.
+        post: active cosmological posterior (`cosmo_core.Posterior`).
+        sigma_mult: window half-width in sigmas. Defaults to 4.0.
+        n_steps: chain steps. Defaults to 400.
+        n_chains: number of parallel chains. Defaults to 4.
 
     Returns:
         List[tuple]
@@ -1343,40 +1346,40 @@ class QVMCModular:
                  n_shots: int = 2000, lr_train: float = 0.05,
                  grid_window=None, adaptive_grid: bool = True,
                  grid_sigma: float = None, budget_mode: str = 'circuits'):
-        """QVMC sobre una rejilla discreta, con componentes conmutables.
+        """QVMC on a discrete grid, with switchable components.
 
         Args:
-            post: posterior objetivo.
-            config: componentes cuanticos ('sampling', 'training', 'normalization').
-            n_qubits_per_param: qubits por parametro (rejilla de 2^nqpp por eje).
-            n_layers: capas del ansatz.
-            n_shots: disparos por circuito al muestrear.
-            lr_train: tasa de aprendizaje del SGD con parameter-shift.
-            grid_window: ventana por parametro ya calculada; None la estima.
-            adaptive_grid: centrar y ampliar la rejilla sobre el posterior.
-            grid_sigma: semiancho en sigmas; None lo deduce del tamano de rejilla.
-            budget_mode: 'circuits' (por defecto) iguala el presupuesto de
-                entrenamiento en evaluaciones de circuito entre la rama clasica y
-                la cuantica; 'iters' reproduce el sesgo historico. Ver [B-BUDGET].
+            post: target posterior.
+            config: quantum components ('sampling', 'training', 'normalization').
+            n_qubits_per_param: qubits per parameter (grid of 2^nqpp per axis).
+            n_layers: ansatz layers.
+            n_shots: shots per circuit when sampling.
+            lr_train: learning rate of the parameter-shift SGD.
+            grid_window: precomputed per-parameter window; None estimates it.
+            adaptive_grid: center and zoom the grid on the posterior.
+            grid_sigma: half-width in sigmas; None derives it from the grid size.
+            budget_mode: 'circuits' (default) equalizes the training budget in
+                circuit evaluations between the classical and the quantum
+                branch; 'iters' reproduces the historical bias. See [B-BUDGET].
 
         Raises:
-            ValueError: budget_mode desconocido.
+            ValueError: unknown budget_mode.
         """
         self.post = post
         self.model = post.model
         self.config = config
-        # [B-BUDGET] Como se reparte el presupuesto de entrenamiento entre la
-        # rama cuantica y la clasica. Ver el comentario largo en `train`.
-        #   'circuits' (por defecto) — las dos ramas reciben el MISMO numero de
-        #       evaluaciones de circuito. Es la comparacion honesta.
-        #   'iters'    — cada rama recibe `max_iter` iteraciones, que cuestan
-        #       1 + 2*n_phi circuitos en la cuantica y 1 en la clasica. Es el
-        #       comportamiento de todas las campanas anteriores a 2026-09-04;
-        #       se conserva SOLO para reproducirlas.
+        # [B-BUDGET] How the training budget is split between the quantum
+        # and the classical branch. See the long comment in `train`.
+        #   'circuits' (default) — both branches receive the SAME number of
+        #       circuit evaluations. This is the honest comparison.
+        #   'iters'    — each branch receives `max_iter` iterations, which
+        #       cost 1 + 2*n_phi circuits in the quantum one and 1 in the
+        #       classical one. This is the behavior of every campaign before
+        #       2026-09-04; kept ONLY to reproduce them.
         if budget_mode not in ('circuits', 'iters'):
             raise ValueError(
-                f"budget_mode desconocido: {budget_mode!r}. "
-                f"Validos: 'circuits', 'iters'")
+                f"unknown budget_mode: {budget_mode!r}. "
+                f"Valid: 'circuits', 'iters'")
         self.budget_mode = budget_mode
         self._circuits_per_iter = 1
         self._cobyla_budget = None
@@ -1409,9 +1412,9 @@ class QVMCModular:
             self.grid_window = list(self.model.sample_box)
         self.grids = [np.linspace(lo, hi, self.n_grid)
                       for lo, hi in self.grid_window]
-        # [NOISE] La KL lee |psi|^2, que es diag(rho): sobrevive intacta a un
-        # estado mezclado, asi que la conversion es exacta y no cambia de
-        # operador (a diferencia de la propuesta). Ver `_kl_batch`.
+        # [NOISE] The KL reads |psi|^2, which is diag(rho): it survives a
+        # mixed state intact, so the conversion is exact and does not change
+        # the operator (unlike the proposal). See `_kl_batch`.
         self.sim = (_sim('statevector') if NOISE.is_ideal
                     else _noisy_sim(counts_route=False))
         self.noise_label = NOISE.label
@@ -1441,7 +1444,7 @@ class QVMCModular:
         """θ corresponding to a measured bitstring (counts key).
 
         Args:
-            bitstring: cadena de bits medida.
+            bitstring: measured bitstring.
 
         Returns:
             np.ndarray
@@ -1452,23 +1455,25 @@ class QVMCModular:
     def build_target(self) -> np.ndarray:
         """Target posterior P on the grid. [OPT] one vectorized pass.
 
-        [B-EMPTY] Si la rejilla no toca NINGUN punto con soporte del prior, P
-        sale toda a cero y no hay objetivo que aproximar. Las dos ramas fallaban
-        distinto y ninguna avisaba bien: la clasica hacia `P / P.sum()` y
-        devolvia nan con un RuntimeWarning; la cuantica, con su guarda
-        `+1e-15`, devolvia un vector de ceros **sin ningun aviso**.
+        [B-EMPTY] If the grid touches NO point with prior support, P comes
+        out all zeros and there is no target to approximate. The two branches
+        failed differently and neither warned properly: the classical one did
+        `P / P.sum()` and returned nan with a RuntimeWarning; the quantum one,
+        with its `+1e-15` guard, returned a vector of zeros **with no warning
+        at all**.
 
-        Aguas abajo eso no explota: `P_s = (P + eps) / suma` se vuelve
-        uniforme, asi que el KL degenera en `log n - H(Q)`, que es un numero
-        PEQUENO Y ATRACTIVO. Medido, una corrida sobre una rejilla sin soporte
-        terminaba entera y reportaba Om = -4.45, H0 = -95.1 y KL = 0.022 —
-        mejor KL que cualquier corrida legitima de la campana — sin un solo
-        error. Y era el rung del 100 % el que mejor escondia la senal.
+        Downstream that does not blow up: `P_s = (P + eps) / sum` becomes
+        uniform, so the KL degenerates into `log n - H(Q)`, which is a SMALL
+        AND ATTRACTIVE number. Measured: a run on a grid without support
+        finished completely and reported Om = -4.45, H0 = -95.1 and
+        KL = 0.022 — a better KL than any legitimate run of the campaign —
+        without a single error. And it was the 100 % rung that hid the
+        signal best.
 
-        La probabilidad de llegar aqui por la ruta normal es baja, porque
-        `estimate_grid_window` recorta a las cotas del modelo. Pero es
-        exactamente la clase de fallo silencioso que ya ha mordido seis veces
-        en este proyecto, asi que ahora levanta.
+        The probability of getting here via the normal route is low, because
+        `estimate_grid_window` clips to the model bounds. But it is exactly
+        the kind of silent failure that has already bitten six times in this
+        project, so it now raises.
         """
         log_p = self.post.log_prob_batch(self.theta_table)
         valid = np.isfinite(log_p)
@@ -1479,12 +1484,12 @@ class QVMCModular:
         total = float(P.sum())
         if not np.isfinite(total) or total <= 0.0:
             raise ValueError(
-                "[B-EMPTY] La rejilla del QVMC no contiene ningun punto con "
-                "soporte del prior: el objetivo sale identicamente cero y el "
-                "KL resultante no significa nada (degenera en log n - H(Q), "
-                "que sale enganosamente pequeno). Revisa la ventana de la "
-                "rejilla (`grid_window`) contra `model.bounds`, o baja "
-                "`nqpp`. Ventana usada: "
+                "[B-EMPTY] The QVMC grid contains no point with prior "
+                "support: the target is identically zero and the resulting "
+                "KL means nothing (it degenerates into log n - H(Q), which "
+                "comes out deceptively small). Check the grid window "
+                "(`grid_window`) against `model.bounds`, or lower "
+                "`nqpp`. Window used: "
                 f"{[(round(a, 6), round(b, 6)) for a, b in self.grid_window]}")
         if self.config.get('normalization', False):
             return quantum_amplitude_normalization(P)
@@ -1542,10 +1547,10 @@ class QVMCModular:
         circs = []
         for ph in phis:
             b = qc_t.assign_parameters(ph)
-            # [NOISE] En el peldano ideal se conserva la lectura original
-            # (save_statevector) porque save_probabilities difiere de |psi|^2
-            # en 2.2e-16 y la columna ideal debe seguir siendo reproducible
-            # bit a bit contra los resultados ya publicados.
+            # [NOISE] On the ideal rung the original readout is kept
+            # (save_statevector) because save_probabilities differs from
+            # |psi|^2 by 2.2e-16 and the ideal column must remain bit-for-bit
+            # reproducible against the already published results.
             if ideal:
                 b.save_statevector()
             else:
@@ -1595,32 +1600,32 @@ class QVMCModular:
         phi = 0.1 * RNG.standard_normal(n_p)
         history = []
         t0 = time.time()
-        # [B-ITERDISP] Tope real de iteraciones de la rama que se acabe
-        # ejecutando. La rama cuantica usa max_iter; la clasica lo sustituye
-        # por su presupuesto de COBYLA en cuanto lo calcula. Va en una lista
-        # para que `record`, que se define antes, vea el valor actualizado.
-        budget_efectivo = [int(max_iter)]
+        # [B-ITERDISP] Actual iteration cap of the branch that ends up
+        # running. The quantum branch uses max_iter; the classical one
+        # replaces it with its COBYLA budget as soon as it computes it. Kept
+        # in a list so that `record`, defined earlier, sees the updated value.
+        effective_budget = [int(max_iter)]
 
         def record(it, kl, Q):
-            """Anota una iteracion del entrenamiento en el historial.
+            """Record one training iteration in the history.
 
             Args:
-                it: numero de iteracion.
-                kl: divergencia KL en esta iteracion.
-                Q: distribucion del ansatz.
+                it: iteration number.
+                kl: KL divergence at this iteration.
+                Q: ansatz distribution.
             """
             theta_mean = Q @ self.theta_table
             history.append({'it': it, 'kl': kl, 'theta_mean': theta_mean})
-            # [B-ITERDISP] El denominador es el presupuesto REAL de esta rama,
-            # no `max_iter`. En la rama clasica con budget_mode='circuits' el
-            # tope es max_iter*(1+2*n_phi) —hasta 2.1 millones—, asi que el
-            # log escribia cosas como "iter 122000/15000", que parece un error
-            # del codigo cuando en realidad es el presupuesto igualado
-            # haciendo su trabajo. Un contador que miente sobre lo que falta
-            # es peor que no tener contador.
-            tope = budget_efectivo[0]
-            if logger and (it % log_every == 0 or it == tope - 1):
-                logger.info(f"[{tag}] iter {it:5d}/{tope} | KL={kl:.6f} | "
+            # [B-ITERDISP] The denominator is the ACTUAL budget of this
+            # branch, not `max_iter`. In the classical branch with
+            # budget_mode='circuits' the cap is max_iter*(1+2*n_phi) —up to
+            # 2.1 million—, so the log printed things like "iter 122000/15000",
+            # which looks like a code bug when it is actually the equalized
+            # budget doing its job. A counter that lies about what is left is
+            # worse than no counter at all.
+            cap = effective_budget[0]
+            if logger and (it % log_every == 0 or it == cap - 1):
+                logger.info(f"[{tag}] iter {it:5d}/{cap} | KL={kl:.6f} | "
                             f"E[theta]: {fmt_theta(self.model, theta_mean)}")
 
         if self.config.get('training', False):
@@ -1645,8 +1650,8 @@ class QVMCModular:
             #       the "creep-up" pathology from the reported result.
             lr0 = self.lr_train
             decay = 0.02 * max(1.0, n_p / 42.0)        # (2) scale with #angles
-            # [B-BUDGET] Coste real por iteracion de ESTA rama: una evaluacion
-            # de KL en phi mas las 2*n_phi desplazadas del parameter-shift.
+            # [B-BUDGET] Actual cost per iteration of THIS branch: one KL
+            # evaluation at phi plus the 2*n_phi parameter-shift shifts.
             self._circuits_per_iter = 1 + 2 * n_p
             grad_cap = 1.0                              # (1) max gradient norm
             best_kl, best_phi = np.inf, phi.copy()      # (3) best-so-far
@@ -1707,13 +1712,13 @@ class QVMCModular:
             it_count = [0]
 
             def cost(ph):
-                """Coste que optimiza COBYLA: el KL de la distribucion en `ph`.
+                """Cost minimized by COBYLA: the KL of the distribution at `ph`.
 
                 Args:
-                    ph: vector de angulos del ansatz.
+                    ph: vector of ansatz angles.
 
                 Returns:
-                    Ver la descripcion de arriba.
+                    See the description above.
                 """
                 kl, Qs = self._kl_batch(ph, qc_t, P_target, return_q=True)
                 record(it_count[0], float(kl[0]), Qs[0])
@@ -1724,51 +1729,51 @@ class QVMCModular:
                     pbar.update(1)
                 return float(kl[0])
 
-            # [B-BUDGET] Presupuesto EN EVALUACIONES DE CIRCUITO, no en
-            # "iteraciones".
+            # [B-BUDGET] Budget IN CIRCUIT EVALUATIONS, not in
+            # "iterations".
             #
-            # El bug: `max_iter` se pasaba igual a las dos ramas, pero una
-            # iteracion NO cuesta lo mismo en cada una. La rama cuantica gasta
-            # 1 + 2*n_phi circuitos por iteracion (el KL en phi mas las
-            # desplazadas del parameter-shift); COBYLA gasta exactamente 1.
-            # O sea que con el mismo --qvmc-iter la rama cuantica recibia
-            # entre 57x (lcdm, nqpp=2) y 225x (cpl, nqpp=4) mas trabajo.
+            # The bug: `max_iter` was passed unchanged to both branches, but
+            # one iteration does NOT cost the same in each. The quantum branch
+            # spends 1 + 2*n_phi circuits per iteration (the KL at phi plus
+            # the parameter-shift shifts); COBYLA spends exactly 1.
+            # So with the same --qvmc-iter the quantum branch received
+            # between 57x (lcdm, nqpp=2) and 225x (cpl, nqpp=4) more work.
             #
-            # Medido, lcdm/CC+BAO/nqpp=2, semilla 43:
-            #     parameter-shift, 40 iter -> 2281 circuitos, KL = 1.425
-            #     COBYLA,          40 iter ->   41 circuitos, KL = 1.783
-            #     COBYLA,        2281 iter -> 2282 circuitos, KL = 0.00063
+            # Measured, lcdm/CC+BAO/nqpp=2, seed 43:
+            #     parameter-shift, 40 iter -> 2281 circuits, KL = 1.425
+            #     COBYLA,          40 iter ->   41 circuits, KL = 1.783
+            #     COBYLA,        2281 iter -> 2282 circuits, KL = 0.00063
             #
-            # A presupuesto igualado el optimizador clasico gana por tres
-            # ordenes de magnitud, o sea que la comparacion nominal estaba
-            # sesgada A FAVOR de lo cuantico. Eso es justo lo que este
-            # proyecto NO puede permitirse: la afirmacion central es fidelidad,
-            # no ventaja, y una ventaja aparente que sale de contar mal el
-            # trabajo es peor que no medir nada.
+            # At an equalized budget the classical optimizer wins by three
+            # orders of magnitude, so the nominal comparison was biased IN
+            # FAVOR of the quantum side. That is exactly what this project
+            # CANNOT afford: the central claim is fidelity, not advantage,
+            # and an apparent advantage that comes from miscounting the work
+            # is worse than measuring nothing.
             #
-            # Por defecto (`budget_mode='circuits'`) las dos ramas reciben el
-            # MISMO numero de evaluaciones de circuito. `budget_mode='iters'`
-            # reproduce el comportamiento viejo, que es lo que usaron todas
-            # las campanas anteriores a 2026-09-04.
+            # By default (`budget_mode='circuits'`) both branches receive the
+            # SAME number of circuit evaluations. `budget_mode='iters'`
+            # reproduces the old behavior, which is what every campaign
+            # before 2026-09-04 used.
             if self.budget_mode == 'circuits':
                 cobyla_iter = int(max_iter) * (1 + 2 * n_p)
             else:
                 cobyla_iter = int(max_iter)
-            # [B-COBYLA-CLAMP] SciPy sube maxiter hasta n_vars+2 y avisa; se
-            # hace explicito para que el conteo declarado sea el real.
+            # [B-COBYLA-CLAMP] SciPy raises maxiter to n_vars+2 and warns; it
+            # is made explicit so that the declared count is the real one.
             cobyla_iter = max(cobyla_iter, n_p + 2)
             self._circuits_per_iter = 1
             self._cobyla_budget = cobyla_iter
-            budget_efectivo[0] = cobyla_iter
+            effective_budget[0] = cobyla_iter
             if logger:
-                # Anunciarlo ANTES de arrancar: con nqpp=5 son 2.1 millones de
-                # evaluaciones, y saberlo al empezar evita creer a media noche
-                # que el proceso se colgó.
+                # Announce it BEFORE starting: with nqpp=5 it is 2.1 million
+                # evaluations, and knowing it up front avoids believing in the
+                # middle of the night that the process hung.
                 logger.info(
-                    f"[{tag}] presupuesto COBYLA = {cobyla_iter:,} "
-                    f"evaluaciones ({max_iter} x (1+2*{n_p}), "
-                    f"budget_mode={self.budget_mode}). Es un TOPE: COBYLA "
-                    f"para antes si converge.")
+                    f"[{tag}] COBYLA budget = {cobyla_iter:,} "
+                    f"evaluations ({max_iter} x (1+2*{n_p}), "
+                    f"budget_mode={self.budget_mode}). It is a CAP: COBYLA "
+                    f"stops earlier if it converges.")
             res = minimize(cost, phi, method='COBYLA',
                            options={'maxiter': cobyla_iter, 'rhobeg': 0.3})
             if pbar:
@@ -1795,12 +1800,12 @@ class QVMCModular:
         """Sample from the trained circuit: quantum shots or classical inverse.
 
         Args:
-            phi_opt: angulos optimos tras el entrenamiento.
-            qc: circuito cuantico.
-            n_chains: numero de cadenas en paralelo. Por defecto 3.
+            phi_opt: optimal angles after training.
+            qc: quantum circuit.
+            n_chains: number of parallel chains. Defaults to 3.
 
         Returns:
-            Ver la descripcion de arriba.
+            See the description above.
         """
         bound = qc.assign_parameters(phi_opt)
         all_chains = []
@@ -1819,28 +1824,28 @@ class QVMCModular:
                 counts = self.sim.run(bound_t, shots=self.n_shots,
                                       seed_simulator=1000 + c * 137
                                       ).result().get_counts()
-                # [B-ESSCOMP] La rama cuantica devolvia la representacion
-                # COMPRIMIDA (una fila por cadena de bits distinta, con su
-                # conteo como peso) mientras que la clasica devuelve una fila
-                # POR DISPARO. Las dos describen exactamente la misma muestra,
-                # pero el ESS de Kish, (sum w)^2 / sum w^2, no es invariante
-                # bajo esa compresion: sobre la forma comprimida mide cuantas
-                # CELDAS DE LA REJILLA se ocuparon, no cuantas muestras hay.
+                # [B-ESSCOMP] The quantum branch returned the COMPRESSED
+                # representation (one row per distinct bitstring, with its
+                # count as weight) whereas the classical one returns one row
+                # PER SHOT. Both describe exactly the same sample, but the
+                # Kish ESS, (sum w)^2 / sum w^2, is not invariant under that
+                # compression: on the compressed form it measures how many
+                # GRID CELLS were occupied, not how many samples there are.
                 #
-                # Medido con 3 cadenas x 2000 disparos, lcdm nqpp=3, misma
-                # phi_opt y KL identico hasta la sexta cifra en ambas ramas:
+                # Measured with 3 chains x 2000 shots, lcdm nqpp=3, same
+                # phi_opt and KL identical to the sixth digit in both branches:
                 #
-                #     Classical VI  filas=6000  ESS reportado = 6000.00
-                #     QVMC 33%      filas= 185  ESS reportado =  100.74
-                #     ...expandiendo los conteos a una fila por disparo,
-                #        las DOS dan 6000.00
+                #     Classical VI  rows=6000  reported ESS = 6000.00
+                #     QVMC 33%      rows= 185  reported ESS =  100.74
+                #     ...expanding the counts to one row per shot,
+                #        BOTH give 6000.00
                 #
-                # O sea que la caida de 60x era puramente de representacion, y
-                # aparecia en el CSV publicado como si el muestreo cuantico
-                # costara 60 veces el tamano efectivo de muestra — en una
-                # celda etiquetada FAITHFUL, donde por construccion no debe
-                # haber diferencia. Se expande a una fila por disparo para que
-                # las dos ramas sean comparables.
+                # So the 60x drop was purely representational, and it showed
+                # up in the published CSV as if quantum sampling cost 60 times
+                # the effective sample size — in a cell tagged FAITHFUL,
+                # where by construction there must be no difference. It is
+                # expanded to one row per shot so the two branches are
+                # comparable.
                 bitstrings = list(counts.keys())
                 mult = np.array([counts[b] for b in bitstrings], dtype=int)
                 S_compact = np.array([self.decode(bs) for bs in bitstrings])
@@ -1857,9 +1862,9 @@ class QVMCModular:
                                   ).result().get_statevector()
                 probs = np.abs(np.asarray(sv))**2
             else:
-                # [NOISE] Sin amplitud, pero |psi|^2 = diag(rho) sigue siendo
-                # la misma cantidad; el canal de lectura se aplica en cerrado
-                # porque este circuito no mide.
+                # [NOISE] No amplitude, but |psi|^2 = diag(rho) is still the
+                # same quantity; the readout channel is applied in closed form
+                # because this circuit does not measure.
                 sv_qc.save_probabilities()
                 res = self.sim.run(NOISE.transpile(sv_qc, self.sim)).result()
                 probs = _probs_from_result(res, 0, self.n_qubits)
@@ -1877,15 +1882,15 @@ class QVMCModular:
         """Full pipeline: target → training → sampling → moments.
 
         Args:
-            max_iter: tope de iteraciones. Por defecto 300.
-            n_chains: numero de cadenas en paralelo. Por defecto 3.
-            logger: destino de los mensajes; None imprime por pantalla. Por
-                defecto None.
-            log_every: cada cuantos pasos se emite una linea de progreso. Por
-                defecto 500.
-            progress: mostrar barra de progreso. Por defecto True.
-            tag: etiqueta corta que va al nombre de archivo y a los mensajes.
-                Por defecto 'QVMC'.
+            max_iter: iteration cap. Defaults to 300.
+            n_chains: number of parallel chains. Defaults to 3.
+            logger: destination of the messages; None prints to the screen.
+                Defaults to None.
+            log_every: how many steps between progress lines. Defaults to
+                500.
+            progress: show a progress bar. Defaults to True.
+            tag: short label used in file names and messages.
+                Defaults to 'QVMC'.
 
         Returns:
             dict
@@ -1900,9 +1905,9 @@ class QVMCModular:
         mu = np.array([np.average(S[:, p], weights=W) for p in range(self.d)])
         sd = np.array([np.sqrt(np.average((S[:, p] - mu[p])**2, weights=W))
                        for p in range(self.d)])
-        # [B-BUDGET][B-PROV] Se reporta el trabajo REALMENTE gastado, no el
-        # nominal: es lo unico que hace auditable la comparacion entre la rama
-        # clasica y la cuantica.
+        # [B-BUDGET][B-PROV] The work ACTUALLY spent is reported, not the
+        # nominal one: it is the only thing that makes the comparison between
+        # the classical and the quantum branch auditable.
         n_iters = len(hist) if hist else 0
         circuits = (n_iters * getattr(self, '_circuits_per_iter', 1)
                     if self.config.get('training', False)
@@ -1929,10 +1934,10 @@ def run_config(post: Posterior, config: dict, n_steps_mcmc: int = 300,
     """Run QMCMC + QVMC with one configuration and compute ALL estimators:
     χ², reduced χ², AIC, BIC, ESS, acceptance, R̂, KL.
 
-    [B-BUDGET] `budget_mode` decide como se iguala el presupuesto de
-    entrenamiento del QVMC entre la rama clasica y la cuantica; ver
-    `QVMCModular.__init__`. Por defecto se igualan en EVALUACIONES DE
-    CIRCUITO, no en iteraciones.
+    [B-BUDGET] `budget_mode` decides how the QVMC training budget is
+    equalized between the classical and the quantum branch; see
+    `QVMCModular.__init__`. By default they are equalized in CIRCUIT
+    EVALUATIONS, not in iterations.
 
     Fair-comparison note: `n_steps_mcmc` and `max_iter_qvmc` apply equally
     to the classical and quantum variants of each method (same code path
@@ -1952,27 +1957,27 @@ def run_config(post: Posterior, config: dict, n_steps_mcmc: int = 300,
     initialization despite the same-seed claim.
 
     Args:
-        post: posterior cosmologico activo (`cosmo_core.Posterior`).
-        config: que componentes del algoritmo son cuanticos.
-        n_steps_mcmc: pasos del MCMC. Por defecto 300.
-        max_iter_qvmc: iteraciones del entrenamiento variacional. Por defecto
+        post: active cosmological posterior (`cosmo_core.Posterior`).
+        config: which components of the algorithm are quantum.
+        n_steps_mcmc: MCMC steps. Defaults to 300.
+        max_iter_qvmc: variational training iterations. Defaults to
             200.
-        n_chains_mcmc: cadenas del MCMC. Por defecto 6.
-        n_chains_qvmc: cadenas de muestreo del QVMC. Por defecto 3.
-        nqpp: qubits por parametro (rejilla de 2^nqpp por eje). Por defecto 3.
-        n_shots: disparos por circuito. Por defecto 2000.
-        n_burn: pasos de calentamiento que se descartan. Por defecto None.
-        logger: destino de los mensajes; None imprime por pantalla. Por
-            defecto None.
-        log_every: cada cuantos pasos se emite una linea de progreso. Por
-            defecto 500.
-        verbose: imprimir progreso. Por defecto True.
-        stop_on_convergence: parar al converger en vez de agotar los pasos.
-            Por defecto False.
-        seed: semilla del generador aleatorio. Por defecto None.
-        budget_mode: 'circuits' iguala el presupuesto en evaluaciones de
-            circuito; 'iters' reproduce el sesgo historico. Ver [B-BUDGET].
-            Por defecto 'circuits'.
+        n_chains_mcmc: MCMC chains. Defaults to 6.
+        n_chains_qvmc: QVMC sampling chains. Defaults to 3.
+        nqpp: qubits per parameter (grid of 2^nqpp per axis). Defaults to 3.
+        n_shots: shots per circuit. Defaults to 2000.
+        n_burn: burn-in steps that are discarded. Defaults to None.
+        logger: destination of the messages; None prints to the screen.
+            Defaults to None.
+        log_every: how many steps between progress lines. Defaults to
+            500.
+        verbose: print progress. Defaults to True.
+        stop_on_convergence: stop on convergence instead of exhausting the steps.
+            Defaults to False.
+        seed: random generator seed. Defaults to None.
+        budget_mode: 'circuits' equalizes the budget in circuit
+            evaluations; 'iters' reproduces the historical bias. See [B-BUDGET].
+            Defaults to 'circuits'.
 
     Returns:
         dict
@@ -2069,11 +2074,11 @@ def run_comparison(post: Posterior, config: dict, seed: int = 42,
             'classical'— result of the classical baseline
 
     Args:
-        post: posterior cosmologico activo (`cosmo_core.Posterior`).
-        config: que componentes del algoritmo son cuanticos.
-        seed: semilla del generador aleatorio. Por defecto 42.
-        logger: destino de los mensajes; None imprime por pantalla. Por
-            defecto None.
+        post: active cosmological posterior (`cosmo_core.Posterior`).
+        config: which components of the algorithm are quantum.
+        seed: random generator seed. Defaults to 42.
+        logger: destination of the messages; None prints to the screen.
+            Defaults to None.
 
     Returns:
         dict
@@ -2141,13 +2146,13 @@ def plot_kl_overlay(res_q: dict, res_c: dict, outdir: str, tag: str):
     construction (requirement 2).
 
     Args:
-        res_q: resultado de la corrida cuantica.
-        res_c: resultado de la corrida clasica de referencia.
-        outdir: carpeta donde escribir la salida.
-        tag: etiqueta corta que va al nombre de archivo y a los mensajes.
+        res_q: result of the quantum run.
+        res_c: result of the classical baseline run.
+        outdir: output folder.
+        tag: short label used in file names and messages.
 
     Returns:
-        Ver la descripcion de arriba.
+        See the description above.
     """
     fig, ax = plt.subplots(figsize=(8, 5.2))
     for res, col, lab in ((res_c, C_CLASSICAL, 'Classical VI (0%)'),
@@ -2172,16 +2177,17 @@ def plot_kl_overlay(res_q: dict, res_c: dict, outdir: str, tag: str):
 
 def plot_rhat_overlay(res_q: dict, res_c: dict, outdir: str, tag: str):
     """Gelman-Rubin convergence (R̂−1 vs steps) of Classical MCMC vs QMCMC
+    OVERLAID on one axis. Blue = classical, red = quantum.
 
     Args:
-        res_q: resultado de la corrida cuantica.
-        res_c: resultado de la corrida clasica de referencia.
-        outdir: carpeta donde escribir la salida.
-        tag: etiqueta corta que va al nombre de archivo y a los mensajes.
+        res_q: result of the quantum run.
+        res_c: result of the classical baseline run.
+        outdir: output folder.
+        tag: short label used in file names and messages.
 
     Returns:
-        Ver la descripcion de arriba.
-    OVERLAID on one axis. Blue = classical, red = quantum."""
+        See the description above.
+    """
     fig, ax = plt.subplots(figsize=(8, 5.2))
     for res, col, lab in ((res_c, C_CLASSICAL, 'Classical MCMC (0%)'),
                           (res_q, C_QUANTUM,
@@ -2218,20 +2224,20 @@ def plot_corner_overlay(flat_c: np.ndarray, flat_q: np.ndarray, model,
     the contours are directly comparable.
 
     Args:
-        flat_c: muestras clasicas aplanadas.
-        flat_q: muestras cuanticas aplanadas.
-        model: modelo cosmologico (`cosmo_core.CosmoModel`).
-        outdir: carpeta donde escribir la salida.
-        tag: etiqueta corta que va al nombre de archivo y a los mensajes.
-        title: titulo de la figura.
-        labels: etiquetas para la leyenda. Por defecto ('Classical',
+        flat_c: flattened classical samples.
+        flat_q: flattened quantum samples.
+        model: cosmological model (`cosmo_core.CosmoModel`).
+        outdir: output folder.
+        tag: short label used in file names and messages.
+        title: figure title.
+        labels: legend labels. Defaults to ('Classical',
             'Quantum').
-        q_color: color de la serie cuantica. Por defecto C_QUANTUM.
-        weights_c: pesos de las muestras clasicas. Por defecto None.
-        weights_q: pesos de las muestras cuanticas. Por defecto None.
+        q_color: color of the quantum series. Defaults to C_QUANTUM.
+        weights_c: weights of the classical samples. Defaults to None.
+        weights_q: weights of the quantum samples. Defaults to None.
 
     Returns:
-        Ver la descripcion de arriba.
+        See the description above.
     """
     d = model.n_params
     # Common ranges from the union of both sample sets (1–99 percentiles,
@@ -2248,7 +2254,7 @@ def plot_corner_overlay(flat_c: np.ndarray, flat_q: np.ndarray, model,
     # calls would silently draw BOTH diagonal histograms in the classical
     # color. A fresh kwargs dict per call keeps each overlay's color.
     def _kw(ls='solid'):
-        """Argumentos comunes de corner para las figuras 1-a-1."""
+        """Common corner arguments for the 1-to-1 figures."""
         return dict(labels=model.param_latex, bins=35, range=rng_,
                     plot_datapoints=False, plot_density=False, smooth=1.0,
                     levels=(0.393, 0.865),    # 1σ and 2σ for 2D Gaussians
@@ -2280,24 +2286,24 @@ def plot_corner_overlay(flat_c: np.ndarray, flat_q: np.ndarray, model,
 
 
 def _sigma_fill_colors(color, n_levels: int = 3):
-    """Colores de las bandas de sigma: transparente fuera, opaco al centro.
+    """Colors of the sigma bands: transparent outside, opaque at the center.
 
-    corner.py rellena `n_levels + 1` bandas y la mas EXTERNA cubre el panel
-    entero. Su mapa por defecto la deja transparente, pero pasar un `alpha`
-    global en `contourf_kwargs` lo pisa y la banda externa acaba pintando todo
-    de un color plano que tapa los demas posteriores — que es exactamente lo
-    que hay que evitar en una figura de varios rungs superpuestos.
+    corner.py fills `n_levels + 1` bands and the OUTERMOST one covers the whole
+    panel. Its default map leaves it transparent, but passing a global `alpha`
+    in `contourf_kwargs` overrides that and the outer band ends up painting
+    everything in a flat color that hides the other posteriors — which is
+    exactly what must be avoided in a figure with several overlaid rungs.
 
-    Por eso el mapa se construye aqui: la banda de fuera va a alpha 0 y las de
-    dentro suben en escalones suaves, lo bastante bajos para que dos o tres
-    posteriores se puedan superponer sin ocultarse.
+    That is why the map is built here: the outer band goes to alpha 0 and the
+    inner ones rise in gentle steps, low enough for two or three posteriors
+    to overlap without hiding each other.
 
     Args:
-        color: color del rung.
-        n_levels: cuantos niveles de sigma se dibujan.
+        color: color of the rung.
+        n_levels: how many sigma levels are drawn.
 
     Returns:
-        Lista de RGBA, de la banda mas externa a la mas interna.
+        List of RGBA, from the outermost band to the innermost.
     """
     from matplotlib.colors import to_rgba
     r, g, b, _ = to_rgba(color)
@@ -2339,23 +2345,24 @@ def plot_corner_multi(datasets, colors, labels, model, outdir: str, tag: str,
     # distinguishable; contour collections require named styles (not tuples).
     ls_cycle = ['solid', 'dashed', 'dashdot', 'dotted', (0, (3, 1, 1, 1))]
 
-    # [SIGMA] Niveles de credibilidad, SOMBREADOS y no solo como lineas.
+    # [SIGMA] Credibility levels, SHADED and not only as lines.
     #
-    # Los valores no son 68/95/99.7%: esos son los de una gaussiana en UNA
-    # dimension. En el plano de dos parametros la masa contenida dentro del
-    # contorno de n-sigma es 1 - exp(-n^2/2), es decir 39.3%, 86.5% y 98.9%.
-    # Usar 0.68/0.95 aqui — un error frecuente — dibujaria contornos
-    # sistematicamente MAS ANCHOS que 1 y 2 sigma y haria parecer que los
-    # metodos concuerdan mejor de lo que concuerdan.
+    # The values are not 68/95/99.7%: those belong to a Gaussian in ONE
+    # dimension. In the two-parameter plane the mass contained within the
+    # n-sigma contour is 1 - exp(-n^2/2), i.e. 39.3%, 86.5% and 98.9%.
+    # Using 0.68/0.95 here — a common mistake — would draw contours that are
+    # systematically WIDER than 1 and 2 sigma and would make the methods look
+    # like they agree better than they do.
     #
-    # Se rellenan porque con solo lineas, y varios posteriores superpuestos, no
-    # se distingue cual contorno pertenece a cual metodo ni cual es el interior.
-    # La opacidad es baja (0.16) para que los rellenos se puedan superponer sin
-    # tapar el de abajo, y las lineas siguen encima marcando el borde exacto.
-    SIGMA_LEVELS = (0.393, 0.865, 0.989)          # 1, 2 y 3 sigma en 2D
+    # They are filled because with lines only, and several overlaid
+    # posteriors, one cannot tell which contour belongs to which method nor
+    # which side is the interior. The opacity is low (0.16) so the fills can
+    # overlap without hiding the one below, and the lines stay on top marking
+    # the exact edge.
+    SIGMA_LEVELS = (0.393, 0.865, 0.989)          # 1, 2 and 3 sigma in 2D
 
     def _kw(ls, col):
-        """Argumentos de corner con relleno por sigmas, en un color dado."""
+        """Corner arguments with sigma-filled contours, in a given color."""
         return dict(labels=model.param_latex, bins=35, range=rng_,
                     plot_datapoints=False, plot_density=False, smooth=1.0,
                     levels=SIGMA_LEVELS,
@@ -2395,14 +2402,14 @@ def plot_marginals_overlay(res_q: dict, res_c: dict, post: Posterior,
     Plus an H(z) posterior-predictive panel overlaying all four means.
 
     Args:
-        res_q: resultado de la corrida cuantica.
-        res_c: resultado de la corrida clasica de referencia.
-        post: posterior cosmologico activo (`cosmo_core.Posterior`).
-        outdir: carpeta donde escribir la salida.
-        tag: etiqueta corta que va al nombre de archivo y a los mensajes.
+        res_q: result of the quantum run.
+        res_c: result of the classical baseline run.
+        post: active cosmological posterior (`cosmo_core.Posterior`).
+        outdir: output folder.
+        tag: short label used in file names and messages.
 
     Returns:
-        Ver la descripcion de arriba.
+        See the description above.
     """
     model = post.model
     d = model.n_params
@@ -2485,14 +2492,14 @@ def plot_traces_overlay(res_q: dict, res_c: dict, model, outdir: str,
     blue, QVMC in orange.
 
     Args:
-        res_q: resultado de la corrida cuantica.
-        res_c: resultado de la corrida clasica de referencia.
-        model: modelo cosmologico (`cosmo_core.CosmoModel`).
-        outdir: carpeta donde escribir la salida.
-        tag: etiqueta corta que va al nombre de archivo y a los mensajes.
+        res_q: result of the quantum run.
+        res_c: result of the classical baseline run.
+        model: cosmological model (`cosmo_core.CosmoModel`).
+        outdir: output folder.
+        tag: short label used in file names and messages.
 
     Returns:
-        Ver la descripcion de arriba.
+        See the description above.
     """
     d = model.n_params
     qpct = res_q['quantumness']
@@ -2549,9 +2556,9 @@ def plot_comparison_figures(comp: dict, post: Posterior, outdir: str) -> list:
     families), 1D marginals, KL curves, R̂ diagnostics and traces.
 
     Args:
-        comp: resultado de `run_comparison`.
-        post: posterior cosmologico activo (`cosmo_core.Posterior`).
-        outdir: carpeta donde escribir la salida.
+        comp: result of `run_comparison`.
+        post: active cosmological posterior (`cosmo_core.Posterior`).
+        outdir: output folder.
 
     Returns:
         list
@@ -2632,25 +2639,25 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
     *replicates* the classical one component by component.
 
     Args:
-        post: posterior cosmologico activo (`cosmo_core.Posterior`).
-        n_steps_mcmc: pasos del MCMC.
-        max_iter_qvmc: iteraciones del entrenamiento variacional.
-        nqpp: qubits por parametro (rejilla de 2^nqpp por eje).
-        outdir: carpeta donde escribir la salida.
-        seed: semilla del generador aleatorio. Por defecto 42.
-        logger: destino de los mensajes; None imprime por pantalla. Por
-            defecto None.
-        log_every: cada cuantos pasos se emite una linea de progreso. Por
-            defecto 500.
-        n_chains_mcmc: cadenas del MCMC. Por defecto 6.
-        n_chains_qvmc: cadenas de muestreo del QVMC. Por defecto 3.
-        n_shots: disparos por circuito. Por defecto 2000.
-        csv_paths: rutas de los CSV donde escribir la fila. Por defecto None.
-        dataset_label: nombre del dataset, tal como va al CSV. Por defecto ''.
-        prior_type: 'flat' o 'gaussian'. Por defecto ''.
-        budget_mode: 'circuits' iguala el presupuesto en evaluaciones de
-            circuito; 'iters' reproduce el sesgo historico. Ver [B-BUDGET].
-            Por defecto 'circuits'.
+        post: active cosmological posterior (`cosmo_core.Posterior`).
+        n_steps_mcmc: MCMC steps.
+        max_iter_qvmc: variational training iterations.
+        nqpp: qubits per parameter (grid of 2^nqpp per axis).
+        outdir: output folder.
+        seed: random generator seed. Defaults to 42.
+        logger: destination of the messages; None prints to the screen.
+            Defaults to None.
+        log_every: how many steps between progress lines. Defaults to
+            500.
+        n_chains_mcmc: MCMC chains. Defaults to 6.
+        n_chains_qvmc: QVMC sampling chains. Defaults to 3.
+        n_shots: shots per circuit. Defaults to 2000.
+        csv_paths: paths of the CSVs the row is written to. Defaults to None.
+        dataset_label: dataset name, as written to the CSV. Defaults to ''.
+        prior_type: 'flat' or 'gaussian'. Defaults to ''.
+        budget_mode: 'circuits' equalizes the budget in circuit
+            evaluations; 'iters' reproduces the historical bias. See [B-BUDGET].
+            Defaults to 'circuits'.
 
     Returns:
         dict
@@ -2721,26 +2728,26 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
                           'W': res['W'], 'history': res['history'],
                           'mu': res['mu'], 'std': res['sd'],
                           'kl_final': res['kl_final'], 'ess': res['ess'],
-                          # [B-BUDGET][B-PROV] el trabajo realmente gastado,
-                          # para que la comparacion entre rungs sea auditable
+                          # [B-BUDGET][B-PROV] the work actually spent, so
+                          # that the comparison between rungs is auditable
                           'budget_mode': res.get('budget_mode', ''),
                           'circuits_train': res.get('circuits_train', ''),
                           'seed': seed,
                           'elapsed': time.time() - _t0, **fs})
         say(f"  QVMC  {pct:5.1f}%  mean={fmt_theta(model, res['mu'])}"
             f"  KL={res['kl_final']:.4f}  "
-            f"circuitos={res.get('circuits_train', '?')}")
+            f"circuits={res.get('circuits_train', '?')}")
 
-    # [B-NOPLOT] Las figuras se saltan si el llamador lo pidio. Antes esta
-    # llamada era incondicional y `--no-plot` solo funcionaba en el camino de
-    # configuracion unica: en --benchmark y en --sweep-all (o sea, en TODA
-    # corrida de HPC) la bandera se ignoraba en silencio, y ademas el docstring
-    # de run_sweep_all la anunciaba como pass-through. En una prueba de humo
-    # eso es tiempo tirado, y en una campana larga son cientos de PDF que
-    # nadie pidio.
+    # [B-NOPLOT] Figures are skipped if the caller asked for it. Previously
+    # this call was unconditional and `--no-plot` only worked on the
+    # single-config path: in --benchmark and in --sweep-all (i.e. in EVERY
+    # HPC run) the flag was silently ignored, and on top of that the
+    # docstring of run_sweep_all advertised it as pass-through. In a smoke
+    # test that is wasted time, and in a long campaign it is hundreds of
+    # PDFs nobody asked for.
     meta = dict(n_steps=n_steps_mcmc, n_iter=max_iter_qvmc, nqpp=nqpp)
     if no_plot:
-        say("Figuras omitidas (--no-plot).")
+        say("Figures skipped (--no-plot).")
     else:
         plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta)
         say(f"Ladder figures in {outdir}/: ladder_qmcmc_*, "
@@ -2748,7 +2755,7 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
             f"ladder_1to1_*, ladder_summary_*, ladder_trends_*")
 
     # [FIX] Write the benchmark to CSV too. Previously only single-config runs
-    # wrote resultados_config.csv; the --benchmark path returned before the
+    # wrote results_config.csv; the --benchmark path returned before the
     # writer, so the ladder produced PNG tables but no CSV. Here we emit ONE row
     # per rung of each ladder (every parameter included) to BOTH the per-run
     # (named columns) and the cumulative (generic columns) files.
@@ -2767,13 +2774,13 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
         write_run_and_cumulative(side_rows, model, run_csv, cumulative_csv,
                                  dataset_label, prior_type)
         say(f"Benchmark results written to {run_csv} "
-            f"(+ cumulative resultados_config.csv)")
+            f"(+ cumulative results_config.csv)")
 
     return {'qmcmc': qmcmc_runs, 'qvmc': qvmc_runs}
 
 
-#: Etiquetas con que el log marca cada peldano, y el porcentaje que les
-#: corresponde. Son las que imprime el propio ladder al correr.
+#: Tags with which the log marks each rung, and the percentage that
+#: corresponds to them. They are the ones the ladder itself prints while running.
 _TAGS_LOG = {'C-MCMC': ('qmcmc', 0.0), 'QMCMC50': ('qmcmc', 50.0),
              'QMCMC100': ('qmcmc', 100.0),
              'C-VI': ('qvmc', 0.0), 'QVMC33': ('qvmc', 33.0),
@@ -2785,21 +2792,22 @@ _RE_KL = re.compile(
     r'\[([A-Za-z0-9-]+)\]\s+iter\s+(\d+)/\d+\s*\|\s*KL=([\d.eE+-]+)')
 
 
-def historias_desde_log(log_path: str):
-    """Reconstruye las trazas de R-hat y de KL desde el log de una tarea.
+def histories_from_log(log_path: str):
+    """Rebuild the R-hat and KL traces from a task's log.
 
-    Ni el R-hat por paso ni el KL por iteracion son columnas del CSV —el CSV
-    guarda un solo numero final por peldano—, pero el log SI los imprime
-    linea a linea mientras corre. Eso permite rehacer `ladder_rhat_qmcmc_*`
-    y `ladder_kl_qvmc_*` de una campana ya terminada sin repetir el computo.
+    Neither the per-step R-hat nor the per-iteration KL are CSV columns —the
+    CSV stores a single final number per rung—, but the log DOES print them
+    line by line while running. That makes it possible to redo
+    `ladder_rhat_qmcmc_*` and `ladder_kl_qvmc_*` for a finished campaign
+    without repeating the computation.
 
     Args:
-        log_path: ruta del `sweep_all_*.log` de la tarea.
+        log_path: path of the task's `sweep_all_*.log`.
 
     Returns:
-        `(rhat, kl)`: dos dicts indexados por porcentaje de peldano. `rhat`
-        mapea pct -> [(paso, R-hat), ...] con el R-hat ABSOLUTO (el log
-        escribe R-hat menos uno). `kl` mapea pct -> [{'it':…, 'kl':…}, …].
+        `(rhat, kl)`: two dicts indexed by rung percentage. `rhat` maps
+        pct -> [(step, R-hat), ...] with the ABSOLUTE R-hat (the log writes
+        R-hat minus one). `kl` maps pct -> [{'it':…, 'kl':…}, …].
 
     Examples:
         >>> import tempfile, os
@@ -2808,7 +2816,7 @@ def historias_desde_log(log_path: str):
         ...             'R-hat-1=+0.0460 | mean: Om=0.27\\n'
         ...             '[QVMC33] iter  500/15000 | KL=1.694478 | E[theta]\\n')
         >>> t.close()
-        >>> rh, kl = historias_desde_log(t.name)
+        >>> rh, kl = histories_from_log(t.name)
         >>> rh[50.0]
         [(500, 1.046)]
         >>> kl[33.0]
@@ -2817,16 +2825,16 @@ def historias_desde_log(log_path: str):
     """
     rhat, kl = {}, {}
     try:
-        texto = open(log_path, errors='ignore').read()
+        text = open(log_path, errors='ignore').read()
     except OSError:
         return rhat, kl
-    for tag, paso, val in _RE_RHAT.findall(texto):
+    for tag, step, val in _RE_RHAT.findall(text):
         if tag in _TAGS_LOG:
-            # El log imprime R-hat MENOS UNO; la figura resta 1 otra vez,
-            # asi que aqui se devuelve el absoluto.
+            # The log prints R-hat MINUS ONE; the figure subtracts 1 again,
+            # so the absolute value is returned here.
             rhat.setdefault(_TAGS_LOG[tag][1], []).append(
-                (int(paso), 1.0 + float(val)))
-    for tag, it, val in _RE_KL.findall(texto):
+                (int(step), 1.0 + float(val)))
+    for tag, it, val in _RE_KL.findall(text):
         if tag in _TAGS_LOG:
             kl.setdefault(_TAGS_LOG[tag][1], []).append(
                 {'it': int(it), 'kl': float(val)})
@@ -2835,51 +2843,53 @@ def historias_desde_log(log_path: str):
 
 def replot_ladder_from_csv(csv_path: str, outdir: Optional[str] = None,
                            nqpp: Optional[int] = None,
-                           solo_diagnosticos: bool = False):
-    """[B-REPLOT] Rehace ladder_trends y ladder_summary desde un CSV.
+                           diagnostics_only: bool = False):
+    """[B-REPLOT] Redo ladder_trends and ladder_summary from a CSV.
 
-    Sirve para volver a dibujar las figuras de una campana que ya corrio
-    —por ejemplo tras arreglar algo del dibujo— sin repetir el calculo, que
-    en los nqpp altos son dias. NO rehace los corner ni los 1-a-1: esos
-    necesitan las cadenas, y las cadenas no se guardan en el CSV.
+    Used to redraw the figures of a campaign that already ran —for example
+    after fixing something in the plotting— without repeating the
+    computation, which at high nqpp takes days. It does NOT redo the corner
+    or 1-to-1 plots: those need the chains, and the chains are not stored
+    in the CSV.
 
     Args:
-        csv_path: `resultados_config.csv` de UNA tarea (el de la subcarpeta
-            `model_<modelo>/`, no el acumulado de varios modelos).
-        outdir: donde escribir. Por defecto, junto al CSV.
-        nqpp: solo para el titulo; si no se da se toma del CSV.
+        csv_path: `results_config.csv` (or legacy `resultados_config.csv`) of
+            ONE task (the one in the `model_<model>/` subfolder, not the
+            cumulative file of several models).
+        outdir: where to write. Defaults to next to the CSV.
+        nqpp: only for the title; if not given it is taken from the CSV.
 
     Returns:
-        La carpeta donde quedaron las figuras.
+        The folder where the figures were written.
 
     Raises:
-        ValueError: si el CSV no trae filas de ningun peldano reconocible.
+        ValueError: if the CSV has no rows of any recognizable rung.
     """
     import csv as _csv
     outdir = outdir or os.path.dirname(os.path.abspath(csv_path))
-    filas = list(_csv.DictReader(open(csv_path, newline='')))
-    if not filas:
-        raise ValueError(f"{csv_path} no tiene filas")
+    rows = list(_csv.DictReader(open(csv_path, newline='')))
+    if not rows:
+        raise ValueError(f"{csv_path} has no rows")
 
-    # El modelo no viene como columna en el CSV de samplers: se deduce de la
-    # carpeta `model_<clave>` que lo contiene.
-    clave = (filas[0].get('model') or '').strip()
-    if clave not in MODELS:
+    # The model is not a column in the samplers CSV: it is deduced from the
+    # `model_<key>` folder that contains it.
+    key = (rows[0].get('model') or '').strip()
+    if key not in MODELS:
         m = re.search(r'model_(\w+)', os.path.abspath(csv_path))
-        clave = m.group(1) if m and m.group(1) in MODELS else ''
-    if clave not in MODELS:
+        key = m.group(1) if m and m.group(1) in MODELS else ''
+    if key not in MODELS:
         raise ValueError(
-            f"no pude deducir el modelo de {csv_path}; se esperaba una "
-            f"carpeta 'model_<{'|'.join(MODELS)}>' o una columna 'model'")
-    model = MODELS[clave]
+            f"could not deduce the model from {csv_path}; expected a "
+            f"'model_<{'|'.join(MODELS)}>' folder or a 'model' column")
+    model = MODELS[key]
 
-    def _num(x, por_defecto=float('nan')):
+    def _num(x, default=float('nan')):
         try:
             return float(x)
         except (TypeError, ValueError):
-            return por_defecto
+            return default
 
-    def _fila_a_run(r, pct):
+    def _row_to_run(r, pct):
         mu = [_num(r.get(f'{p}_mean')) for p in model.param_names]
         sd = [_num(r.get(f'{p}_std')) for p in model.param_names]
         return {'pct': pct, 'mu': np.array(mu), 'std': np.array(sd),
@@ -2891,47 +2901,47 @@ def replot_ladder_from_csv(csv_path: str, outdir: Optional[str] = None,
                 'rhat_hist': [], 'history': []}
 
     qmcmc, qvmc = [], []
-    for r in filas:
+    for r in rows:
         met = (r.get('Method') or '').strip()
         if met == 'Classical MCMC':
-            qmcmc.append(_fila_a_run(r, 0.0))
+            qmcmc.append(_row_to_run(r, 0.0))
         elif met == 'Classical VI':
-            qvmc.append(_fila_a_run(r, 0.0))
+            qvmc.append(_row_to_run(r, 0.0))
         elif met.startswith('QMCMC'):
-            qmcmc.append(_fila_a_run(r, _num(met.rstrip('%').split()[-1])))
+            qmcmc.append(_row_to_run(r, _num(met.rstrip('%').split()[-1])))
         elif met.startswith('QVMC'):
-            qvmc.append(_fila_a_run(r, _num(met.rstrip('%').split()[-1])))
+            qvmc.append(_row_to_run(r, _num(met.rstrip('%').split()[-1])))
     if not qmcmc and not qvmc:
         raise ValueError(
-            f"{csv_path} no trae filas de QMCMC ni de QVMC (metodos vistos: "
-            f"{sorted({r.get('Method') for r in filas})})")
+            f"{csv_path} has no QMCMC or QVMC rows (methods seen: "
+            f"{sorted({r.get('Method') for r in rows})})")
 
     if nqpp is None:
-        nqpp = int(_num(filas[0].get('nqpp'), 0)) or 3
-        for r in filas:
+        nqpp = int(_num(rows[0].get('nqpp'), 0)) or 3
+        for r in rows:
             v = _num(r.get('nqpp'), 0)
             if v:
                 nqpp = int(v)
                 break
-    # steps/iters no son columnas del CSV, pero el log de la tarea los
-    # imprime en su cabecera. Si esta a mano se leen de ahi para que el
-    # titulo de la figura rehecha diga lo mismo que el de la original.
+    # steps/iters are not CSV columns, but the task's log prints them in its
+    # header. If it is at hand they are read from there so that the title of
+    # the redrawn figure says the same as the original.
     meta = {'n_steps': '?', 'n_iter': '?', 'nqpp': nqpp}
-    raiz = os.path.dirname(os.path.dirname(os.path.abspath(csv_path)))
+    root = os.path.dirname(os.path.dirname(os.path.abspath(csv_path)))
     rhat_h, kl_h = {}, {}
-    for log in sorted(glob.glob(os.path.join(raiz, '*.log')))[:4]:
+    for log in sorted(glob.glob(os.path.join(root, '*.log')))[:4]:
         try:
-            texto = open(log, errors='ignore').read(20000)
+            text = open(log, errors='ignore').read(20000)
         except OSError:
             continue
-        s = re.search(r'steps=(\d+)', texto)
-        i = re.search(r'qvmc_iter=(\d+)|iters=(\d+)', texto)
+        s = re.search(r'steps=(\d+)', text)
+        i = re.search(r'qvmc_iter=(\d+)|iters=(\d+)', text)
         if s:
             meta['n_steps'] = int(s.group(1))
         if i:
             meta['n_iter'] = int(i.group(1) or i.group(2))
-        # Las trazas de R-hat y KL viven en el mismo log, linea a linea.
-        r_i, k_i = historias_desde_log(log)
+        # The R-hat and KL traces live in the same log, line by line.
+        r_i, k_i = histories_from_log(log)
         for d, o in ((rhat_h, r_i), (kl_h, k_i)):
             for pct, v in o.items():
                 d.setdefault(pct, []).extend(v)
@@ -2941,39 +2951,39 @@ def replot_ladder_from_csv(csv_path: str, outdir: Optional[str] = None,
         r['history'] = sorted(kl_h.get(r['pct'], []), key=lambda d: d['it'])
     q_cols = _q_colors([r['pct'] for r in (qmcmc or qvmc)])
     v_cols = _q_colors([r['pct'] for r in (qvmc or qmcmc)])
-    # [B-SOLODIAG] `solo_diagnosticos` salta las dos figuras caras (trends y
-    # summary, 8-10 paneles) y rehace unicamente R-hat y KL. Sirve cuando ya
-    # se rehizo todo y solo cambio el dibujo de los diagnosticos: cuesta ~2s
-    # por tarea en vez de ~7s, y en una campana de 90 tareas eso es la
-    # diferencia entre diez minutos y tres.
-    if not solo_diagnosticos:
-        _ladder_trends_y_tabla(qmcmc, qvmc, model, outdir, meta, q_cols)
-    # R-hat y KL solo salen si el log estaba a mano; si no, se omiten en
-    # silencio y quedan las otras dos, que es mejor que fallar entero.
+    # [B-DIAGONLY] `diagnostics_only` skips the two expensive figures (trends
+    # and summary, 8-10 panels) and redoes only R-hat and KL. Useful when
+    # everything was already redone and only the diagnostics drawing changed:
+    # it costs ~2s per task instead of ~7s, and in a 90-task campaign that is
+    # the difference between ten minutes and three.
+    if not diagnostics_only:
+        _ladder_trends_and_table(qmcmc, qvmc, model, outdir, meta, q_cols)
+    # R-hat and KL only come out if the log was at hand; otherwise they are
+    # silently skipped and the other two remain, which beats failing entirely.
     if any(r['rhat_hist'] for r in qmcmc) or any(r['history'] for r in qvmc):
-        _ladder_diagnosticos(qmcmc, qvmc, model, outdir, meta, q_cols, v_cols)
+        _ladder_diagnostics(qmcmc, qvmc, model, outdir, meta, q_cols, v_cols)
     return outdir
 
 
-def _ladder_trends_y_tabla(qmcmc_runs, qvmc_runs, model, outdir, meta,
-                           q_cols):
-    """Las dos figuras del ladder que NO necesitan las muestras.
+def _ladder_trends_and_table(qmcmc_runs, qvmc_runs, model, outdir, meta,
+                             q_cols):
+    """The two ladder figures that do NOT need the samples.
 
-    Se separo de `plot_method_ladders` para poder rehacerla desde el CSV
-    de una corrida terminada ([B-REPLOT]): todo lo que dibuja son
-    escalares (medias, sigmas, tiempos, chi2, AIC, BIC, ESS, aceptacion,
-    KL) que el CSV ya guarda, a diferencia de los corner, que necesitan
-    las cadenas y esas no se guardan.
+    Split out of `plot_method_ladders` so it can be redone from the CSV of a
+    finished run ([B-REPLOT]): everything it draws is scalars (means,
+    sigmas, times, chi2, AIC, BIC, ESS, acceptance, KL) that the CSV already
+    stores, unlike the corner plots, which need the chains, and those are
+    not stored.
 
     Args:
-        qmcmc_runs, qvmc_runs: las corridas de cada familia.
-        model: modelo cosmologico.
-        outdir: carpeta de salida.
-        meta: dict con n_steps, n_iter y nqpp para el titulo.
-        q_cols: colores por peldano.
+        qmcmc_runs, qvmc_runs: the runs of each family.
+        model: cosmological model.
+        outdir: output folder.
+        meta: dict with n_steps, n_iter and nqpp for the title.
+        q_cols: colors per rung.
 
     Returns:
-        None. Escribe ladder_trends_<modelo> y ladder_summary_<modelo>.
+        None. Writes ladder_trends_<model> and ladder_summary_<model>.
     """
     name = model.name
     steps, iters, nqpp = meta['n_steps'], meta['n_iter'], meta['nqpp']
@@ -3000,7 +3010,7 @@ def _ladder_trends_y_tabla(qmcmc_runs, qvmc_runs, model, outdir, meta,
     flat_axes = axes.flatten()
 
     def _trend(ax, getter, ylabel, title, err=None, fid=None):
-        """Dibuja una tendencia a lo largo del eje de quantumness."""
+        """Draw a trend along the quantumness axis."""
         ax.plot(mp, [getter(r) for r in mq], 'o-', color=C_QUANTUM, lw=2,
                 ms=6, label='QMCMC')
         ax.plot(vp, [getter(r) for r in vq], 's-', color=C_QUANTUM2, lw=2,
@@ -3078,7 +3088,7 @@ def _ladder_trends_y_tabla(qmcmc_runs, qvmc_runs, model, outdir, meta,
 
     def _param_cells(r):
         # "value±std" for every parameter, with sensible precision per column.
-        """Celdas 'valor±sigma' de una fila de la tabla resumen."""
+        """'value±sigma' cells of one row of the summary table."""
         cells = []
         for i in range(npar):
             prec = 4 if i == 0 else (2 if pnames[i] == 'H0' else 4)
@@ -3108,27 +3118,27 @@ def _ladder_trends_y_tabla(qmcmc_runs, qvmc_runs, model, outdir, meta,
     _save_fig(fig, f)
 
 
-def _ladder_diagnosticos(qmcmc_runs, qvmc_runs, model, outdir, meta,
-                         q_cols, v_cols):
-    """Las figuras de R-hat y de KL a lo largo de cada escalera.
+def _ladder_diagnostics(qmcmc_runs, qvmc_runs, model, outdir, meta,
+                        q_cols, v_cols):
+    """The R-hat and KL figures along each ladder.
 
-    Separadas de `plot_method_ladders` para poder rehacerlas sin
-    recalcular ([B-REPLOT]). Dibujan trazas, no escalares, asi que no
-    salen del CSV; sus datos se recuperan del log de la tarea con
-    `historias_desde_log`. Un peldano sin traza simplemente no se
-    dibuja, asi que la figura sale con lo que haya.
+    Split out of `plot_method_ladders` so they can be redone without
+    recomputing ([B-REPLOT]). They draw traces, not scalars, so they do not
+    come from the CSV; their data are recovered from the task's log with
+    `histories_from_log`. A rung without a trace is simply not drawn, so
+    the figure comes out with whatever is available.
 
     Args:
-        qmcmc_runs, qvmc_runs: corridas de cada familia; se leen
-            `rhat_hist` y `history`.
-        model: modelo cosmologico.
-        outdir: carpeta de salida.
-        meta: dict con n_steps, n_iter y nqpp para los titulos.
-        q_cols, v_cols: colores por peldano de cada familia.
+        qmcmc_runs, qvmc_runs: runs of each family; `rhat_hist` and
+            `history` are read.
+        model: cosmological model.
+        outdir: output folder.
+        meta: dict with n_steps, n_iter and nqpp for the titles.
+        q_cols, v_cols: colors per rung of each family.
 
     Returns:
-        None. Escribe ladder_rhat_qmcmc_<modelo> y
-        ladder_kl_qvmc_<modelo>.
+        None. Writes ladder_rhat_qmcmc_<model> and
+        ladder_kl_qvmc_<model>.
     """
     name = model.name
     steps, iters, nqpp = meta['n_steps'], meta['n_iter'], meta['nqpp']
@@ -3161,17 +3171,17 @@ def _ladder_diagnosticos(qmcmc_runs, qvmc_runs, model, outdir, meta,
         ax.semilogy([max(d['it'], 1) for d in h],
                     [max(d['kl'], 1e-12) for d in h],
                     color=col, lw=lw, label=f"{r['pct']:.0f}%")
-    # [B-KLLOGX] Eje x logaritmico. Los peldanos NO gastan el mismo numero de
-    # iteraciones: el presupuesto se iguala por CIRCUITOS, no por iteraciones,
-    # y el optimizador clasico (scipy) cuenta evaluaciones de funcion, asi que
-    # el peldano de 33% puede registrar ~1.2e5 mientras los de 67% y 100%
-    # paran en 1.5e4. Con eje lineal, el peldano mas largo se come toda la
-    # escala y los otros tres quedan aplastados contra el margen izquierdo
-    # —que es justo donde ocurre la bajada que interesa—. En log se ven los
-    # cuatro completos y la diferencia de presupuesto queda a la vista en vez
-    # de esconderse. No se recorta ni un solo punto.
+    # [B-KLLOGX] Logarithmic x axis. The rungs do NOT spend the same number
+    # of iterations: the budget is equalized by CIRCUITS, not by iterations,
+    # and the classical optimizer (scipy) counts function evaluations, so the
+    # 33% rung can record ~1.2e5 while the 67% and 100% ones stop at 1.5e4.
+    # With a linear axis the longest rung eats the whole scale and the other
+    # three are squashed against the left margin —which is exactly where the
+    # interesting drop happens—. In log scale all four are fully visible and
+    # the budget difference is in plain sight instead of hidden. Not a single
+    # point is clipped.
     ax.set_xscale('log')
-    ax.set_xlabel('Training iteration (escala log)')
+    ax.set_xlabel('Training iteration (log scale)')
     ax.set_ylabel(r'KL$(Q_\varphi\,\|\,P_{\rm target})$')
     ax.set_title(f'QVMC training along the quantumness ladder\n'
                  f'(iterations = {iters}, nqpp = {nqpp})')
@@ -3182,23 +3192,23 @@ def _ladder_diagnosticos(qmcmc_runs, qvmc_runs, model, outdir, meta,
 
 
 def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta,
-                        solo_escalares: bool = False):
+                        scalars_only: bool = False):
     """All per-method ladder figures (family overlay, diagnostics, 1-to-1).
 
     Args:
-        qmcmc_runs: corridas de la familia QMCMC.
-        qvmc_runs: corridas de la familia QVMC.
-        model: modelo cosmologico (`cosmo_core.CosmoModel`).
-        outdir: carpeta donde escribir la salida.
-        meta: metadatos de la corrida para el pie de figura.
-        solo_escalares: dibujar SOLO las figuras que no necesitan las
-            muestras (tendencias y tabla resumen). Es lo que usa el modo
-            `--replot-ladder`, que reconstruye desde el CSV una corrida que
-            ya termino: las cadenas no se guardan, asi que los corner y los
-            1-a-1 no se pueden rehacer, pero esas dos si. Por defecto False.
+        qmcmc_runs: runs of the QMCMC family.
+        qvmc_runs: runs of the QVMC family.
+        model: cosmological model (`cosmo_core.CosmoModel`).
+        outdir: output folder.
+        meta: run metadata for the figure caption.
+        scalars_only: draw ONLY the figures that do not need the samples
+            (trends and summary table). This is what the `--replot-ladder`
+            mode uses, which rebuilds a finished run from the CSV: the
+            chains are not stored, so the corner and 1-to-1 plots cannot be
+            redone, but those two can. Defaults to False.
 
     Returns:
-        Ver la descripcion de arriba.
+        See the description above.
     """
     name = model.name
     steps, iters, nqpp = meta['n_steps'], meta['n_iter'], meta['nqpp']
@@ -3215,25 +3225,25 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta,
                      for lo, hi in model.sample_box])
 
     def _jitter(S):
-        """Reparte las muestras dentro de su celda de rejilla.
+        """Spread the samples within their grid cell.
 
-        Sin esto, un corner de una distribucion discreta se ve como una malla de
-        puntos y no como una nube: el ruido uniforme de media celda recupera la
-        forma sin mover ninguna estadistica.
+        Without this, a corner plot of a discrete distribution looks like a
+        mesh of points rather than a cloud: half-cell uniform noise recovers
+        the shape without moving any statistic.
         """
         return S + RNG.uniform(-0.5, 0.5, size=S.shape) * cell
 
     # ── QMCMC family corner: classical + every QMCMC rung ────────────────────
     q_cols = _q_colors([r['pct'] for r in qmcmc_runs])
-    if solo_escalares:
-        # [B-REPLOT] Rehaciendo desde disco no hay cadenas guardadas, asi que
-        # los corner y los 1-a-1 no se pueden dibujar. Las otras cuatro si:
-        # tendencias y tabla salen de los escalares del CSV, y R-hat y KL de
-        # las trazas que el log imprime linea a linea.
-        _ladder_diagnosticos(qmcmc_runs, qvmc_runs, model, outdir, meta,
-                             q_cols, _q_colors([r['pct'] for r in qvmc_runs]))
-        return _ladder_trends_y_tabla(qmcmc_runs, qvmc_runs, model, outdir,
-                                      meta, q_cols)
+    if scalars_only:
+        # [B-REPLOT] Redoing from disk there are no stored chains, so the
+        # corner and 1-to-1 plots cannot be drawn. The other four can:
+        # trends and table come from the CSV scalars, and R-hat and KL from
+        # the traces the log prints line by line.
+        _ladder_diagnostics(qmcmc_runs, qvmc_runs, model, outdir, meta,
+                            q_cols, _q_colors([r['pct'] for r in qvmc_runs]))
+        return _ladder_trends_and_table(qmcmc_runs, qvmc_runs, model, outdir,
+                                        meta, q_cols)
     plot_corner_multi(
         [r['flat'] for r in qmcmc_runs], q_cols,
         [f"QMCMC {r['pct']:.0f}%" + (" (classical)" if r['pct'] == 0 else "")
@@ -3252,8 +3262,8 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta,
               f"[iters={iters}, nqpp={nqpp}]  (cell-jittered for display)",
         weights_list=[r['W'] for r in qvmc_runs])
 
-    _ladder_diagnosticos(qmcmc_runs, qvmc_runs, model, outdir,
-                         meta, q_cols, v_cols)
+    _ladder_diagnostics(qmcmc_runs, qvmc_runs, model, outdir,
+                        meta, q_cols, v_cols)
 
     # ── 1-to-1: each quantum rung vs its classical baseline ──────────────────
     base_m = qmcmc_runs[0]
@@ -3276,8 +3286,8 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta,
             q_color=C_QUANTUM2,
             weights_c=base_v['W'], weights_q=r['W'])
 
-    _ladder_trends_y_tabla(qmcmc_runs, qvmc_runs, model, outdir,
-                           meta, q_cols)
+    _ladder_trends_and_table(qmcmc_runs, qvmc_runs, model, outdir,
+                             meta, q_cols)
 
 
 
@@ -3285,17 +3295,18 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta,
 # 7.  INTERACTIVE MENU (default behavior with no arguments)
 # =============================================================================
 
-# [B-PROV] Columnas de PROCEDENCIA. Sin ellas, dos filas con la misma clave
-# (Method, model, dataset, prior, nqpp) pero numeros distintos son
-# indistinguibles en el CSV: una puede venir de una corrida ideal y otra de una
-# ruidosa, y el archivo no lo dice. Eso hace el eje de ruido ENTERO
-# irreconstruible desde los resultados, y de paso rompe la lectura de la celda
-# FAITHFUL: `QMCMC 50% == QMCMC 100%` se cumple bit a bit en unos grupos de
-# filas y no en otros, porque los que difieren son ruidosos y ahi la
-# equivalencia legitimamente no aplica — pero no habia forma de saberlo.
+# [B-PROV] PROVENANCE columns. Without them, two rows with the same key
+# (Method, model, dataset, prior, nqpp) but different numbers are
+# indistinguishable in the CSV: one may come from an ideal run and the other
+# from a noisy one, and the file does not say so. That makes the ENTIRE noise
+# axis impossible to reconstruct from the results, and it also breaks the
+# reading of the FAITHFUL cell: `QMCMC 50% == QMCMC 100%` holds bit for bit
+# in some groups of rows and not in others, because the ones that differ are
+# noisy and there the equivalence legitimately does not apply — but there
+# was no way to know.
 #
-# `cosmo_noise.NoiseSpec.metadata()` ya devolvia exactamente esto y no se
-# llamaba desde ningun sitio del repositorio.
+# `cosmo_noise.NoiseSpec.metadata()` already returned exactly this and was
+# not called from anywhere in the repository.
 CSV_PROVENANCE_FIELDS = ['noise', 'proposal_route', 'seed', 'budget_mode',
                          'circuits_train', 'chi2_grid',
                          # [E-PROV] added by the thesis errata
@@ -3326,34 +3337,34 @@ _CODE_VERSION = None
 
 
 def csv_provenance(side: dict) -> dict:
-    """Valores de procedencia de una fila del CSV.
+    """Provenance values of one CSV row.
 
-    Se leen del estado global del modulo (que es donde el CLI deja el nivel de
-    ruido y la ruta de lectura) y del propio resultado, para que una fila diga
-    por si sola en que condiciones se obtuvo.
+    Read from the module's global state (which is where the CLI leaves the
+    noise level and the readout route) and from the result itself, so that
+    a row states on its own under which conditions it was obtained.
 
     Args:
-        side: dict con las estadisticas de una fila del CSV.
+        side: dict with the statistics of one CSV row.
 
     Returns:
         dict
     """
     return {
-        # [B-PROV-GEN] El peldano puede venir EN la fila. Esta funcion la
-        # comparten los dos modulos, pero `NOISE` es un global por modulo: el
-        # CLI del genetico fija el de `cosmo_genetic_optimizers` y este se
-        # quedaba en 'none', asi que toda fila genetica mentia sobre su propio
-        # peldano. Los samplers no mandan la clave y siguen leyendo el global,
-        # igual que antes.
+        # [B-PROV-GEN] The rung may come IN the row. This function is shared
+        # by both modules, but `NOISE` is a per-module global: the genetic
+        # CLI sets the one in `cosmo_genetic_optimizers` and this one stayed
+        # at 'none', so every genetic row lied about its own rung. The
+        # samplers do not send the key and keep reading the global, as
+        # before.
         'noise': str(side.get('noise') or getattr(NOISE, 'label', 'none')),
         'proposal_route': PROPOSAL_ROUTE,
         'seed': str(side.get('seed', RUN_SEED if RUN_SEED is not None else '')),
         'budget_mode': str(side.get('budget_mode', '')),
         'circuits_train': str(side.get('circuits_train', '')),
-        # [B-REFINE] chi2 del mejor punto de la REJILLA, antes del refinamiento
-        # local. Solo lo llena el genetico: es el unico numero suyo que
-        # distingue un rung de otro, porque el refinador lleva a los cuatro al
-        # mismo minimo continuo.
+        # [B-REFINE] chi2 of the best GRID point, before the local
+        # refinement. Only the genetic module fills it: it is the only number
+        # of its own that distinguishes one rung from another, because the
+        # refiner takes all four to the same continuous minimum.
         'chi2_grid': (f"{side['chi2_grid']:.4f}"
                       if isinstance(side.get('chi2_grid'), float)
                       and np.isfinite(side['chi2_grid']) else ''),
@@ -3393,7 +3404,7 @@ def csv_fields_for_model(model) -> list:
     because there different models with different parameters share one file.
 
     Args:
-        model: modelo cosmologico (`cosmo_core.CosmoModel`).
+        model: cosmological model (`cosmo_core.CosmoModel`).
 
     Returns:
         list
@@ -3437,13 +3448,13 @@ def csv_row_generic(side: dict, model, method_label: str, is_mcmc: bool,
     row is self-describing regardless of model.
 
     Args:
-        side: dict con las estadisticas de una fila del CSV.
-        model: modelo cosmologico (`cosmo_core.CosmoModel`).
-        method_label: etiqueta del metodo tal como va al CSV.
-        is_mcmc: True si la fila viene de un muestreador MCMC.
-        nqpp: qubits por parametro (rejilla de 2^nqpp por eje).
-        dataset_label: nombre del dataset, tal como va al CSV.
-        prior_type: 'flat' o 'gaussian'.
+        side: dict with the statistics of one CSV row.
+        model: cosmological model (`cosmo_core.CosmoModel`).
+        method_label: method label as written to the CSV.
+        is_mcmc: True if the row comes from an MCMC sampler.
+        nqpp: qubits per parameter (grid of 2^nqpp per axis).
+        dataset_label: dataset name, as written to the CSV.
+        prior_type: 'flat' or 'gaussian'.
 
     Returns:
         dict
@@ -3485,13 +3496,13 @@ def csv_row_for_side(side: dict, model, method_label: str, is_mcmc: bool,
     kl_final depending on the family).
 
     Args:
-        side: dict con las estadisticas de una fila del CSV.
-        model: modelo cosmologico (`cosmo_core.CosmoModel`).
-        method_label: etiqueta del metodo tal como va al CSV.
-        is_mcmc: True si la fila viene de un muestreador MCMC.
-        nqpp: qubits por parametro (rejilla de 2^nqpp por eje).
-        dataset_label: nombre del dataset, tal como va al CSV.
-        prior_type: 'flat' o 'gaussian'.
+        side: dict with the statistics of one CSV row.
+        model: cosmological model (`cosmo_core.CosmoModel`).
+        method_label: method label as written to the CSV.
+        is_mcmc: True if the row comes from an MCMC sampler.
+        nqpp: qubits per parameter (grid of 2^nqpp per axis).
+        dataset_label: dataset name, as written to the CSV.
+        prior_type: 'flat' or 'gaussian'.
 
     Returns:
         dict
@@ -3606,7 +3617,7 @@ def append_results_csv(result_side: dict, model, dataset_label: str,
     """Append the MCMC and VI rows of one single-config run to a PER-RUN CSV.
 
     [FIX] The modular script previously wrote NO CSV at all — only PNG tables —
-    which is why `resultados_config.csv` stayed empty when running this module.
+    which is why `results_config.csv` stayed empty when running this module.
     Reports EVERY model parameter (wCDM: w; CPL: w0, wa; GEDE: Delta), one
     `<param>_mean` / `<param>_std` pair each. Two rows per call (MCMC + VI).
 
@@ -3614,14 +3625,14 @@ def append_results_csv(result_side: dict, model, dataset_label: str,
     by `write_run_and_cumulative` from main().
 
     Args:
-        result_side: dict con las estadisticas de la corrida.
-        model: modelo cosmologico (`cosmo_core.CosmoModel`).
-        dataset_label: nombre del dataset, tal como va al CSV.
-        prior_type: 'flat' o 'gaussian'.
-        family_mcmc: resultados de la familia MCMC.
-        family_vi: resultados de la familia variacional.
-        nqpp: qubits por parametro (rejilla de 2^nqpp por eje).
-        csv_path: ruta del CSV donde escribir.
+        result_side: dict with the statistics of the run.
+        model: cosmological model (`cosmo_core.CosmoModel`).
+        dataset_label: dataset name, as written to the CSV.
+        prior_type: 'flat' or 'gaussian'.
+        family_mcmc: method label of the MCMC family row.
+        family_vi: method label of the variational family row.
+        nqpp: qubits per parameter (grid of 2^nqpp per axis).
+        csv_path: path of the CSV to write to.
     """
     fields = csv_fields_for_model(model)
     rows = [
@@ -3665,8 +3676,8 @@ def sanity_check_routing(model_name: str = 'lcdm', nqpp: int = 2):
        trace of the first few evaluations inside the loops.
 
     Args:
-        model_name: nombre del modelo. Por defecto 'lcdm'.
-        nqpp: qubits por parametro (rejilla de 2^nqpp por eje). Por defecto 2.
+        model_name: model name. Defaults to 'lcdm'.
+        nqpp: qubits per parameter (grid of 2^nqpp per axis). Defaults to 2.
     """
     global SANITY_CHECK
     print("\n" + "=" * 70)
@@ -3820,14 +3831,14 @@ def interactive_menu() -> dict:
     # ── BENCHMARK: per-method quantumness ladders, user-chosen sizes ─────────
     if mode == 'benchmark':
         def ask_int_b(prompt, default):
-            """Lee un entero del menu del benchmark, con valor por defecto.
+            """Read an integer from the benchmark menu, with a default value.
 
             Args:
-                prompt: texto que se muestra al usuario.
-                default: valor que se usa si la entrada es vacia o invalida.
+                prompt: text shown to the user.
+                default: value used if the input is empty or invalid.
 
             Returns:
-                Ver la descripcion de arriba.
+                See the description above.
             """
             r = input(f"  {prompt} [Enter={default}]: ").strip()
             return int(r) if r.isdigit() else default
@@ -3869,14 +3880,14 @@ def interactive_menu() -> dict:
               "parameters for a fair benchmark.")
 
     def ask_int(prompt, default):
-        """Lee un entero del menu interactivo, con valor por defecto.
+        """Read an integer from the interactive menu, with a default value.
 
         Args:
-            prompt: texto que se muestra al usuario.
-            default: valor que se usa si la entrada es vacia o invalida.
+            prompt: text shown to the user.
+            default: value used if the input is empty or invalid.
 
         Returns:
-            Ver la descripcion de arriba.
+            See the description above.
         """
         r = input(f"  {prompt} [Enter={default}]: ").strip()
         return int(r) if r.isdigit() else default
@@ -3948,9 +3959,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--steps', type=int, default=1000,
                    help='MCMC steps — applies equally to classical and quantum')
     p.add_argument('--qvmc-iter', type=int, default=300,
-                   help='Iteraciones variacionales del rung CUANTICO. El rung '
-                        'clasico recibe el presupuesto EQUIVALENTE EN '
-                        'CIRCUITOS, no el mismo numero de iteraciones — ver '
+                   help='Variational iterations of the QUANTUM rung. The '
+                        'classical rung receives the EQUIVALENT budget IN '
+                        'CIRCUITS, not the same number of iterations — see '
                         '--budget-mode.')
     p.add_argument('--rungs', nargs='+', default=None, metavar='TAG',
                    choices=sorted(_TAGS_LOG),
@@ -3960,18 +3971,18 @@ def build_parser() -> argparse.ArgumentParser:
                         'those of the full ladder.')
     p.add_argument('--budget-mode', type=str, default='circuits',
                    choices=('circuits', 'iters'),
-                   help="[B-BUDGET] Como se iguala el presupuesto de "
-                        "entrenamiento entre el rung clasico (COBYLA) y el "
-                        "cuantico (parameter-shift). 'circuits' (por defecto) "
-                        "da a los dos el MISMO numero de evaluaciones de "
-                        "circuito: una iteracion cuantica cuesta 1+2*n_phi "
-                        "circuitos y una clasica cuesta 1, asi que con el "
-                        "mismo --qvmc-iter la rama cuantica recibia entre 57x "
-                        "y 225x mas trabajo, y la comparacion salia sesgada A "
-                        "FAVOR de lo cuantico. 'iters' reproduce ese "
-                        "comportamiento viejo, que es el de todas las "
-                        "campanas anteriores al 2026-09-04; usalo SOLO para "
-                        "reproducirlas, nunca para una comparacion nueva.")
+                   help="[B-BUDGET] How the training budget is equalized "
+                        "between the classical rung (COBYLA) and the quantum "
+                        "one (parameter-shift). 'circuits' (default) gives "
+                        "both the SAME number of circuit evaluations: a "
+                        "quantum iteration costs 1+2*n_phi circuits and a "
+                        "classical one costs 1, so with the same --qvmc-iter "
+                        "the quantum branch used to receive between 57x and "
+                        "225x more work, and the comparison came out biased "
+                        "IN FAVOR of the quantum side. 'iters' reproduces "
+                        "that old behavior, which is the one of every "
+                        "campaign before 2026-09-04; use it ONLY to reproduce "
+                        "them, never for a new comparison.")
     p.add_argument('--burn', type=int, default=None,
                    help='Burn-in (default: 10%% of --steps)')
     p.add_argument('--nqpp', type=int, default=3,
@@ -3987,24 +3998,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--seed', type=int, default=42, help='RNG seed')
     p.add_argument('--no-plot', action='store_true', help='Skip figures')
     p.add_argument('--no-csv', action='store_true',
-                   help='Skip writing resultados_config.csv')
+                   help='Skip writing results_config.csv')
     p.add_argument('--gpu-check', action='store_true',
-                   help='imprime por que la GPU esta o no disponible y sale, sin correr nada. Util en una HPC nueva: --gpu degrada a CPU cuando Aer no expone GPU, y sin este chequeo eso solo se nota por el tiempo de pared.')
+                   help='print why the GPU is or is not available and exit, without running anything. Useful on a new HPC: --gpu falls back to CPU when Aer exposes no GPU, and without this check that is only noticeable from the wall time.')
     p.add_argument('--gpu', action='store_true',
                    help='Use the GPU for Aer simulation if available '
                         '(qiskit-aer-gpu + CUDA). Falls back to CPU otherwise.')
-    # [NOISE] Segundo eje de ablacion. `--noise none` (por defecto) reproduce
-    # bit a bit el comportamiento previo a este eje.
+    # [NOISE] Second ablation axis. `--noise none` (default) reproduces bit
+    # for bit the behavior prior to this axis.
     cnoise.add_noise_cli(p)
     p.add_argument('--proposal-route', type=str, default='auto',
                    choices=('auto', 'amplitude', 'counts'),
-                   help="lectura del motor de propuesta. 'amplitude' es la "
-                        "original (Re(psi)*sign(Im(psi))) y solo existe sin "
-                        "ruido; 'counts' usa <Z_q> como el hardware real y "
-                        "esta disponible TAMBIEN en el peldano ideal, para "
-                        "poder separar el efecto del ruido del efecto del "
-                        "cambio de lectura. 'auto' (por defecto) elige "
-                        "amplitudes sin ruido y conteos con ruido.")
+                   help="readout of the proposal engine. 'amplitude' is the "
+                        "original one (Re(psi)*sign(Im(psi))) and only exists "
+                        "without noise; 'counts' uses <Z_q> like real "
+                        "hardware and is ALSO available on the ideal rung, so "
+                        "the effect of noise can be separated from the effect "
+                        "of the readout change. 'auto' (default) picks "
+                        "amplitudes without noise and counts with noise.")
     p.add_argument('--profile', action='store_true',
                    help='Profile peak CPU/GPU memory, wall time and GPU-hours, '
                         'and save a resource_usage_*.png figure.')
@@ -4017,20 +4028,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--sanity-check', action='store_true',
                    help='Run the routing/correctness sanity check and exit '
                         '(acceptance regression test + per-preset engine map)')
-    # [B-REPLOTGLOB] `nargs='+'` porque la ayuda promete comodines del shell
-    # y sin esto argparse recibia la expansion del glob como varios
-    # argumentos posicionales y abortaba con "unrecognized arguments",
-    # rechazando TODOS menos el primero. El glob interno de abajo sigue
-    # existiendo para las shells que no expanden (Windows CMD) o cuando el
-    # patron se pasa entre comillas.
+    # [B-REPLOTGLOB] `nargs='+'` because the help promises shell wildcards
+    # and without it argparse received the glob expansion as several
+    # positional arguments and aborted with "unrecognized arguments",
+    # rejecting ALL but the first. The internal glob below still exists for
+    # shells that do not expand (Windows CMD) or when the pattern is passed
+    # in quotes.
     p.add_argument('--replot-ladder', metavar='CSV', default=None, nargs='+',
-                   help='NO calcula nada: rehace ladder_trends y '
-                        'ladder_summary desde el resultados_config.csv de una '
-                        'tarea que ya termino, y sale. Para volver a dibujar '
-                        'una campana vieja tras un arreglo de figuras sin '
-                        'repetir dias de computo. Los corner y los 1-a-1 NO '
-                        'se pueden rehacer: necesitan las cadenas, que el CSV '
-                        'no guarda. Acepta varios CSV con comodines del shell.')
+                   help='Computes NOTHING: redoes ladder_trends and '
+                        'ladder_summary from the results_config.csv (or legacy '
+                        'resultados_config.csv) of a finished task, and exits. '
+                        'Used to redraw an old campaign after a figure fix '
+                        'without repeating days of computation. The corner and '
+                        '1-to-1 plots CANNOT be redone: they need the chains, '
+                        'which the CSV does not store. Accepts several CSVs '
+                        'with shell wildcards.')
     return p
 
 
@@ -4085,7 +4097,7 @@ def run_sweep_all(models, dataset, prior, steps, qvmc_iter, nqpp, chains,
         dict mapping model key -> 'ok' or the error string, for the summary.
     """
     say = logger.info if logger else print
-    cumulative_master = os.path.join(master_dir, "resultados_TODOS_los_modelos.csv")
+    cumulative_master = os.path.join(master_dir, "results_all_models.csv")
     status = {}
     t_start = time.time()
 
@@ -4111,7 +4123,7 @@ def run_sweep_all(models, dataset, prior, steps, qvmc_iter, nqpp, chains,
             # the single cumulative master file shared by every model.
             csv_paths = None
             if not no_csv:
-                csv_paths = [os.path.join(model_dir, "resultados_config.csv"),
+                csv_paths = [os.path.join(model_dir, "results_config.csv"),
                              cumulative_master]
             run_quantumness_ladder(
                 post, n_steps_mcmc=steps, max_iter_qvmc=qvmc_iter, nqpp=nqpp,
@@ -4201,34 +4213,34 @@ def main():
         sanity_check_routing(model_name=args.model, nqpp=min(args.nqpp, 2))
         return
 
-    # [B-REPLOT] Solo dibuja; no toca ningun numero.
+    # [B-REPLOT] Only draws; does not touch any number.
     if getattr(args, 'replot_ladder', None):
         import glob as _glob
         matplotlib.use('Agg')
-        # [B-REPLOTGLOB] Ahora llega una LISTA. Cada elemento puede ser ya
-        # una ruta (la shell expandio) o todavia un patron (no expandio, o
-        # venia entre comillas); se expande cada uno y se quitan repetidos.
-        patrones = args.replot_ladder
-        if isinstance(patrones, str):
-            patrones = [patrones]
-        rutas, vistas = [], set()
-        for patron in patrones:
-            for r in sorted(_glob.glob(patron)) or [patron]:
-                if r not in vistas:
-                    vistas.add(r)
-                    rutas.append(r)
-        hechos = fallos = 0
-        for ruta in rutas:
+        # [B-REPLOTGLOB] A LIST now arrives. Each element may already be a
+        # path (the shell expanded it) or still a pattern (not expanded, or
+        # passed in quotes); each one is expanded and duplicates removed.
+        patterns = args.replot_ladder
+        if isinstance(patterns, str):
+            patterns = [patterns]
+        paths, seen = [], set()
+        for pattern in patterns:
+            for r in sorted(_glob.glob(pattern)) or [pattern]:
+                if r not in seen:
+                    seen.add(r)
+                    paths.append(r)
+        done = failures = 0
+        for path in paths:
             try:
-                destino = replot_ladder_from_csv(ruta)
-                print(f"  ok    {ruta} -> {destino}/ladder_*")
-                hechos += 1
+                dest = replot_ladder_from_csv(path)
+                print(f"  ok    {path} -> {dest}/ladder_*")
+                done += 1
             except Exception as exc:
-                print(f"  FALLO {ruta}: {exc}")
-                fallos += 1
-        print(f"\n{hechos} figura(s) rehecha(s), {fallos} fallo(s). "
-              f"Los corner y los 1-a-1 NO se rehacen: necesitan las cadenas.")
-        return 0 if fallos == 0 else 1
+                print(f"  FAILED {path}: {exc}")
+                failures += 1
+        print(f"\n{done} figure set(s) redone, {failures} failure(s). "
+              f"The corner and 1-to-1 plots are NOT redone: they need the chains.")
+        return 0 if failures == 0 else 1
 
     cli_mode = len(sys.argv) > 1 and not args.interactive
 
@@ -4245,15 +4257,15 @@ def main():
     USE_GPU = want_gpu
     do_profile = bool(getattr(args, 'profile', False))
 
-    # [NOISE] Publicar el peldano de ruido module-wide, igual que USE_GPU, y
-    # ANTES de construir cualquier motor cuantico: la ruta de lectura y la
-    # calibracion de la propuesta se fijan en construccion.
+    # [NOISE] Publish the noise rung module-wide, like USE_GPU, and BEFORE
+    # building any quantum engine: the readout route and the proposal
+    # calibration are fixed at construction.
     spec = cnoise.spec_from_args(args)
     set_noise(spec, getattr(args, 'proposal_route', 'auto'))
     if not spec.is_ideal:
-        print(f"[NOISE] peldano='{spec.label}' | metodo=density_matrix | "
-              f"techo={cnoise.MAX_NOISY_QUBITS}q | "
-              f"ruta de propuesta={PROPOSAL_ROUTE}")
+        print(f"[NOISE] rung='{spec.label}' | method=density_matrix | "
+              f"ceiling={cnoise.MAX_NOISY_QUBITS}q | "
+              f"proposal route={PROPOSAL_ROUTE}")
 
     _reseed(args.seed)
 
@@ -4384,8 +4396,8 @@ def main():
     if benchmark:
         csv_paths = None
         if not args.no_csv:
-            csv_paths = [os.path.join(args.outdir, "resultados_config.csv"),
-                         "resultados_config.csv"]
+            csv_paths = [os.path.join(args.outdir, "results_config.csv"),
+                         "results_config.csv"]
         run_quantumness_ladder(post, n_steps_mcmc=steps,
                                max_iter_qvmc=qvmc_iter, nqpp=nqpp,
                                outdir=args.outdir, seed=args.seed,
@@ -4413,10 +4425,10 @@ def main():
 
     # ── write results to CSV (per-run copy + cumulative table) ────────────
     # [FIX] This is what was missing: the modular module now writes
-    # resultados_config.csv (all parameters, all methods), both inside the run
+    # results_config.csv (all parameters, all methods), both inside the run
     # folder and as a cumulative file in the working directory.
     if not args.no_csv:
-        run_csv = os.path.join(args.outdir, "resultados_config.csv")
+        run_csv = os.path.join(args.outdir, "results_config.csv")
         nqpp_tag = nqpp if res_q is not None else "—"
         side_rows = []
         if res_q is not None:
@@ -4429,8 +4441,8 @@ def main():
         side_rows.append((res_c['mcmc'], "Classical MCMC", True, "—"))
         side_rows.append((res_c['qvmc'], "Classical VI", False, "—"))
         write_run_and_cumulative(side_rows, model, run_csv,
-                                 "resultados_config.csv", dataset, prior)
-        say(f"Results written to {run_csv} (+ cumulative resultados_config.csv)")
+                                 "results_config.csv", dataset, prior)
+        say(f"Results written to {run_csv} (+ cumulative results_config.csv)")
 
     # ── final summary (always to console; also to log) ────────────────────
     header = ["=" * 65, "  FINAL SUMMARY — QUANTUM vs MANDATORY CLASSICAL BASELINE"

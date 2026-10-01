@@ -5,7 +5,7 @@ These tests require only NumPy/SciPy (no Qiskit), so they run anywhere and
 form the always-on correctness floor. Run with:  pytest tests/  (or directly:
 python tests/test_core.py).
 
-They encode the claims the FASE-1 review asked to make falsifiable:
+They encode the claims the PHASE-1 review asked to make falsifiable:
   * every model has E²(z;θ) > 0 across its prior box (no log/sqrt of <=0);
   * PEDE/GEDE satisfy f_DE(0)=1 exactly, so E²(0)=1 (P1);
   * GEDE convention is checked at a non-zero z, not only at z=0 (P1);
@@ -213,39 +213,39 @@ if __name__ == "__main__":
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Correcciones de la revision adversarial de cosmo_core.py
+# Fixes from the adversarial review of cosmo_core.py
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_b_bounds_el_mejor_ajuste_vive_dentro_del_prior():
-    """[B-BOUNDS] `fit_statistics` no puede devolver un punto con posterior 0.
+def test_b_bounds_best_fit_lies_inside_prior():
+    """[B-BOUNDS] `fit_statistics` must not return a point with posterior 0.
 
-    El refinamiento era Nelder-Mead sin cotas sobre chi2, que no ve el prior.
-    Como chi2 es finito fuera de la caja, el simplex se salia: 5 de las 15
-    combinaciones modelo x dataset devolvian un "mejor ajuste" fuera del
-    soporte, una de ellas con H0 = 6.3e-5 km/s/Mpc. El chi2 apenas cambiaba,
-    asi que el numero se veia sano.
+    The refinement was an unbounded Nelder-Mead on chi2, which does not see
+    the prior. Since chi2 is finite outside the box, the simplex escaped: 5 of
+    the 15 model x dataset combinations returned a "best fit" outside the
+    support, one of them with H0 = 6.3e-5 km/s/Mpc. The chi2 barely changed,
+    so the number looked sane.
     """
     import numpy as np
     import cosmo_core as C
-    malos = []
+    bad = []
     for name in ('lcdm', 'wcdm', 'cpl', 'pede', 'gede'):
         for ds in ('CC+BAO', 'Pantheon', 'CC+BAO+Pantheon'):
             P = C.Posterior(C.MODELS[name], ds)
             r = C.fit_statistics(P, C.MODELS[name].fiducial)
             if not np.isfinite(P.log_prior(r['theta_best'])):
-                malos.append(f"{name}/{ds}: {r['theta_best']}")
-    assert not malos, "mejor ajuste fuera del prior en:\n  " + "\n  ".join(malos)
+                bad.append(f"{name}/{ds}: {r['theta_best']}")
+    assert not bad, "best fit outside the prior in:\n  " + "\n  ".join(bad)
 
 
-def test_b_gridseed_la_ventana_es_reproducible():
-    """[B-GRIDSEED] Misma semilla, misma rejilla — o la QPU y el simulador no
-    son comparables.
+def test_b_gridseed_window_is_reproducible():
+    """[B-GRIDSEED] Same seed, same grid — otherwise the QPU and the simulator
+    are not comparable.
 
-    El prefit tomaba del RNG global: el ancho en Om variaba un 54 % entre
-    llamadas identicas, y dependia de cuantos numeros hubiera consumido antes
-    otra parte del programa. Como cosmo_modular_quantum y qpu_cosmo_samplers
-    llaman cada uno por su cuenta, cada uno se quedaba con OTRA rejilla, y el
-    KL de ambos se comparaba sobre discretizaciones distintas.
+    The pre-fit drew from the global RNG: the Om width varied by 54 % between
+    identical calls, and depended on how many numbers another part of the
+    program had consumed before. Since cosmo_modular_quantum and
+    qpu_cosmo_samplers each call it on their own, each ended up with a
+    DIFFERENT grid, and their KLs were compared on different discretizations.
     """
     import numpy as np
     import cosmo_core as C
@@ -253,30 +253,30 @@ def test_b_gridseed_la_ventana_es_reproducible():
     w0 = C.estimate_grid_window(P)
     for _ in range(3):
         assert C.estimate_grid_window(P) == w0
-    # y no debe depender del estado del RNG global
+    # and it must not depend on the state of the global RNG
     C.RNG.normal(size=13)
     assert C.estimate_grid_window(P) == w0
-    # semillas distintas SI dan ventanas distintas (si no, no seria aleatorio)
+    # different seeds DO give different windows (otherwise it would not be random)
     assert C.estimate_grid_window(P, seed=7) != w0
-    # seed=None recupera el comportamiento viejo, no reproducible
+    # seed=None restores the old, non-reproducible behaviour
     vs = {tuple(map(tuple, C.estimate_grid_window(P, seed=None)))
           for _ in range(4)}
     assert len(vs) > 1
 
 
-def test_b_clip_un_modelo_no_fisico_se_rechaza():
-    """[B-CLIP] E^2 <= 0 debe dar -inf, no un chi2 grande pero finito.
+def test_b_clip_unphysical_model_is_rejected():
+    """[B-CLIP] E^2 <= 0 must give -inf, not a large but finite chi2.
 
-    Antes `H()` hacia clip a 1e-12 y devolvia H = 1e-6*H0, de donde salia un
-    log-posterior finito. Peor: la rama de supernovas SI rechazaba, asi que el
-    mismo theta tenia posterior finito con CC+BAO e -inf con
-    CC+BAO+Pantheon. Latente hoy (los 5 modelos tienen E^2 > 0 en su caja),
-    pero deja de serlo en cuanto se anada curvatura.
+    `H()` used to clip to 1e-12 and return H = 1e-6*H0, which produced a
+    finite log-posterior. Worse: the supernova branch DID reject, so the same
+    theta had a finite posterior with CC+BAO and -inf with
+    CC+BAO+Pantheon. Latent today (the 5 models have E^2 > 0 in their box),
+    but it stops being latent as soon as curvature is added.
     """
     import numpy as np
     import cosmo_core as C
     m = C.CosmoModel(
-        name='toy_ok', label='toy con curvatura negativa',
+        name='toy_ok', label='toy with negative curvature',
         param_names=['Om', 'H0'], param_latex=[r'$\Omega_m$', r'$H_0$'],
         bounds=[(0.18, 0.50), (60.0, 82.0)],
         sample_box=[(0.18, 0.50), (60.0, 82.0)],
@@ -286,28 +286,28 @@ def test_b_clip_un_modelo_no_fisico_se_rechaza():
     assert np.min(m.E2(np.array([0.0, 1.0, 2.0]), th)) < 0
     for ds in ('CC+BAO', 'CC+BAO+Pantheon'):
         P = C.Posterior(m, ds)
-        assert not np.isfinite(P.log_prob(th)), f"{ds}: no se rechazo"
+        assert not np.isfinite(P.log_prob(th)), f"{ds}: not rejected"
         assert not np.isfinite(P.log_prob_batch(th[None, :])[0]), \
-            f"{ds}: la ruta vectorizada no coincide con la escalar"
+            f"{ds}: the vectorized path does not match the scalar one"
 
 
-def test_b_priortype_no_acepta_cualquier_cadena():
-    """[B-PRIORTYPE] Un prior mal escrito caia en plano sin avisar.
+def test_b_priortype_rejects_arbitrary_strings():
+    """[B-PRIORTYPE] A misspelled prior silently fell back to flat.
 
-    Una corrida etiquetada 'gaussian' en el CSV que en realidad uso prior
-    plano es irrecuperable despues.
+    A run labelled 'gaussian' in the CSV that actually used a flat prior is
+    unrecoverable afterwards.
     """
     import pytest as _pytest
     import cosmo_core as C
     for ok in ('flat', 'gaussian'):
         C.Posterior(C.MODELS['lcdm'], 'CC+BAO', prior_type=ok)
-    for malo in ('Gaussian', 'planck', 'gauss', ''):
+    for bad in ('Gaussian', 'planck', 'gauss', ''):
         with _pytest.raises(ValueError, match='prior_type'):
-            C.Posterior(C.MODELS['lcdm'], 'CC+BAO', prior_type=malo)
+            C.Posterior(C.MODELS['lcdm'], 'CC+BAO', prior_type=bad)
 
 
-def test_escalar_y_lote_coinciden_en_puntos_fisicos():
-    """La correccion de [B-CLIP] no puede haber movido ningun numero real."""
+def test_scalar_and_batch_agree_on_physical_points():
+    """The [B-CLIP] fix must not have moved any real number."""
     import numpy as np
     import cosmo_core as C
     rng = np.random.default_rng(0)

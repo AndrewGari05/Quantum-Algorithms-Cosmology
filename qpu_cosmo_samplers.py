@@ -179,7 +179,7 @@ class TimingEstimator:
     T_QUEUE_DEFAULT = 60.0 # s queue per job on the open plan (highly variable)
 
     def __init__(self):
-        """Contador vacio de trabajos enviados a la QPU."""
+        """Empty counter of jobs submitted to the QPU."""
         self.jobs: List[JobRecord] = []
 
     # ------------------------------------------------------------------ #
@@ -188,11 +188,11 @@ class TimingEstimator:
         """Register an executed job and decompose its wall time.
 
         Args:
-            n_circuits: circuitos enviados en el trabajo.
-            shots: disparos por circuito.
-            t_wall: segundos de reloj del trabajo.
-            t_exec_reported: tiempo de ejecucion que reporta el backend, si lo
-                da. Por defecto None.
+            n_circuits: circuits submitted in the job.
+            shots: shots per circuit.
+            t_wall: wall-clock seconds of the job.
+            t_exec_reported: execution time reported by the backend, if it
+                provides one. Defaults to None.
 
         Returns:
             JobRecord
@@ -217,7 +217,7 @@ class TimingEstimator:
         """Time projection for `jobs_needed` additional jobs.
 
         Args:
-            jobs_needed: trabajos que exigiria la corrida completa.
+            jobs_needed: jobs the complete run would require.
 
         Returns:
             Dict[str, float]
@@ -285,11 +285,11 @@ def _extract_exec_seconds(result) -> Optional[float]:
     All access is defensive: any unexpected shape returns None.
     """
     def _spans_to_seconds(spans) -> Optional[float]:
-        """Segundos totales de los ExecutionSpans, o None si no vienen.
+        """Total seconds of the ExecutionSpans, or None if absent.
 
-        El formato de los spans cambia entre versiones de qiskit-ibm-runtime, asi
-        que se lee de forma defensiva: si algo no cuadra se devuelve None y el
-        llamador usa su estimacion.
+        The span format changes across qiskit-ibm-runtime versions, so it is
+        read defensively: if anything does not fit, None is returned and the
+        caller uses its estimate.
         """
         try:
             total = 0.0
@@ -349,21 +349,21 @@ class QPUConnection:
                  use_session: bool = False, shots: int = 4096,
                  dry_run: bool = False,
                  logger: Optional[logging.Logger] = None):
-        """Abre la conexion con IBM Quantum y prepara el Sampler.
+        """Open the IBM Quantum connection and prepare the Sampler.
 
         Args:
-            backend_name: backend concreto (p.ej. 'ibm_brisbane'); None usa
+            backend_name: specific backend (e.g. 'ibm_brisbane'); None uses
                 `least_busy`.
-            least_busy: elegir el backend operativo menos ocupado.
-            token: token de IBM si no hay cuenta guardada. Preferible guardar la
-                cuenta con `save_account` — ver COMO_CORRER_QPU.md.
-            use_session: usar Session en vez de Batch (requiere plan de pago).
-            shots: disparos por circuito.
-            dry_run: planificar sin conectarse a IBM.
-            logger: destino de los mensajes.
+            least_busy: pick the least-busy operational backend.
+            token: IBM token if there is no saved account. Saving the account
+                with `save_account` is preferable — see HOW_TO_RUN_QPU.md.
+            use_session: use Session instead of Batch (requires a paid plan).
+            shots: shots per circuit.
+            dry_run: plan without connecting to IBM.
+            logger: destination for log messages.
 
         Raises:
-            ValueError: si no se da ni `backend_name` ni `least_busy`.
+            ValueError: if neither `backend_name` nor `least_busy` is given.
         """
         self.shots = shots
         self.dry_run = dry_run
@@ -424,7 +424,7 @@ class QPUConnection:
         """Transpile to the backend ISA (once per template).
 
         Args:
-            qc: circuito cuantico.
+            qc: quantum circuit.
 
         Returns:
             QuantumCircuit
@@ -493,39 +493,39 @@ class QPUConnection:
 
         outs = []
         data = result[0].data
-        # [B-CREG] El registro clasico se llama como el creg del circuito:
-        # 'meas' si se uso measure_all (que es el caso de los circuitos de
-        # este proyecto) y 'c' con un ClassicalRegister por defecto.
+        # [B-CREG] The classical register is named after the circuit's creg:
+        # 'meas' if measure_all was used (which is the case for this
+        # project's circuits) and 'c' with a default ClassicalRegister.
         #
-        # El codigo anterior era `getattr(data,'meas',None) or getattr(data,
-        # 'c',None)`, que con cualquier OTRO nombre devuelve None y revienta
-        # dos lineas mas abajo con `AttributeError: 'NoneType' object has no
-        # attribute 'get_counts'` — un mensaje que no dice nada, y que ocurre
-        # DESPUES de que el trabajo se haya ejecutado y cobrado en la QPU.
-        # Verificado con SamplerV2 en modo local contra FakeBrisbane: con un
-        # creg llamado 'lectura' el DataBin expone `data.lectura` y la
-        # expresion vieja falla.
+        # The previous code was `getattr(data,'meas',None) or getattr(data,
+        # 'c',None)`, which with any OTHER name returns None and crashes two
+        # lines further down with `AttributeError: 'NoneType' object has no
+        # attribute 'get_counts'` — an uninformative message, raised AFTER
+        # the job has already been executed and billed on the QPU.
+        # Verified with SamplerV2 in local mode against FakeBrisbane: with a
+        # creg named 'readout' the DataBin exposes `data.readout` and the old
+        # expression fails.
         #
-        # Ahora se busca por nombre conocido y, si no aparece, se toma el
-        # unico campo del DataBin que sepa dar conteos. Si tampoco, se levanta
-        # diciendo QUE campos habia, que es lo unico util a esas alturas.
+        # Now we look up the known names and, if absent, take the single
+        # DataBin field that can provide counts. Failing that, we raise
+        # stating WHICH fields were present, the only useful info by then.
         reg = getattr(data, 'meas', None)
         if reg is None:
             reg = getattr(data, 'c', None)
         if reg is None:
-            candidatos = [k for k in getattr(data, 'keys', lambda: [])()
+            candidates = [k for k in getattr(data, 'keys', lambda: [])()
                           if hasattr(getattr(data, k, None), 'get_counts')]
-            if len(candidatos) == 1:
-                reg = getattr(data, candidatos[0])
+            if len(candidates) == 1:
+                reg = getattr(data, candidates[0])
                 self.log.warning(
-                    "[B-CREG] El registro clasico se llama %r, no 'meas' ni "
-                    "'c'; se usa igualmente.", candidatos[0])
+                    "[B-CREG] The classical register is named %r, not 'meas' "
+                    "or 'c'; using it anyway.", candidates[0])
             else:
                 raise RuntimeError(
-                    "[B-CREG] No se pudo leer el registro clasico del "
-                    f"resultado. Campos disponibles: {list(getattr(data, 'keys', lambda: [])())}. "
-                    "El trabajo YA se ejecuto en la QPU: revisa como se nombra "
-                    "el creg del circuito antes de reenviarlo.")
+                    "[B-CREG] Could not read the classical register from the "
+                    f"result. Available fields: {list(getattr(data, 'keys', lambda: [])())}. "
+                    "The job HAS ALREADY run on the QPU: check how the "
+                    "circuit's creg is named before resubmitting it.")
         for k in range(B):
             outs.append(reg.get_counts(k) if B > 1 else reg.get_counts())
         return outs
@@ -553,8 +553,8 @@ def build_proposal_circuit(n_qubits: int, n_layers: int = 3) -> QuantumCircuit:
     :meth:`QPUProposalEngine._counts_to_shift`).
 
     Args:
-        n_qubits: ancho del circuito en qubits.
-        n_layers: capas del circuito. Por defecto 3.
+        n_qubits: circuit width in qubits.
+        n_layers: circuit layers. Defaults to 3.
 
     Returns:
         QuantumCircuit
@@ -583,8 +583,8 @@ def build_ansatz(n_qubits: int, n_layers: int = 3) -> QuantumCircuit:
     Identical to the simulator ansatz (``QVMCModular._build_ansatz``).
 
     Args:
-        n_qubits: ancho del circuito en qubits.
-        n_layers: capas del circuito. Por defecto 3.
+        n_qubits: circuit width in qubits.
+        n_layers: circuit layers. Defaults to 3.
 
     Returns:
         QuantumCircuit
@@ -626,8 +626,8 @@ def metropolis_log_accept(lp_cur: float, lp_prop: float) -> float:
     cross-pipeline consistency.)
 
     Args:
-        lp_cur: log-posterior del punto actual.
-        lp_prop: log-posterior del punto propuesto.
+        lp_cur: log-posterior of the current point.
+        lp_prop: log-posterior of the proposed point.
 
     Returns:
         float
@@ -656,12 +656,12 @@ class GridEncoding:
 
     def __init__(self, model: CosmoModel, nqpp: int,
                  grid_window: Optional[List[tuple]] = None):
-        """Codificacion de la rejilla de parametros en qubits.
+        """Encoding of the parameter grid onto qubits.
 
         Args:
-            model: modelo cosmologico activo.
-            nqpp: qubits por parametro (rejilla de 2^nqpp por eje).
-            grid_window: ventana por parametro; None usa la caja del modelo.
+            model: active cosmological model.
+            nqpp: qubits per parameter (grid of 2^nqpp per axis).
+            grid_window: per-parameter window; None uses the model box.
         """
         self.model = model
         self.nqpp = nqpp
@@ -691,7 +691,7 @@ class GridEncoding:
         """Target posterior P on the grid (vectorized, classical).
 
         Args:
-            post: posterior cosmologico activo (`cosmo_core.Posterior`).
+            post: active cosmological posterior (`cosmo_core.Posterior`).
 
         Returns:
             np.ndarray
@@ -714,8 +714,8 @@ def kl_from_counts(counts: Dict[str, int], P: np.ndarray) -> float:
     but monotonically correlated — valid as a cost function.
 
     Args:
-        counts: conteos devueltos por el muestreador, por cadena de bits.
-        P: distribucion de probabilidad sobre la rejilla.
+        counts: counts returned by the sampler, per bitstring.
+        P: probability distribution over the grid.
 
     Returns:
         float
@@ -737,8 +737,8 @@ def counts_theta_mean(counts: Dict[str, int],
     """E_Q[theta] from measured (or synthetic-multinomial) counts.
 
     Args:
-        counts: conteos devueltos por el muestreador, por cadena de bits.
-        theta_table: tabla (2^n, d) de los puntos de la rejilla.
+        counts: counts returned by the sampler, per bitstring.
+        theta_table: (2^n, d) table of the grid points.
 
     Returns:
         np.ndarray
@@ -754,9 +754,9 @@ def spsa_gains(k: int, a0: float, c0: float) -> Tuple[float, float]:
     """Standard SPSA gain schedule (Spall 1998): a_k, c_k at iteration k.
 
     Args:
-        k: indice del cuadro o del elemento.
-        a0: tamano de paso inicial de SPSA.
-        c0: perturbacion inicial de SPSA.
+        k: iteration index.
+        a0: initial SPSA step size.
+        c0: initial SPSA perturbation.
 
     Returns:
         Tuple[float, float]
@@ -787,15 +787,15 @@ class QPUProposalEngine:
 
     def __init__(self, conn: QPUConnection, n_phys: int, n_layers: int = 3,
                  block: int = 64, shots_per_proposal: int = 128):
-        """Motor de propuestas del QMCMC sobre hardware real.
+        """QMCMC proposal engine on real hardware.
 
         Args:
-            conn: conexion abierta con la QPU.
-            n_phys: parametros fisicos del modelo.
-            n_layers: capas del circuito de propuesta.
-            block: propuestas agrupadas por trabajo — sube esto para gastar
-                menos trabajos de cola, que es lo caro en hardware real.
-            shots_per_proposal: disparos por propuesta.
+            conn: open QPU connection.
+            n_phys: physical parameters of the model.
+            n_layers: proposal-circuit layers.
+            block: proposals grouped per job — raise this to spend fewer
+                queued jobs, which is what is expensive on real hardware.
+            shots_per_proposal: shots per proposal.
         """
         self.conn = conn
         self.d = n_phys
@@ -894,17 +894,17 @@ class MCMC_QPU:
                  step_frac: float = 0.06, rhat_every: int = 25,
                  log_every: int = 500, tag: str = 'QMCMC-QPU',
                  logger: Optional[logging.Logger] = None):
-        """QMCMC ejecutado contra la QPU.
+        """QMCMC executed against the QPU.
 
         Args:
-            post: posterior objetivo.
-            engine: motor de propuestas ya conectado.
-            n_chains: cadenas en paralelo.
-            step_frac: paso de la propuesta como fraccion de la caja.
-            rhat_every: cada cuantos pasos se recalcula R-hat.
-            log_every: cadencia de los mensajes de progreso.
-            tag: etiqueta en el log y en las figuras.
-            logger: destino de los mensajes.
+            post: target posterior.
+            engine: already-connected proposal engine.
+            n_chains: parallel chains.
+            step_frac: proposal step as a fraction of the box.
+            rhat_every: how many steps between R-hat recomputations.
+            log_every: cadence of progress messages.
+            tag: label in the log and in the figures.
+            logger: destination for log messages.
         """
         self.post = post
         self.model = post.model
@@ -922,8 +922,8 @@ class MCMC_QPU:
         """Run the chains. Returns a dict with chains/flat/statistics.
 
         Args:
-            n_steps: pasos de la cadena.
-            n_burn: pasos de calentamiento que se descartan. Por defecto None.
+            n_steps: chain steps.
+            n_burn: burn-in steps that are discarded. Defaults to None.
 
         Returns:
             dict
@@ -1010,20 +1010,20 @@ class QVMC_QPU:
                  n_qubits_per_param: int = 3, n_layers: int = 3,
                  a0: float = 0.15, c0: float = 0.1, log_every: int = 500,
                  logger: Optional[logging.Logger] = None):
-        """QVMC ejecutado contra la QPU, entrenado con SPSA.
+        """QVMC executed against the QPU, trained with SPSA.
 
-        Cada iteracion de SPSA es UN trabajo en la cola, asi que `--iters` se
-        traduce directamente en trabajos encolados.
+        Each SPSA iteration is ONE job in the queue, so `--iters` translates
+        directly into queued jobs.
 
         Args:
-            post: posterior objetivo.
-            conn: conexion abierta con la QPU.
-            n_qubits_per_param: qubits por parametro.
-            n_layers: capas del ansatz.
-            a0: tamano de paso inicial de SPSA.
-            c0: tamano de la perturbacion inicial de SPSA.
-            log_every: cadencia de los mensajes.
-            logger: destino de los mensajes.
+            post: target posterior.
+            conn: open QPU connection.
+            n_qubits_per_param: qubits per parameter.
+            n_layers: ansatz layers.
+            a0: initial SPSA step size.
+            c0: initial SPSA perturbation size.
+            log_every: message cadence.
+            logger: destination for log messages.
         """
         self.post = post
         self.model = post.model
@@ -1050,7 +1050,7 @@ class QVMC_QPU:
         """Optimize phi with SPSA: 1 hardware job per iteration.
 
         Args:
-            n_iters: iteraciones realizadas.
+            n_iters: iterations to perform.
 
         Returns:
             np.ndarray
@@ -1087,8 +1087,8 @@ class QVMC_QPU:
         """Sample theta from the optimized circuit by measuring on the QPU.
 
         Args:
-            n_samples: muestras a generar. Por defecto 4000.
-            shots_per_job: disparos por trabajo enviado. Por defecto 4096.
+            n_samples: samples to generate. Defaults to 4000.
+            shots_per_job: shots per submitted job. Defaults to 4096.
 
         Returns:
             np.ndarray
@@ -1123,14 +1123,14 @@ def plot_corner_quantum(flat: np.ndarray, model: CosmoModel, outdir: str,
     dashed black lines. `title` carries the run metadata.
 
     Args:
-        flat: muestras aplanadas, de forma (N, d).
-        model: modelo cosmologico (`cosmo_core.CosmoModel`).
-        outdir: carpeta donde escribir la salida.
-        tag: etiqueta corta que va al nombre de archivo y a los mensajes.
-        title: titulo de la figura.
-        label: etiqueta para la leyenda.
-        color: color de la serie. Por defecto C_QUANTUM.
-        weights: pesos de las muestras. Por defecto None.
+        flat: flattened samples, of shape (N, d).
+        model: cosmological model (`cosmo_core.CosmoModel`).
+        outdir: folder where the output is written.
+        tag: short label used in the file name and in messages.
+        title: figure title.
+        label: legend label.
+        color: series color. Defaults to C_QUANTUM.
+        weights: sample weights. Defaults to None.
 
     Returns:
         str
@@ -1160,11 +1160,11 @@ def plot_kl_quantum(hist: List[dict], outdir: str, tag: str,
     """QVMC-QPU KL training curve. Title embeds SPSA iterations and nqpp.
 
     Args:
-        hist: historial de la optimizacion.
-        outdir: carpeta donde escribir la salida.
-        tag: etiqueta corta que va al nombre de archivo y a los mensajes.
-        n_iters: iteraciones realizadas.
-        nqpp: qubits por parametro (rejilla de 2^nqpp por eje).
+        hist: optimization history.
+        outdir: folder where the output is written.
+        tag: short label used in the file name and in messages.
+        n_iters: iterations performed.
+        nqpp: qubits per parameter (grid of 2^nqpp per axis).
 
     Returns:
         str
@@ -1190,11 +1190,11 @@ def plot_rhat_quantum(rh: List[Tuple[int, float]], outdir: str, tag: str,
     """QMCMC-QPU Gelman-Rubin curve. Title embeds total steps and chains.
 
     Args:
-        rh: serie de R-hat por paso.
-        outdir: carpeta donde escribir la salida.
-        tag: etiqueta corta que va al nombre de archivo y a los mensajes.
-        n_steps: pasos de la cadena.
-        n_chains: numero de cadenas en paralelo.
+        rh: R-hat series per step.
+        outdir: folder where the output is written.
+        tag: short label used in the file name and in messages.
+        n_steps: chain steps.
+        n_chains: number of parallel chains.
 
     Returns:
         str
@@ -1290,7 +1290,7 @@ def estimate_jobs(args) -> int:
     classical code at all.
 
     Args:
-        args: espacio de nombres de argparse ya parseado.
+        args: already-parsed argparse namespace.
 
     Returns:
         int
@@ -1320,8 +1320,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     """Entry point.
 
     Args:
-        argv: argumentos de linea de comandos; None usa `sys.argv`. Por
-            defecto None.
+        argv: command-line arguments; None uses `sys.argv`. Defaults to
+            None.
 
     Returns:
         int

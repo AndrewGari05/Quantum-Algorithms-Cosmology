@@ -2,10 +2,12 @@ __pycache__/
 *.pyc
 *:Zone.Identifier
 *.lock
-# Salidas de corridas. Patrones con comodin y no nombres exactos: `resultados/`
-# no cubria `resultados_quick/`, `resultados_ro_0.03/` ni ninguna carpeta con
-# --outdir propio, asi que un `git add -A` tras una corrida metia el run entero
-# —figuras, GIF, CSV— en el repo sin que se notara hasta el commit.
+# Run outputs. Wildcard patterns rather than exact names: `resultados/` did
+# not cover `resultados_quick/`, `resultados_ro_0.03/` or any folder with its
+# own --outdir, so a `git add -A` after a run pulled the whole run
+# —figures, GIF, CSV— into the repo without anyone noticing until the commit.
+# `results*/` covers the current English output names; `resultados*/` is kept
+# for legacy campaigns written with the old Spanish names.
 results*/
 resultados*/
 bridge.aux
@@ -13,4 +15,5 @@ bridge.log
 bridge.out
 bridge.toc
 data_checksums.json
+results_quick/
 resultados_quick/

@@ -1,75 +1,77 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-qpu_noisy_simulation.py — Gemelo ruidoso del pipeline QPU.
+qpu_noisy_simulation.py — Noisy twin of the QPU pipeline.
 ================================================================================
 
-Corre el pipeline de `qpu_cosmo_samplers.py` — el mismo codigo, los mismos
-circuitos, la misma logica por conteos — contra un simulador RUIDOSO local en
-vez de contra hardware de IBM.
+Runs the `qpu_cosmo_samplers.py` pipeline — the same code, the same
+circuits, the same counts-based logic — against a local NOISY simulator
+instead of IBM hardware.
 
-`qpu_cosmo_samplers.py` NO SE MODIFICA
---------------------------------------
-Ese archivo se mantiene intacto para las corridas reales de QPU. Este modulo
-no lo copia: lo IMPORTA y sustituye una sola pieza, la conexion. Un archivo
-copiado empezaria a divergir del original en la primera correccion que se
-aplicara a uno y no al otro, y la divergencia seria silenciosa — justo la
-clase de fallo que el proyecto lleva persiguiendo. Aqui, cualquier arreglo en
-el pipeline de hardware llega solo.
+`qpu_cosmo_samplers.py` IS NOT MODIFIED
+---------------------------------------
+That file is kept intact for real QPU runs. This module does not copy it: it
+IMPORTS it and replaces a single piece, the connection. A copied file would
+start to diverge from the original at the first fix applied to one and not
+the other, and the divergence would be silent — exactly the class of bug the
+project has been chasing. Here, any fix to the hardware pipeline arrives
+automatically.
 
-Lo unico que se reemplaza es de donde salen los conteos:
+The only thing replaced is where the counts come from:
 
-    QPUConnection      -> IBM Quantum (SamplerV2 sobre backend fisico)
-    LocalNoisyConnection -> AerSimulator con NoiseModel, misma interfaz
+    QPUConnection      -> IBM Quantum (SamplerV2 on a physical backend)
+    LocalNoisyConnection -> AerSimulator with NoiseModel, same interface
 
-Todo lo demas — `build_proposal_circuit`, `build_ansatz`, `GridEncoding`,
-`kl_from_counts`, SPSA, `MCMC_QPU`, `QVMC_QPU`, las figuras — es literalmente
-el codigo de hardware.
+Everything else — `build_proposal_circuit`, `build_ansatz`, `GridEncoding`,
+`kl_from_counts`, SPSA, `MCMC_QPU`, `QVMC_QPU`, the figures — is literally
+the hardware code.
 
-Por que este modulo existe
---------------------------
-1. Es el PRIMER test extremo-a-extremo de `qpu_cosmo_samplers.py`. Hasta
-   ahora ese modulo solo estaba validado en `--dry-run`, es decir con conteos
-   uniformes sinteticos que no ejercitan la fisica: se comprobaban formas y
-   decodificados, no resultados.
-2. Da la version CON RUIDO DE DISPARO del eje de ruido. El eje que vive en
-   `cosmo_modular_quantum` calcula las probabilidades exactas de `diag(rho)`
-   para aislar la degradacion por ruido del ruido de muestreo; aqui se mide
-   la combinacion de ambos, que es lo que de verdad ve el hardware.
+Why this module exists
+----------------------
+1. It is the FIRST end-to-end test of `qpu_cosmo_samplers.py`. Until now
+   that module had only been validated in `--dry-run`, i.e. with synthetic
+   uniform counts that do not exercise the physics: shapes and decoding were
+   checked, not results.
+2. It provides the version of the noise axis WITH SHOT NOISE. The axis that
+   lives in `cosmo_modular_quantum` computes the exact probabilities from
+   `diag(rho)` to isolate the degradation due to noise from sampling noise;
+   here the combination of both is measured, which is what the hardware
+   actually sees.
 
-[DD-INERTE] Advertencia que este modulo hace explicita
-------------------------------------------------------
-`QPUConnection` activa dynamical decoupling XY4 y Pauli twirling de compuertas
-y medicion. En hardware real esas opciones actuan. Con un backend simulado
-NO actuan: qiskit-ibm-runtime las descarta en local testing mode y lo dice
-solo con un `UserWarning` que se pierde entre los logs de una corrida larga:
+[DD-INERT] Caveat that this module makes explicit
+-------------------------------------------------
+`QPUConnection` enables XY4 dynamical decoupling and Pauli twirling of gates
+and measurement. On real hardware those options take effect. With a
+simulated backend they do NOT: qiskit-ibm-runtime discards them in local
+testing mode and says so only with a `UserWarning` that gets lost among the
+logs of a long run:
 
     UserWarning: Options {'dynamical_decoupling': ...,'twirling': ...}
     have no effect in local testing mode.
 
-Consecuencia: esta corrida mide **ruido SIN supresion de error**, mientras que
-la de hardware mide **ruido CON supresion de error**. No son el mismo
-experimento. Es una lectura defendible — da una COTA INFERIOR de la calidad
-alcanzable en hardware — pero tiene que quedar registrada, no inferirse. Por
-eso `LocalNoisyConnection` no usa `SamplerV2` en absoluto: habla con
-`AerSimulator` directamente y REPORTA en el log que la supresion de error esta
-inerte, en vez de fijar unas opciones que sabe que se van a ignorar.
+Consequence: this run measures **noise WITHOUT error suppression**, whereas
+the hardware run measures **noise WITH error suppression**. They are not the
+same experiment. It is a defensible reading — it gives a LOWER BOUND on the
+quality achievable on hardware — but it has to be recorded, not inferred.
+That is why `LocalNoisyConnection` does not use `SamplerV2` at all: it talks
+to `AerSimulator` directly and REPORTS in the log that error suppression is
+inert, instead of setting options it knows will be ignored.
 
-Uso
----
-    # Peldano sintetico, QMCMC:
+Usage
+-----
+    # Synthetic rung, QMCMC:
     python qpu_noisy_simulation.py --model lcdm --method qmcmc \\
         --noise full --steps 200 --chains 4
 
-    # Backend calibrado real, QVMC:
+    # Real calibrated backend, QVMC:
     python qpu_noisy_simulation.py --model wcdm --method qvmc \\
         --noise FakeBrisbane --iters 30 --nqpp 3
 
-    # Control: mismo pipeline SIN ruido (aisla el efecto del muestreo)
+    # Control: same pipeline WITHOUT noise (isolates the sampling effect)
     python qpu_noisy_simulation.py --model lcdm --method qmcmc --noise none
 
-Los flags de hardware (`--backend`, `--least-busy`, `--token`, `--session`)
-se aceptan pero se ignoran: aqui no hay hardware al que apuntar.
+The hardware flags (`--backend`, `--least-busy`, `--token`, `--session`)
+are accepted but ignored: there is no hardware to point at here.
 """
 
 from __future__ import annotations
@@ -88,35 +90,36 @@ __all__ = ['LocalNoisyConnection', 'build_parser', 'main']
 
 
 # =============================================================================
-# La unica pieza sustituida
+# The only replaced piece
 # =============================================================================
 
 class LocalNoisyConnection(qpu.QPUConnection):
-    """`QPUConnection` que devuelve conteos de un Aer ruidoso local.
+    """`QPUConnection` that returns counts from a local noisy Aer.
 
-    Implementa la MISMA interfaz que la conexion de hardware —
-    `transpile_isa`, `run_pub`, `close`, `timer`, `shots` — de modo que
-    `QPUProposalEngine`, `MCMC_QPU` y `QVMC_QPU` funcionan sin cambio alguno.
+    Implements the SAME interface as the hardware connection —
+    `transpile_isa`, `run_pub`, `close`, `timer`, `shots` — so that
+    `QPUProposalEngine`, `MCMC_QPU` and `QVMC_QPU` work without any change.
 
-    No hereda el `__init__` del padre porque ese abre una conexion a IBM.
+    It does not inherit the parent's `__init__` because that one opens a
+    connection to IBM.
 
     Args:
-        noise: peldano del eje (`cosmo_noise.NoiseSpec`).
-        shots: disparos por binding.
-        seed: semilla del simulador, para reproducibilidad.
-        logger: logger donde reportar la configuracion efectiva.
+        noise: rung of the axis (`cosmo_noise.NoiseSpec`).
+        shots: shots per binding.
+        seed: simulator seed, for reproducibility.
+        logger: logger where the effective configuration is reported.
     """
 
     def __init__(self, noise: "cnoise.NoiseSpec", shots: int = 4096,
                  seed: Optional[int] = None,
                  logger: Optional[logging.Logger] = None):
-        """Sustituto local de QPUConnection que simula ruido en vez de usar la QPU.
+        """Local stand-in for QPUConnection that simulates noise instead of using the QPU.
 
         Args:
-            noise: especificacion de ruido a aplicar.
-            shots: disparos por circuito.
-            seed: semilla del simulador.
-            logger: destino de los mensajes.
+            noise: noise specification to apply.
+            shots: shots per circuit.
+            seed: simulator seed.
+            logger: destination for log messages.
         """
         from cosmo_core import make_simulator
 
@@ -128,11 +131,11 @@ class LocalNoisyConnection(qpu.QPUConnection):
         self._context = None
         self.noise = noise
         self.seed = seed
-        self.pm = None                      # sin backend fisico: sin ISA pass
+        self.pm = None                      # no physical backend: no ISA pass
 
-        # [NOISE] counts_route=True: los circuitos de este pipeline MIDEN, asi
-        # que Aer aplica el canal de lectura por si mismo. Aplicarlo ademas en
-        # cerrado seria doble conteo.
+        # [NOISE] counts_route=True: this pipeline's circuits MEASURE, so Aer
+        # applies the readout channel by itself. Also applying it in closed
+        # form would be double counting.
         kwargs = noise.simulator_kwargs(counts_route=True)
         # [E-QPU5] The seed is NOT fixed on the simulator: a fixed
         # seed_simulator made every job replay the same random stream, so
@@ -141,36 +144,36 @@ class LocalNoisyConnection(qpu.QPUConnection):
         self._job = 0
         self.backend = make_simulator(**kwargs)
 
-        self.log.info("Simulador local: metodo=%s | peldano de ruido='%s' | "
+        self.log.info("Local simulator: method=%s | noise rung='%s' | "
                       "shots=%d", kwargs.get('method'), noise.label, shots)
-        # [DD-INERTE] Decirlo SIEMPRE y en el log de la corrida, no como
-        # warning perdido: es la diferencia entre este experimento y el de
-        # hardware, y sin ella la comparacion entre ambos es enganosa.
+        # [DD-INERT] Say it ALWAYS and in the run log, not as a lost
+        # warning: it is the difference between this experiment and the
+        # hardware one, and without it the comparison between them misleads.
         self.log.warning(
-            "[DD-INERTE] Esta corrida NO lleva dynamical decoupling ni Pauli "
-            "twirling. En hardware real esas opciones si actuan, asi que los "
-            "resultados de aqui son una COTA INFERIOR de la calidad "
-            "alcanzable en QPU, no una prediccion de ella.")
+            "[DD-INERT] This run has NO dynamical decoupling and NO Pauli "
+            "twirling. On real hardware those options do take effect, so the "
+            "results here are a LOWER BOUND on the quality achievable on "
+            "the QPU, not a prediction of it.")
         if noise.is_ideal:
-            self.log.info("Peldano 'none': sin ruido de compuerta ni de "
-                          "lectura. Lo que quede es ruido de DISPARO, que es "
-                          "el control con el que comparar los demas "
-                          "peldanos.")
+            self.log.info("Rung 'none': no gate noise and no readout "
+                          "noise. What remains is SHOT noise, which is the "
+                          "control against which to compare the other "
+                          "rungs.")
 
     # ------------------------------------------------------------------ #
     def transpile_isa(self, qc):
-        """Transpila al conjunto de compuertas del simulador.
+        """Transpile to the simulator's gate set.
 
-        Sin backend fisico no hay mapa de acoplamiento que respetar, asi que
-        esto es solo una traduccion a la base soportada. Se conserva el
-        patron transpile-once del original: el llamador invoca esto una vez
-        por plantilla, no por circuito.
+        Without a physical backend there is no coupling map to respect, so
+        this is just a translation to the supported basis. The original's
+        transpile-once pattern is preserved: the caller invokes this once per
+        template, not per circuit.
 
         Args:
-            qc: circuito logico.
+            qc: logical circuit.
 
         Returns:
-            Circuito transpilado.
+            Transpiled circuit.
         """
         # [E-HPC3] device-level noise: place and route on the device first
         return self.noise.transpile(qc, self.backend, optimization_level=1)
@@ -178,20 +181,20 @@ class LocalNoisyConnection(qpu.QPUConnection):
     # ------------------------------------------------------------------ #
     def run_pub(self, isa_circuit, parameter_values: np.ndarray,
                 shots: Optional[int] = None) -> List[Dict[str, int]]:
-        """Un job con B bindings -> lista de B diccionarios de conteos.
+        """One job with B bindings -> list of B count dictionaries.
 
-        Reproduce el contrato de `QPUConnection.run_pub` exactamente: mismo
-        orden de los bindings, mismas claves de conteo, mismo registro en el
-        `TimingEstimator`. Ese contrato es lo que permite que el resto del
-        pipeline no note la diferencia.
+        Reproduces the `QPUConnection.run_pub` contract exactly: same
+        binding order, same count keys, same record in the
+        `TimingEstimator`. That contract is what lets the rest of the
+        pipeline not notice the difference.
 
         Args:
-            isa_circuit: circuito ya transpilado.
-            parameter_values: array (B, n_phi) de bindings.
-            shots: disparos por binding.
+            isa_circuit: already-transpiled circuit.
+            parameter_values: (B, n_phi) array of bindings.
+            shots: shots per binding.
 
         Returns:
-            Lista de B diccionarios {cadena de bits: frecuencia}.
+            List of B dictionaries {bitstring: frequency}.
         """
         shots = shots or self.shots
         pv = np.atleast_2d(np.asarray(parameter_values, dtype=float))
@@ -202,10 +205,10 @@ class LocalNoisyConnection(qpu.QPUConnection):
         if params:
             if pv.shape[1] != len(params):
                 raise ValueError(
-                    f"run_pub: el circuito tiene {len(params)} parametros y "
-                    f"llegaron bindings de ancho {pv.shape[1]}.")
-            # Aer espera UNA dict por circuito, con la LISTA de B valores por
-            # parametro (no B dicts): pasarlo al reves falla con AerError.
+                    f"run_pub: the circuit has {len(params)} parameters but "
+                    f"bindings of width {pv.shape[1]} arrived.")
+            # Aer expects ONE dict per circuit, with the LIST of B values per
+            # parameter (not B dicts): passing it the other way fails with AerError.
             binds = [{p: list(pv[:, i]) for i, p in enumerate(params)}]
         else:
             binds = None
@@ -217,9 +220,9 @@ class LocalNoisyConnection(qpu.QPUConnection):
         result = self.backend.run(isa_circuit, parameter_binds=binds,
                                   shots=shots, **run_kw).result()
         t_wall = time.time() - t0
-        # Sin cola ni sobrecoste de API: el tiempo de pared ES el de
-        # ejecucion, asi que se reporta como tal en vez de dejar que el
-        # estimador lo derive de la heuristica de disparos del hardware.
+        # No queue and no API overhead: the wall time IS the execution
+        # time, so it is reported as such instead of letting the estimator
+        # derive it from the hardware shot heuristic.
         self.timer.record(b, shots, t_wall, t_exec_reported=t_wall)
 
         counts = result.get_counts()
@@ -227,13 +230,13 @@ class LocalNoisyConnection(qpu.QPUConnection):
             counts = [counts]
         if len(counts) != b:
             raise RuntimeError(
-                f"run_pub: se esperaban {b} distribuciones de conteos y "
-                f"llegaron {len(counts)}.")
+                f"run_pub: expected {b} count distributions but "
+                f"{len(counts)} arrived.")
         return [dict(c) for c in counts]
 
     # ------------------------------------------------------------------ #
     def close(self):
-        """Nada que cerrar: no hay sesion ni lote remoto."""
+        """Nothing to close: there is no remote session or batch."""
         return None
 
 
@@ -242,62 +245,62 @@ class LocalNoisyConnection(qpu.QPUConnection):
 # =============================================================================
 
 def build_parser() -> argparse.ArgumentParser:
-    """Parser del gemelo: el del pipeline QPU mas el eje de ruido.
+    """Parser of the twin: the QPU pipeline's parser plus the noise axis.
 
-    Reutilizar `qpu.build_parser()` garantiza que cualquier flag nuevo del
-    pipeline de hardware aparezca aqui sin tocar este archivo.
+    Reusing `qpu.build_parser()` guarantees that any new flag of the
+    hardware pipeline shows up here without touching this file.
 
     Returns:
-        `ArgumentParser` configurado.
+        Configured `ArgumentParser`.
     """
     p = qpu.build_parser()
-    p.description = ("Gemelo ruidoso de qpu_cosmo_samplers: mismo pipeline "
-                     "por conteos, contra Aer con ruido en vez de IBM.")
+    p.description = ("Noisy twin of qpu_cosmo_samplers: same counts-based "
+                     "pipeline, against noisy Aer instead of IBM.")
     cnoise.add_noise_cli(p)
     p.add_argument('--noise-seed', type=int, default=None,
-                   help='semilla del simulador de Aer (reproducibilidad del '
-                        'ruido de disparo). Por defecto usa --seed.')
+                   help='Aer simulator seed (reproducibility of the shot '
+                        'noise). Defaults to --seed.')
     return p
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    """Punto de entrada: corre `qpu.main` con la conexion sustituida.
+    """Entry point: runs `qpu.main` with the connection replaced.
 
-    La sustitucion se hace parcheando el nombre `QPUConnection` DENTRO del
-    modulo de hardware mientras dura la llamada, y restaurandolo despues. De
-    ese modo se reutiliza integro el `main` del pipeline real — presupuesto de
-    jobs, logging, figuras, CSV — sin duplicar una sola linea de su logica, y
-    sin dejar el modulo de hardware alterado para el resto del proceso.
+    The replacement is done by patching the name `QPUConnection` INSIDE the
+    hardware module for the duration of the call, and restoring it
+    afterwards. That way the real pipeline's `main` is reused in full — job
+    budget, logging, figures, CSV — without duplicating a single line of its
+    logic, and without leaving the hardware module altered for the rest of
+    the process.
 
     Args:
-        argv: argumentos de linea de comandos.
+        argv: command-line arguments.
 
     Returns:
-        Codigo de salida.
+        Exit code.
     """
     args = build_parser().parse_args(argv)
     spec = cnoise.spec_from_args(args)
 
     total_q = args.nqpp * qpu.MODELS[args.model].n_params
     if not spec.is_ideal and total_q > cnoise.MAX_NOISY_QUBITS:
-        print(f"[NOISE] {args.model} con nqpp={args.nqpp} son {total_q} "
-              f"qubits, por encima del techo de "
-              f"{cnoise.MAX_NOISY_QUBITS} del eje de ruido. La matriz de "
-              f"densidad ocuparia "
-              f"{cnoise.noisy_density_bytes(total_q) / 2**30:.1f} GB y el "
-              f"job tardaria horas. Baja --nqpp o usa --noise none.")
+        print(f"[NOISE] {args.model} with nqpp={args.nqpp} is {total_q} "
+              f"qubits, above the noise axis ceiling of "
+              f"{cnoise.MAX_NOISY_QUBITS}. The density matrix would take "
+              f"{cnoise.noisy_density_bytes(total_q) / 2**30:.1f} GB and the "
+              f"job would take hours. Lower --nqpp or use --noise none.")
         return 1
 
     seed = args.noise_seed if args.noise_seed is not None else args.seed
 
     def _factory(*_a, **kw):
-        """Sustituto de QPUConnection: ignora los flags de hardware."""
+        """Stand-in for QPUConnection: ignores the hardware flags."""
         return LocalNoisyConnection(noise=spec,
                                     shots=kw.get('shots', args.shots),
                                     seed=seed, logger=kw.get('logger'))
 
-    # Reenviar solo los flags que el parser de hardware conoce; los del eje de
-    # ruido ya estan capturados en `spec` y `qpu.build_parser()` los rechazaria.
+    # Forward only the flags the hardware parser knows; the noise-axis ones
+    # are already captured in `spec` and `qpu.build_parser()` would reject them.
     passthrough = _strip_noise_flags(argv)
 
     original = qpu.QPUConnection
@@ -309,16 +312,16 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 def _strip_noise_flags(argv: Optional[List[str]]) -> Optional[List[str]]:
-    """Quita del argv los flags propios del eje de ruido.
+    """Remove the noise-axis flags from argv.
 
-    `qpu.main` reconstruye sus argumentos con `qpu.build_parser()`, que no
-    conoce `--noise*`; pasarselos abortaria con "unrecognized arguments".
+    `qpu.main` rebuilds its arguments with `qpu.build_parser()`, which does
+    not know `--noise*`; passing them would abort with "unrecognized arguments".
 
     Args:
-        argv: argumentos originales, o None para usar `sys.argv[1:]`.
+        argv: original arguments, or None to use `sys.argv[1:]`.
 
     Returns:
-        Lista filtrada, o None si `argv` era None y no habia nada que filtrar.
+        Filtered list, or None if `argv` was None and there was nothing to filter.
     """
     import sys
 

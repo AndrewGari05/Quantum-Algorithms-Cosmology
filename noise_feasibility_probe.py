@@ -1,63 +1,63 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-noise_feasibility_probe.py — Estudio de viabilidad del eje de ruido NISQ.
+noise_feasibility_probe.py — Feasibility study of the NISQ noise axis.
 ================================================================================
 
-Script de VERIFICACION, no de produccion. No modifica ningun modulo del
-proyecto y no entra en `cosmo_hpc_runner.py`: su unico proposito es sostener
-con mediciones las decisiones de diseno de la Fase 4 (segundo eje de ablacion
-= ruido), de modo que ninguna afirmacion del documento de diseno descanse en
-lectura de codigo o en intuicion.
+VERIFICATION script, not production. It does not modify any module of the
+project and is not part of `cosmo_hpc_runner.py`: its only purpose is to back
+with measurements the design decisions of Phase 4 (second ablation axis
+= noise), so that no claim in the design document rests on code reading or
+on intuition.
 
-Contexto
---------
-El framework produce hoy sus resultados con `AerSimulator(method='statevector')`
-sin ruido. Anadir ruido choca con dos hechos:
+Context
+-------
+Today the framework produces its results with `AerSimulator(method='statevector')`
+without noise. Adding noise collides with two facts:
 
-  1. Aer no aplica ruido con `method='statevector'`.
-  2. El simulador ideal lee amplitudes en sitios funcionalmente distintos
+  1. Aer does not apply noise with `method='statevector'`.
+  2. The ideal simulator reads amplitudes at functionally distinct places
      (`QuantumProposalEngine._raw_block`, `hadamard_accept_log_batch`,
-     `QVMCModular._kl_batch`, entre otros), y esas lecturas son justo lo que
-     el ruido vuelve imposible.
+     `QVMCModular._kl_batch`, among others), and those reads are exactly what
+     noise makes impossible.
 
-Las sondas de abajo miden que rutas de escape existen y cuanto cuestan.
+The probes below measure which escape routes exist and how much they cost.
 
-Sondas
+Probes
 ------
 A. `probe_local_testing_mode`
-     Comprueba si `qiskit_ibm_runtime.SamplerV2` corre localmente cuando se le
-     pasa un backend simulado (hipotesis del "atajo": reusar el pipeline por
-     conteos de `qpu_cosmo_samplers.py` apuntandolo a Aer en vez de a IBM).
-     Registra ADEMAS si las opciones de supresion de error del proyecto
-     (dynamical decoupling XY4 + Pauli twirling) sobreviven a ese modo.
+     Checks whether `qiskit_ibm_runtime.SamplerV2` runs locally when given a
+     simulated backend (the "shortcut" hypothesis: reuse the counts-based
+     pipeline of `qpu_cosmo_samplers.py` pointing it at Aer instead of IBM).
+     It ALSO records whether the project's error-suppression options
+     (XY4 dynamical decoupling + Pauli twirling) survive that mode.
 
 B. `probe_graded_axis`
-     Comprueba que los cuatro niveles del eje de ruido propuesto
-     (none / readout / full / backend real) son construibles y distinguibles.
+     Checks that the four levels of the proposed noise axis
+     (none / readout / full / real backend) are buildable and distinguishable.
 
 C. `probe_cost`
-     Mide tiempo por job y RAM pico de los dos metodos de simulacion con ruido
-     (matriz de densidad vs trayectorias de statevector) sobre el ansatz real
-     del proyecto, en los anchos de qubit que el runner realmente genera.
+     Measures time per job and peak RAM of the two noisy simulation methods
+     (density matrix vs statevector trajectories) on the project's real
+     ansatz, at the qubit widths the runner actually generates.
 
 D. `probe_faithful_degradation`
-     El resultado central. Verifica que rho[0,0] reproduce |psi_0|^2 de forma
-     exacta sin ruido (el puente ideal->ruidoso no introduce error propio),
-     reconfirma la identidad con min(1, e^Delta) contra la respuesta conocida,
-     y mide como se degrada esa identidad canal por canal.
+     The central result. Verifies that rho[0,0] reproduces |psi_0|^2 exactly
+     without noise (the ideal->noisy bridge introduces no error of its own),
+     reconfirms the identity with min(1, e^Delta) against the known answer,
+     and measures how that identity degrades channel by channel.
 
-     Detecta ademas la trampa que invalidaria una columna entera de la matriz
-     de ablacion: el error de LECTURA es un canal clasico posterior a la
-     medicion y NO toca rho, de modo que leer rho[0,0] es ciego a el.
+     It also detects the trap that would invalidate a whole column of the
+     ablation matrix: READOUT error is a classical channel after the
+     measurement and does NOT touch rho, so reading rho[0,0] is blind to it.
 
-Uso
----
-    python noise_feasibility_probe.py            # sondas rapidas (A, B, D)
-    python noise_feasibility_probe.py --cost     # anade C (lento)
+Usage
+-----
+    python noise_feasibility_probe.py            # fast probes (A, B, D)
+    python noise_feasibility_probe.py --cost     # adds C (slow)
 
-Requisitos: el stack verificado del proyecto (qiskit 2.4.2, qiskit-aer 0.17.2,
-numpy 1.26.4) mas `qiskit-ibm-runtime` para la sonda A.
+Requirements: the project's verified stack (qiskit 2.4.2, qiskit-aer 0.17.2,
+numpy 1.26.4) plus `qiskit-ibm-runtime` for probe A.
 """
 
 from __future__ import annotations
@@ -80,24 +80,24 @@ print = functools.partial(print, flush=True)  # noqa: A001
 
 
 # =============================================================================
-# Modelos de ruido: los cuatro peldanos del eje propuesto
+# Noise models: the four rungs of the proposed axis
 # =============================================================================
 
 def noise_none() -> Optional[NoiseModel]:
-    """Peldano 0 del eje: limite ideal (el de todos los resultados actuales)."""
+    """Rung 0 of the axis: ideal limit (the one behind all current results)."""
     return None
 
 
 def noise_readout(p: float = 0.03) -> NoiseModel:
-    """Peldano 1: SOLO error de lectura, simetrico, igual en todos los qubits.
+    """Rung 1: ONLY readout error, symmetric, equal on all qubits.
 
-    Es un canal CLASICO aplicado despues de la medicion: voltea el bit
-    reportado con probabilidad p. No altera el estado cuantico, y por eso
-    resulta invisible a cualquier lectura de rho (ver
-    `probe_faithful_degradation`, apartado d).
+    It is a CLASSICAL channel applied after the measurement: it flips the
+    reported bit with probability p. It does not alter the quantum state, and
+    therefore it is invisible to any read of rho (see
+    `probe_faithful_degradation`, part d).
 
     Args:
-        p: probabilidad de volteo del bit reportado.
+        p: flip probability of the reported bit.
     """
     nm = NoiseModel()
     nm.add_all_qubit_readout_error(ReadoutError([[1 - p, p], [p, 1 - p]]))
@@ -106,12 +106,12 @@ def noise_readout(p: float = 0.03) -> NoiseModel:
 
 def noise_full(p1: float = 1e-3, p2: float = 1e-2,
                pr: float = 0.03) -> NoiseModel:
-    """Peldano 2: despolarizacion en compuertas de 1 y 2 qubits + lectura.
+    """Rung 2: depolarization on 1- and 2-qubit gates + readout.
 
     Args:
-        p1: probabilidad de despolarizacion en compuertas de un qubit.
-        p2: idem en compuertas de dos qubits (tipicamente ~10x mayor).
-        pr: probabilidad de volteo de lectura.
+        p1: depolarization probability on single-qubit gates.
+        p2: same on two-qubit gates (typically ~10x larger).
+        pr: readout flip probability.
     """
     nm = noise_readout(pr)
     nm.add_all_qubit_quantum_error(depolarizing_error(p1, 1),
@@ -122,28 +122,28 @@ def noise_full(p1: float = 1e-3, p2: float = 1e-2,
 
 
 def noise_backend(name: str = "FakeBrisbane") -> NoiseModel:
-    """Peldano 3: modelo calibrado de un backend real de IBM.
+    """Rung 3: calibrated model of a real IBM backend.
 
     Args:
-        name: clase de `qiskit_ibm_runtime.fake_provider` a usar.
+        name: `qiskit_ibm_runtime.fake_provider` class to use.
     """
     from qiskit_ibm_runtime import fake_provider
     return NoiseModel.from_backend(getattr(fake_provider, name)())
 
 
 # =============================================================================
-# Sonda A — hipotesis del atajo
+# Probe A — the shortcut hypothesis
 # =============================================================================
 
 def probe_local_testing_mode() -> None:
-    """Verifica si SamplerV2 corre local, y si DD/twirling sobreviven.
+    """Check whether SamplerV2 runs locally, and whether DD/twirling survive.
 
-    La hipotesis a falsar es: "apuntando `qpu_cosmo_samplers.py` a un backend
-    simulado en vez de a IBM se obtiene la corrida ruidosa sin tocar el
-    simulador ideal".
+    The hypothesis to falsify is: "pointing `qpu_cosmo_samplers.py` at a
+    simulated backend instead of IBM yields the noisy run without touching
+    the ideal simulator".
 
-    Lo que hay que mirar en la salida no es solo si corre, sino la advertencia
-    que qiskit-ibm-runtime emite sobre las opciones que ignora.
+    What to look at in the output is not only whether it runs, but the warning
+    that qiskit-ibm-runtime emits about the options it ignores.
     """
     from qiskit_ibm_runtime import Batch, Session, SamplerV2
     from qiskit_ibm_runtime.fake_provider import FakeBrisbane
@@ -168,7 +168,7 @@ def probe_local_testing_mode() -> None:
                         ("mode=Batch", Batch(backend=backend)),
                         ("mode=Session", Session(backend=backend))):
         sampler = SamplerV2(mode=mode)
-        # Exactamente las opciones que fija QPUConnection.__init__:
+        # Exactly the options set by QPUConnection.__init__:
         opt = sampler.options
         opt.dynamical_decoupling.enable = True
         opt.dynamical_decoupling.sequence_type = "XY4"
@@ -179,20 +179,20 @@ def probe_local_testing_mode() -> None:
         reg = getattr(data, 'meas', None) or getattr(data, 'c', None)
         c0, c1 = reg.get_counts(0), reg.get_counts(1)
         print(f"  {label:14s} OK | ISA {isa.num_qubits}q | "
-              f"B=2 -> {len(c0)}/{len(c1)} resultados | "
+              f"B=2 -> {len(c0)}/{len(c1)} outcomes | "
               f"len(bitstring)={len(next(iter(c0)))}")
 
 
 # =============================================================================
-# Sonda B — el eje graduado es construible y distinguible
+# Probe B — the graded axis is buildable and distinguishable
 # =============================================================================
 
 def probe_graded_axis() -> None:
-    """Comprueba que los cuatro peldanos producen distribuciones distintas.
+    """Check that the four rungs produce different distributions.
 
-    Reporta la distancia de variacion total de cada peldano contra el ideal;
-    un peldano que diera 0.0 seria indistinguible del ideal y no aportaria
-    una columna real a la matriz de ablacion.
+    Reports the total variation distance of each rung against the ideal; a
+    rung giving 0.0 would be indistinguishable from the ideal and would not
+    contribute a real column to the ablation matrix.
     """
     n = 4
     th = ParameterVector("t", n)
@@ -223,23 +223,23 @@ def probe_graded_axis() -> None:
             keys = set(ref) | set(counts)
             tv = 0.5 * sum(abs(ref.get(k, 0) - counts.get(k, 0))
                            for k in keys) / shots
-        print(f"  {label:14s} resultados={len(counts):3d}  "
-              f"distancia de variacion total vs ideal = {tv:.4f}")
+        print(f"  {label:14s} outcomes={len(counts):3d}  "
+              f"total variation distance vs ideal = {tv:.4f}")
 
 
 # =============================================================================
-# Sonda C — costo real
+# Probe C — real cost
 # =============================================================================
 
 def probe_cost(widths=(6, 8, 10, 12, 13)) -> None:
-    """Tiempo por job y RAM pico: matriz de densidad vs trayectorias.
+    """Time per job and peak RAM: density matrix vs trajectories.
 
-    Usa el ansatz real de `qpu_cosmo_samplers.build_ansatz` (3 capas), un job
-    con B=2 bindings y 4096 disparos: exactamente la forma de una iteracion
-    SPSA del QVMC-QPU.
+    Uses the real ansatz from `qpu_cosmo_samplers.build_ansatz` (3 layers), a
+    job with B=2 bindings and 4096 shots: exactly the shape of one QVMC-QPU
+    SPSA iteration.
 
     Args:
-        widths: anchos de circuito (en qubits) a medir.
+        widths: circuit widths (in qubits) to measure.
     """
     import gc
     import resource
@@ -247,8 +247,8 @@ def probe_cost(widths=(6, 8, 10, 12, 13)) -> None:
     from qpu_cosmo_samplers import build_ansatz
 
     nm = noise_backend()
-    print(f"  {'n':>3} {'densidad(s)':>12} {'trayect.(s)':>12} "
-          f"{'rho teorica':>14} {'RSS pico':>10}")
+    print(f"  {'n':>3} {'density(s)':>12} {'traject.(s)':>12} "
+          f"{'theor. rho':>14} {'peak RSS':>10}")
     for n in widths:
         qc = build_ansatz(n, n_layers=3)
         row = {}
@@ -264,7 +264,7 @@ def probe_cost(widths=(6, 8, 10, 12, 13)) -> None:
                 row[method] = time.time() - t0
             except Exception as exc:                       # noqa: BLE001
                 row[method] = float('nan')
-                print(f"      {method} fallo en n={n}: {type(exc).__name__}")
+                print(f"      {method} failed at n={n}: {type(exc).__name__}")
             gc.collect()
         rho_gb = (2 ** (2 * n)) * 16 / 2 ** 30
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
@@ -274,24 +274,24 @@ def probe_cost(widths=(6, 8, 10, 12, 13)) -> None:
 
 
 # =============================================================================
-# Sonda D — la aceptacion FAITHFUL bajo ruido
+# Probe D — the FAITHFUL acceptance under noise
 # =============================================================================
 
 def probe_faithful_degradation() -> None:
-    """Curva de degradacion de la aceptacion Metropolis codificada en RY.
+    """Degradation curve of the RY-encoded Metropolis acceptance.
 
-    La aceptacion se codifica como A = cos^2(theta/2) con
-    theta = 2*arccos(sqrt(A)), y hoy se lee como |psi_0|^2. Bajo ruido esa
-    amplitud deja de existir; la pregunta es por que la sustituimos.
+    The acceptance is encoded as A = cos^2(theta/2) with
+    theta = 2*arccos(sqrt(A)), and today it is read as |psi_0|^2. Under noise
+    that amplitude ceases to exist; the question is what we replace it with.
 
-    Apartados:
-      (a) rho[0,0] == |psi_0|^2 sin ruido -> el cambio de lectura es exacto.
-      (b) rho[0,0] == min(1, e^Delta) -> respuesta conocida, identidad intacta.
-      (c) sesgo canal por canal. La despolarizacion lleva rho hacia I/2, de
-          modo que el sesgo es lambda*(1/2 - A): la aceptacion se sesga HACIA
-          1/2, aceptando de mas los movimientos malos y de menos los buenos.
-          Es una distorsion direccional y predecible, no ruido simetrico.
-      (d) el error de lectura es INVISIBLE a rho pero visible en conteos.
+    Parts:
+      (a) rho[0,0] == |psi_0|^2 without noise -> the change of readout is exact.
+      (b) rho[0,0] == min(1, e^Delta) -> known answer, identity intact.
+      (c) bias channel by channel. Depolarization drives rho towards I/2, so
+          the bias is lambda*(1/2 - A): the acceptance is biased TOWARDS
+          1/2, over-accepting bad moves and under-accepting good ones.
+          It is a directional and predictable distortion, not symmetric noise.
+      (d) readout error is INVISIBLE to rho but visible in counts.
     """
     deltas = np.array([-6.0, -3.0, -1.0, -0.3, -0.05, 0.0, 0.5, 2.0])
     a_exact = np.minimum(1.0, np.exp(deltas))
@@ -302,7 +302,7 @@ def probe_faithful_degradation() -> None:
     base.ry(par[0], 0)
 
     def via_statevector() -> np.ndarray:
-        """Lectura actual del proyecto: |psi_0|^2 (solo existe sin ruido)."""
+        """Current project readout: |psi_0|^2 (only exists without noise)."""
         qc = base.copy()
         qc.save_statevector()
         sim = AerSimulator(method='statevector')
@@ -313,10 +313,10 @@ def probe_faithful_degradation() -> None:
                          for k in range(len(thetas))])
 
     def via_density(nm: Optional[NoiseModel]) -> np.ndarray:
-        """Lectura propuesta: rho[0,0]. Ve compuertas, NO ve lectura.
+        """Proposed readout: rho[0,0]. Sees gates, does NOT see readout.
 
         Args:
-            nm: modelo de ruido de Aer.
+            nm: Aer noise model.
 
         Returns:
             np.ndarray
@@ -333,11 +333,11 @@ def probe_faithful_degradation() -> None:
 
     def via_counts(nm: Optional[NoiseModel],
                    shots: int = 100_000) -> np.ndarray:
-        """Lectura por conteos: la unica que ve el canal de lectura.
+        """Counts-based readout: the only one that sees the readout channel.
 
         Args:
-            nm: modelo de ruido de Aer.
-            shots: disparos por circuito. Por defecto 100000.
+            nm: Aer noise model.
+            shots: shots per circuit. Defaults to 100000.
 
         Returns:
             np.ndarray
@@ -352,70 +352,70 @@ def probe_faithful_degradation() -> None:
                          for k in range(len(thetas))])
 
     sv, dm = via_statevector(), via_density(None)
-    print("  (a) |psi_0|^2 vs rho[0,0] sin ruido : max|dif| = %.3e"
+    print("  (a) |psi_0|^2 vs rho[0,0] no noise  : max|diff| = %.3e"
           % np.max(np.abs(sv - dm)))
-    print("  (b) rho[0,0]  vs min(1,e^Delta)     : max|dif| = %.3e"
+    print("  (b) rho[0,0]  vs min(1,e^Delta)     : max|diff| = %.3e"
           % np.max(np.abs(dm - a_exact)))
     print()
-    print("  (c) curva de degradacion:")
-    print(f"      {'canal':30s} {'sesgo medio':>12s} {'sesgo rel medio':>16s}")
+    print("  (c) degradation curve:")
+    print(f"      {'channel':30s} {'mean bias':>12s} {'mean rel bias':>16s}")
     for label, nm in (("ideal", noise_none()),
                       ("readout p=0.01", noise_readout(0.01)),
                       ("readout p=0.03", noise_readout(0.03)),
                       ("readout p=0.05", noise_readout(0.05)),
-                      ("compuerta 1e-3 + lectura 0.03", noise_full(1e-3)),
-                      ("compuerta 1e-2 + lectura 0.03", noise_full(1e-2))):
+                      ("gate 1e-3 + readout 0.03", noise_full(1e-3)),
+                      ("gate 1e-2 + readout 0.03", noise_full(1e-2))):
         d = via_density(nm) - a_exact
         print(f"      {label:30s} {d.mean():12.5f} "
               f"{np.mean(d / a_exact):16.5f}")
     print()
     p = 0.03
     cnt, den = via_counts(noise_readout(p)), via_density(noise_readout(p))
-    print("  (d) conteos vs rho[0,0], mismo canal de lectura p=%.2f:" % p)
-    print("      max|dif| = %.5f  |  ruido de disparo esperado ~ %.5f"
+    print("  (d) counts vs rho[0,0], same readout channel p=%.2f:" % p)
+    print("      max|diff| = %.5f  |  expected shot noise ~ %.5f"
           % (np.max(np.abs(cnt - den)), 0.5 / np.sqrt(100_000)))
-    print("      -> rho es CIEGO al error de lectura; los conteos no.")
+    print("      -> rho is BLIND to readout error; counts are not.")
 
 
 # =============================================================================
 
 def main(argv=None) -> int:
-    """Ejecuta las sondas seleccionadas e imprime el reporte.
+    """Run the selected probes and print the report.
 
     Args:
-        argv: argumentos de linea de comandos; None usa `sys.argv`. Por
-            defecto None.
+        argv: command-line arguments; None uses `sys.argv`. Defaults to
+            None.
 
     Returns:
         int
     """
     ap = argparse.ArgumentParser(
-        description="Sondas de viabilidad del eje de ruido NISQ.")
+        description="Feasibility probes for the NISQ noise axis.")
     ap.add_argument('--cost', action='store_true',
-                    help='incluye la sonda C (lenta)')
+                    help='include probe C (slow)')
     args = ap.parse_args(argv)
 
     print("=" * 72)
-    print("A. Modo de prueba local de SamplerV2 (hipotesis del atajo)")
+    print("A. SamplerV2 local testing mode (shortcut hypothesis)")
     print("=" * 72)
     probe_local_testing_mode()
 
     print()
     print("=" * 72)
-    print("B. Eje de ruido graduado")
+    print("B. Graded noise axis")
     print("=" * 72)
     probe_graded_axis()
 
     print()
     print("=" * 72)
-    print("D. Degradacion de la aceptacion FAITHFUL")
+    print("D. Degradation of the FAITHFUL acceptance")
     print("=" * 72)
     probe_faithful_degradation()
 
     if args.cost:
         print()
         print("=" * 72)
-        print("C. Costo: matriz de densidad vs trayectorias")
+        print("C. Cost: density matrix vs trajectories")
         print("=" * 72)
         probe_cost()
     return 0

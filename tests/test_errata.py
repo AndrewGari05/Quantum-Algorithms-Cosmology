@@ -109,35 +109,35 @@ def test_hpc8_task_names_without_tags_are_read(tmp_path):
 
 
 def test_qpu8_rows_from_different_campaigns_never_pair(tmp_path):
-    import graficas_ruido as gr
+    import noise_plots as gr
     a, b = tmp_path / "campA", tmp_path / "campB"
     _task(a, "samplers_lcdm_nqpp3_noise-none", [_row("QMCMC 100%", 0.30)])
     _task(a, "samplers_lcdm_nqpp3_noise-readout",
           [_row("QMCMC 100%", 0.30, noise="readout")])
     _task(b, "samplers_lcdm_nqpp3_noise-none", [_row("QMCMC 100%", 0.38)])
-    rows = gr.leer_campana(str(a)) + gr.leer_campana(str(b))
-    ideal = gr.indice_de_celdas_ideales(rows)
-    noisy = [r for r in rows if r["_ruido"] == "readout"][0]
-    assert gr.valor(noisy, "desplazamiento", ideal) == 0.0     # vs its own campaign
+    rows = gr.load_campaign(str(a)) + gr.load_campaign(str(b))
+    ideal = gr.ideal_cell_index(rows)
+    noisy = [r for r in rows if r["_noise"] == "readout"][0]
+    assert gr.metric_value(noisy, "shift", ideal) == 0.0     # vs its own campaign
 
 
 def test_qpu8_model_selection_refuses_mixed_datasets(tmp_path):
-    import comparar_algoritmos as ca
+    import compare_algorithms as ca
     _task(tmp_path, "samplers_lcdm_nqpp3_noise-none", [
         _row("Classical MCMC", 0.30, dataset="CC+BAO", chi2="27.5", n="51"),
         _row("QMCMC 100%", 0.30, dataset="CC+BAO+Pantheon", chi2="1064.6", n="1099")])
-    rows = ca.leer([str(tmp_path)])
+    rows = ca.read_rows([str(tmp_path)])
     with pytest.raises(ValueError):
-        ca.comparar_modelos(rows)
-    one = ca.comparar_modelos(rows, dataset="CC+BAO", prior="flat")
+        ca.compare_models(rows)
+    one = ca.compare_models(rows, dataset="CC+BAO", prior="flat")
     assert [m["n"] for m in one] == [51]
 
 
 def test_qpu9_no_sigma_shift_for_genetic_rows(tmp_path):
-    import graficas_ruido as gr
-    fila = {"_familia": "genetic", "Method": "QGA (q=67%)", "Om_mean": 0.2398}
-    assert gr.valor(fila, "desplazamiento", {}) is None
-    assert "desplazamiento" not in gr.metricas_utiles([], "genetic")
+    import noise_plots as gr
+    row = {"_family": "genetic", "Method": "QGA (q=67%)", "Om_mean": 0.2398}
+    assert gr.metric_value(row, "shift", {}) is None
+    assert "shift" not in gr.useful_metrics([], "genetic")
 
 
 # --------------------------------------------------------------------------- #

@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-cosmo_noise.py — Segundo eje de ablacion: ruido NISQ.
+cosmo_noise.py — Second ablation axis: NISQ noise.
 ================================================================================
 
-Fuente unica de verdad del eje de ruido, del mismo modo que
-`cosmo_core.make_simulator` lo es de la creacion de simuladores y
-`cosmo_core.log_prob_batch` lo es de la fisica. Los tres modulos cuanticos
-(`cosmo_modular_quantum`, `cosmo_genetic_optimizers` y el gemelo ruidoso del
-pipeline QPU) obtienen su ruido de aqui y de ningun otro sitio.
+Single source of truth for the noise axis, in the same way that
+`cosmo_core.make_simulator` is for simulator creation and
+`cosmo_core.log_prob_batch` is for the physics. The three quantum modules
+(`cosmo_modular_quantum`, `cosmo_genetic_optimizers` and the noisy twin of the
+QPU pipeline) get their noise from here and from nowhere else.
 
-El marco de ablacion pasa a ser bidimensional:
+The ablation framework becomes two-dimensional:
 
 ```
-                        ruido  ->
+                        noise  ->
                     none   readout   full   <backend>
     quantumness 0%    .        .        .        .
           |    33%    .        .        .        .
@@ -21,94 +21,94 @@ El marco de ablacion pasa a ser bidimensional:
               100%    .        .        .        .
 ```
 
-Los cuatro peldanos
--------------------
-* `none`      — limite ideal. Es el de TODOS los resultados publicados hasta
-                hoy. Reproduce bit a bit la ruta anterior a este modulo.
-* `readout`   — solo error de lectura, simetrico, uniforme.
-* `full`      — despolarizacion en compuertas de 1 y 2 qubits + lectura.
-* `<backend>` — modelo calibrado de un backend real de IBM, por nombre
-                (p. ej. `FakeBrisbane`, `fake_brisbane`).
+The four rungs
+--------------
+* `none`      — ideal limit. It is the one behind ALL results published to
+                date. Reproduces bit for bit the route that predates this module.
+* `readout`   — readout error only, symmetric, uniform.
+* `full`      — depolarization on 1- and 2-qubit gates + readout.
+* `<backend>` — calibrated model of a real IBM backend, by name
+                (e.g. `FakeBrisbane`, `fake_brisbane`).
 
-Por que el error de lectura viaja SEPARADO del NoiseModel
----------------------------------------------------------
-El error de lectura es un canal CLASICO posterior a la medicion: no toca el
-estado. Aer solo lo aplica cuando el circuito mide. Pero dos de las tres
-lecturas del simulador ideal (`hadamard_accept_log_batch` y `_kl_batch`) son
-probabilidades que bajo ruido se obtienen de `rho` sin medir, y por tanto
-serian CIEGAS al canal de lectura: la columna `readout` de la matriz de
-ablacion saldria identica a la columna ideal — falsa, y falsa de la peor
-manera, porque no falla ruidosamente sino que produce numeros limpios y
-plausibles.
+Why readout error travels SEPARATELY from the NoiseModel
+--------------------------------------------------------
+Readout error is a CLASSICAL channel applied after measurement: it does not
+touch the state. Aer only applies it when the circuit measures. But two of the
+three readings of the ideal simulator (`hadamard_accept_log_batch` and
+`_kl_batch`) are probabilities that, under noise, are obtained from `rho`
+without measuring, and would therefore be BLIND to the readout channel: the
+`readout` column of the ablation matrix would come out identical to the ideal
+column — false, and false in the worst way, because it does not fail loudly
+but produces clean, plausible numbers.
 
-Verificado empiricamente (`noise_feasibility_probe.py`, sonda D): con
-p = 0.01, 0.03 y 0.05 el valor de `rho[0,0]` no se mueve ni un digito.
+Verified empirically (`noise_feasibility_probe.py`, probe D): with
+p = 0.01, 0.03 and 0.05 the value of `rho[0,0]` does not move a single digit.
 
-La solucion no es medir, sino aplicar el canal en cerrado. Sobre un registro
-de n qubits el error de lectura es un producto tensorial de matrices
-estocasticas 2x2, de modo que actua exactamente sobre el vector de
-probabilidades `diag(rho)`:
+The solution is not to measure, but to apply the channel in closed form. On an
+n-qubit register the readout error is a tensor product of 2x2 stochastic
+matrices, so it acts exactly on the probability vector `diag(rho)`:
 
-    P_ruidosa = (tensor_q M_q) @ P_ideal
+    P_noisy = (tensor_q M_q) @ P_ideal
 
-Eso da el eje de ruido COMPLETO, exacto y sin ruido de disparo, al costo de
-una contraccion O(n * 2^n). Importa porque la ruta por disparos no puede
-resolver el sesgo buscado: con compuertas a 1e-3 el sesgo en la aceptacion es
-~1.4e-4 y distinguirlo del ruido de muestreo exigiria ~1e7 disparos POR
-evaluacion de aceptacion.
+That gives the COMPLETE noise axis, exact and free of shot noise, at the cost
+of an O(n * 2^n) contraction. It matters because the shot-based route cannot
+resolve the bias we are after: with gates at 1e-3 the bias in the acceptance is
+~1.4e-4, and telling it apart from sampling noise would require ~1e7 shots PER
+acceptance evaluation.
 
-Por eso este modulo expone DOS modelos por cada peldano:
+That is why this module exposes TWO models per rung:
 
-* `gate_model()`  — sin readout. Para las rutas que leen `rho` y aplican el
-                    canal de lectura con `apply_readout`.
-* `full_model()`  — con readout. Para las rutas que de verdad miden (el QGA,
-                    el motor de propuesta, el gemelo QPU), donde Aer lo aplica.
+* `gate_model()`  — without readout. For the routes that read `rho` and apply
+                    the readout channel with `apply_readout`.
+* `full_model()`  — with readout. For the routes that really measure (the QGA,
+                    the proposal engine, the QPU twin), where Aer applies it.
 
-Usar el modelo equivocado produce doble conteo del error de lectura o su
-desaparicion silenciosa, asi que la eleccion NO se deja al llamador: se pide
-por `simulator_kwargs(counts_route=...)`.
+Using the wrong model double-counts the readout error or makes it silently
+disappear, so the choice is NOT left to the caller: it is requested through
+`simulator_kwargs(counts_route=...)`.
 
-Techo de qubits
----------------
-Simular con ruido exige matriz de densidad (`2^(2n) * 16 B`) o trayectorias
-(`shots * 2^n` en tiempo). Medido sobre el ansatz real del proyecto, la matriz
-de densidad DOMINA en tiempo en todo el rango donde cabe (1.5x-15x mas rapida),
-porque evoluciona una vez y luego muestrea, mientras que las trayectorias
-re-simulan el circuito completo una vez por disparo.
+Qubit ceiling
+-------------
+Simulating with noise requires a density matrix (`2^(2n) * 16 B`) or
+trajectories (`shots * 2^n` in time). Measured on the project's real ansatz,
+the density matrix DOMINATES in time over the whole range where it fits
+(1.5x-15x faster), because it evolves once and then samples, whereas
+trajectories re-simulate the full circuit once per shot.
 
-Los disparos NO compran qubits: las trayectorias caben en RAM pero su coste en
-tiempo crece como `shots * 2^n`, de modo que convierten un OOM en una corrida
-que no termina. La matriz de densidad es la ruta buena.
+Shots do NOT buy qubits: trajectories fit in RAM but their time cost grows as
+`shots * 2^n`, so they turn an OOM into a run that never finishes. The density
+matrix is the good route.
 
-[REV] Cuanto se puede subir depende de la RAM del nodo, y ese techo SI se
-relaja al tener mas — la version anterior de este modulo lo fijaba en 13 duro
-argumentando que el limitante era el tiempo, y era una mala generalizacion
-sacada de una maquina de 7 GB. Pero el coste no es un solo numero: depende de
-cuantas matrices de densidad viven a la vez.
+[REV] How high one can go depends on the node's RAM, and that ceiling DOES
+relax with more of it — the previous version of this module hard-fixed it at
+13, arguing that time was the limiting factor, and that was a bad
+generalization drawn from a 7 GB machine. But the cost is not a single number:
+it depends on how many density matrices are alive at the same time.
 
-    ancho     rho (1x)     lote parameter-shift (2*n_phi * rho)
+    width     rho (1x)     parameter-shift batch (2*n_phi * rho)
      12       256 MB                42 GB
      13       1.0 GB               182 GB
      16        64 GB                14 TB
 
-El entrenamiento cuantico del QVMC materializa `2 * n_phi` estados en un solo
-job. Sin ruido eso es barato (cada estado es un statevector de 16*2^n); con
-ruido cada uno es una matriz de densidad y el lote pasa a ser el termino
-dominante. En un nodo de 95 GB:
+Quantum training in QVMC materializes `2 * n_phi` states in a single job.
+Without noise that is cheap (each state is a 16*2^n statevector); with noise
+each one is a density matrix and the batch becomes the dominant term. On a
+95 GB node:
 
-* QMCMC — su motor de propuesta usa `max(2, d)` qubits (2 a 4) y la aceptacion
-  uno solo. Es GRATIS bajo ruido a cualquier nqpp; nqpp no toca sus circuitos.
-* QVMC sin entrenamiento cuantico (rungs 0% y 33%) — una rho suelta: 16 qubits.
-* QVMC CON entrenamiento cuantico (rungs 67% y 100%) — manda el lote: 12.
-* QGA — una rho suelta por operador: 16 qubits.
+* QMCMC — its proposal engine uses `max(2, d)` qubits (2 to 4) and the
+  acceptance just one. It is FREE under noise at any nqpp; nqpp does not touch
+  its circuits.
+* QVMC without quantum training (rungs 0% and 33%) — a single rho: 16 qubits.
+* QVMC WITH quantum training (rungs 67% and 100%) — the batch rules: 12.
+* QGA — a single rho per operator: 16 qubits.
 
-Como un `--benchmark` recorre la escalera entera, el peldano del lote es el
-que fija el techo de una tarea de samplers. Trocear ese lote (pendiente ya
-identificado en el README) es lo que desbloquearia resoluciones mayores.
+Since a `--benchmark` walks the whole ladder, the batch rung is the one that
+sets the ceiling of a samplers task. Chunking that batch (an open item already
+identified in the README) is what would unlock larger resolutions.
 
-Medido (ansatz de 3 capas, B=2 bindings, 4096 disparos, FakeBrisbane):
+Measured (3-layer ansatz, B=2 bindings, 4096 shots, FakeBrisbane):
 
-    qubits   densidad   trayectorias   rho teorica
+    qubits   density    trajectories   theoretical rho
       6        1.66 s       5.31 s        0.1 MB
       8        2.33 s       6.77 s        1.0 MB
      10        3.77 s      22.41 s       16.0 MB
@@ -125,60 +125,60 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 # =============================================================================
-# Constantes del eje
+# Axis constants
 # =============================================================================
 
-#: Peldanos con nombre. Cualquier otro valor se interpreta como nombre de
-#: backend de `qiskit_ibm_runtime.fake_provider`.
+#: Named rungs. Any other value is interpreted as the name of a backend from
+#: `qiskit_ibm_runtime.fake_provider`.
 NAMED_LEVELS: Tuple[str, ...] = ('none', 'readout', 'full')
 
-#: Techo por defecto de qubits con ruido cuando NO se conoce la RAM del nodo.
+#: Default noisy-qubit ceiling when the node's RAM is NOT known.
 #:
-#: [REV] Este valor fue en su origen un techo DURO, justificado como limite de
-#: tiempo. Era una mala generalizacion: se calibro en una maquina de 7 GB, y en
-#: un nodo con RAM de verdad y sin prisa el limitante vuelve a ser la memoria,
-#: que SI se relaja al tener mas. El techo se deriva ahora de la RAM
-#: disponible (`noisy_qubit_ceiling`) y esto queda solo como respaldo
-#: conservador para cuando no hay una cifra de RAM que usar.
+#: [REV] This value was originally a HARD ceiling, justified as a time limit.
+#: That was a bad generalization: it was calibrated on a 7 GB machine, and on a
+#: node with real RAM and no hurry the limiting factor is memory again, which
+#: DOES relax with more of it. The ceiling is now derived from the available
+#: RAM (`noisy_qubit_ceiling`) and this remains only as a conservative fallback
+#: for when there is no RAM figure to use.
 DEFAULT_NOISY_QUBITS: int = 13
 
-#: Alias retrocompatible del nombre anterior.
+#: Backward-compatible alias of the previous name.
 MAX_NOISY_QUBITS: int = DEFAULT_NOISY_QUBITS
 
-#: Capas del ansatz variacional, para dimensionar el lote de parameter-shift.
+#: Layers of the variational ansatz, used to size the parameter-shift batch.
 ANSATZ_LAYERS: int = 3
 
-#: Parametros por defecto de los peldanos sinteticos.
+#: Default parameters of the synthetic rungs.
 DEFAULT_READOUT_P: float = 0.03
 DEFAULT_GATE_P1: float = 1e-3
 DEFAULT_GATE_P2: float = 1e-2
 
-#: Compuertas a las que se adjunta despolarizacion en el peldano `full`.
+#: Gates that get depolarization attached in the `full` rung.
 _GATES_1Q = ('id', 'u', 'u1', 'u2', 'u3', 'rx', 'ry', 'rz', 'x', 'y', 'z',
              'h', 's', 'sdg', 't', 'tdg', 'sx', 'sxdg', 'p')
 _GATES_2Q = ('cx', 'cz', 'cy', 'ch', 'swap', 'ecr', 'rzz', 'rxx', 'ryy')
 
 
 # =============================================================================
-# Utilidades de nombres
+# Name utilities
 # =============================================================================
 
 def canonical_level(level: Optional[str]) -> str:
-    """Normaliza el nombre de un nivel de ruido para logs y CSV.
+    """Normalize the name of a noise level for logs and CSV.
 
-    Los peldanos con nombre se dejan en minusculas; los nombres de backend se
-    normalizan a minusculas sin guiones bajos, de modo que `FakeBrisbane`,
-    `fake_brisbane` y `fakebrisbane` produzcan la MISMA etiqueta en el CSV y
-    no se dupliquen filas del eje.
+    Named rungs are kept lowercase; backend names are normalized to lowercase
+    without underscores, so that `FakeBrisbane`, `fake_brisbane` and
+    `fakebrisbane` produce the SAME label in the CSV and axis rows are not
+    duplicated.
 
     Args:
-        level: nivel tal como lo escribio el usuario, o None.
+        level: level as the user wrote it, or None.
 
     Returns:
-        Etiqueta canonica; `'none'` cuando `level` es None o vacio.
+        Canonical label; `'none'` when `level` is None or empty.
     Examples:
-        Los tres peldanos con nombre se normalizan a minusculas, y cualquier
-        otra cosa se interpreta como nombre de backend:
+        The three named rungs are normalized to lowercase, and anything else
+        is interpreted as a backend name:
 
         >>> canonical_level('NONE'), canonical_level(None)
         ('none', 'none')
@@ -194,23 +194,23 @@ def canonical_level(level: Optional[str]) -> str:
 
 
 def _resolve_fake_backend(level: str):
-    """Devuelve la clase de fake backend cuyo nombre canonico es `level`.
+    """Return the fake backend whose canonical name is `level`.
 
     Args:
-        level: etiqueta canonica (minusculas, sin guiones bajos).
+        level: canonical label (lowercase, no underscores).
 
     Returns:
-        Instancia del fake backend.
+        Instance of the fake backend.
 
     Raises:
-        ValueError: si ningun backend del fake_provider coincide.
+        ValueError: if no fake_provider backend matches.
     """
     try:
         from qiskit_ibm_runtime import fake_provider
     except ImportError as exc:                              # pragma: no cover
         raise ValueError(
-            f"El nivel de ruido '{level}' exige qiskit-ibm-runtime, que no "
-            f"esta instalado. Usa none/readout/full o instala el paquete."
+            f"Noise level '{level}' requires qiskit-ibm-runtime, which is not "
+            f"installed. Use none/readout/full or install the package."
         ) from exc
 
     for name in dir(fake_provider):
@@ -221,31 +221,31 @@ def _resolve_fake_backend(level: str):
 
     available = sorted(n for n in dir(fake_provider) if n.startswith('Fake'))
     raise ValueError(
-        f"Nivel de ruido desconocido: '{level}'. Se esperaba uno de "
-        f"{NAMED_LEVELS} o un backend de fake_provider. "
-        f"Disponibles (primeros 10): {available[:10]}"
+        f"Unknown noise level: '{level}'. Expected one of "
+        f"{NAMED_LEVELS} or a fake_provider backend. "
+        f"Available (first 10): {available[:10]}"
     )
 
 
 # =============================================================================
-# Construccion de modelos de ruido
+# Noise model construction
 # =============================================================================
 
 def _readout_error(p: float):
-    """`ReadoutError` simetrico de probabilidad de volteo `p`.
+    """Symmetric `ReadoutError` with flip probability `p`.
 
     Args:
-        p: probabilidad de que el bit reportado se voltee.
+        p: probability that the reported bit is flipped.
     """
     from qiskit_aer.noise import ReadoutError
     return ReadoutError([[1 - p, p], [p, 1 - p]])
 
 
 def _readout_noise_model(p: float):
-    """NoiseModel con SOLO error de lectura simetrico y uniforme.
+    """NoiseModel with ONLY symmetric, uniform readout error.
 
     Args:
-        p: probabilidad de que el bit reportado se voltee.
+        p: probability that the reported bit is flipped.
     """
     from qiskit_aer.noise import NoiseModel
     nm = NoiseModel()
@@ -254,11 +254,11 @@ def _readout_noise_model(p: float):
 
 
 def _gate_noise_model(p1: float, p2: float):
-    """NoiseModel con SOLO despolarizacion de compuerta (sin lectura).
+    """NoiseModel with ONLY gate depolarization (no readout).
 
     Args:
-        p1: probabilidad de despolarizacion en compuertas de un qubit.
-        p2: idem en compuertas de dos qubits.
+        p1: depolarization probability on one-qubit gates.
+        p2: same, on two-qubit gates.
     """
     from qiskit_aer.noise import NoiseModel, depolarizing_error
     nm = NoiseModel()
@@ -273,45 +273,43 @@ def _gate_noise_model(p1: float, p2: float):
 
 def _extract_readout(noise_model
                      ) -> Tuple[Dict[int, np.ndarray], Optional[np.ndarray]]:
-    """Extrae las matrices de confusion de lectura de un NoiseModel.
+    """Extract the readout confusion matrices from a NoiseModel.
 
-    Solo LEE: no reconstruye ni modifica el modelo. Las matrices devueltas son
-    las que el mapa analitico `NoiseSpec.apply_readout` aplica sobre
-    `diag(rho)` en las rutas que no miden.
+    It only READS: it neither rebuilds nor modifies the model. The returned
+    matrices are the ones that the analytic map `NoiseSpec.apply_readout`
+    applies to `diag(rho)` on the routes that do not measure.
 
-    [B-RO] Un error de lectura declarado con `add_all_qubit_readout_error`
-    aparece en `to_dict()` SIN clave `gate_qubits` — significa "todos los
-    qubits". Tratar esa ausencia como `[[0]]` lo degradaba a un error de un
-    solo qubit: el mapa analitico ruidificaba n qubits mientras que Aer solo
-    ruidificaba el qubit 0. El sintoma era silencioso — coincidencia exacta en
-    n=1 y divergencia creciente con n y con p — asi que el caso "sin
-    gate_qubits" se devuelve como matriz POR DEFECTO, no como entrada del
-    qubit 0.
+    [B-RO] A readout error declared with `add_all_qubit_readout_error` shows up
+    in `to_dict()` WITHOUT a `gate_qubits` key — it means "all qubits".
+    Treating that absence as `[[0]]` degraded it to a single-qubit error: the
+    analytic map noised n qubits while Aer only noised qubit 0. The symptom was
+    silent — exact agreement at n=1 and growing divergence with n and with p —
+    so the "no gate_qubits" case is returned as the DEFAULT matrix, not as the
+    entry for qubit 0.
 
-    [B-RECON] Una version anterior ademas RECONSTRUIA el modelo sin lectura
-    con `NoiseModel.from_dict()` para alimentar la ruta de `rho`. Se elimino
-    por dos razones: `from_dict` esta deprecado desde qiskit-aer 0.15, y el
-    round-trip resulta LOSSY para los modelos calibrados — medido contra
-    FakeBrisbane, la rho reconstruida difiere de la original en 6.2e-4 a 3
-    qubits, muy por encima del epsilon de maquina. No hace falta: sobre un
-    circuito que no mide, Aer no aplica el canal de lectura (verificado a
-    2e-16 en los peldanos sinteticos), asi que el modelo COMPLETO sirve para
-    ambas rutas.
+    [B-RECON] An earlier version also REBUILT the model without readout using
+    `NoiseModel.from_dict()` to feed the `rho` route. It was removed for two
+    reasons: `from_dict` has been deprecated since qiskit-aer 0.15, and the
+    round trip is LOSSY for calibrated models — measured against FakeBrisbane,
+    the rebuilt rho differs from the original by 6.2e-4 at 3 qubits, far above
+    machine epsilon. It is not needed: on a circuit that does not measure, Aer
+    does not apply the readout channel (verified to 2e-16 on the synthetic
+    rungs), so the FULL model serves both routes.
 
     Args:
-        noise_model: NoiseModel de Aer.
+        noise_model: Aer NoiseModel.
 
     Returns:
-        Tupla `({qubit: M}, M_por_defecto_o_None)`, donde
-        `M[a, b] = P(reportar a | verdadero b)`.
+        Tuple `({qubit: M}, M_default_or_None)`, where
+        `M[a, b] = P(report a | true b)`.
     """
     per_qubit: Dict[int, np.ndarray] = {}
     default: Optional[np.ndarray] = None
     for entry in noise_model.to_dict().get('errors', []):
         if entry.get('type') != 'roerror':
             continue
-        # to_dict entrega P(reportar a | verdadero b) como fila b, columna a;
-        # se transpone para que `M @ p` sea la accion sobre probabilidades.
+        # to_dict gives P(report a | true b) as row b, column a; it is
+        # transposed so that `M @ p` is the action on probabilities.
         probs = np.asarray(entry['probabilities'], dtype=float).T
         qubit_groups = entry.get('gate_qubits')
         if not qubit_groups:                      # [B-RO] all-qubit
@@ -378,23 +376,23 @@ def physical_qubits_of(result, k: int) -> Optional[List[int]]:
 
 @dataclass
 class NoiseSpec:
-    """Un peldano del eje de ruido, ya resuelto y listo para usar.
+    """One rung of the noise axis, already resolved and ready to use.
 
-    Construir con `NoiseSpec.from_level(...)`, nunca a mano: el reparto entre
-    ruido de compuerta y de lectura es lo que evita el doble conteo, y el
-    constructor es quien lo garantiza.
+    Build it with `NoiseSpec.from_level(...)`, never by hand: the split between
+    gate noise and readout noise is what prevents double counting, and the
+    constructor is what guarantees it.
 
     Attributes:
-        label: etiqueta canonica para logs y CSV.
-        source_model: el NoiseModel COMPLETO (compuertas + lectura), tal cual
-            lo produjo Aer. Es el UNICO modelo que se usa, en ambas rutas: la
-            reconstruccion de una variante sin lectura resulto deprecada y
-            ademas lossy (ver [B-RECON] en `_extract_readout`).
-        readout: matrices de confusion 2x2 por qubit; vacio si el canal de
-            lectura es uniforme (entonces vive en `default_readout`).
-        default_readout: matriz de confusion aplicable a cualquier qubit sin
-            entrada propia, o None. Los peldanos sinteticos son uniformes y
-            usan esta; los backends reales traen una matriz por qubit.
+        label: canonical label for logs and CSV.
+        source_model: the FULL NoiseModel (gates + readout), exactly as Aer
+            produced it. It is the ONLY model used, on both routes: rebuilding
+            a variant without readout turned out to be deprecated and also
+            lossy (see [B-RECON] in `_extract_readout`).
+        readout: 2x2 confusion matrices per qubit; empty if the readout
+            channel is uniform (it then lives in `default_readout`).
+        default_readout: confusion matrix applicable to any qubit without its
+            own entry, or None. The synthetic rungs are uniform and use this
+            one; real backends bring one matrix per qubit.
     """
 
     label: str
@@ -415,19 +413,19 @@ class NoiseSpec:
                    readout_p: float = DEFAULT_READOUT_P,
                    gate_p1: float = DEFAULT_GATE_P1,
                    gate_p2: float = DEFAULT_GATE_P2) -> "NoiseSpec":
-        """Resuelve un nivel del eje a un `NoiseSpec` utilizable.
+        """Resolve an axis level into a usable `NoiseSpec`.
 
         Args:
-            level: `'none'`, `'readout'`, `'full'` o un nombre de fake backend.
-            readout_p: probabilidad de lectura de los peldanos sinteticos.
-            gate_p1: despolarizacion de 1 qubit del peldano `full`.
-            gate_p2: despolarizacion de 2 qubits del peldano `full`.
+            level: `'none'`, `'readout'`, `'full'` or a fake backend name.
+            readout_p: readout probability of the synthetic rungs.
+            gate_p1: 1-qubit depolarization of the `full` rung.
+            gate_p2: 2-qubit depolarization of the `full` rung.
 
         Returns:
-            El `NoiseSpec` correspondiente.
+            The corresponding `NoiseSpec`.
 
         Raises:
-            ValueError: si el nivel no es reconocible.
+            ValueError: if the level is not recognized.
         """
         lab = canonical_level(level)
 
@@ -441,7 +439,7 @@ class NoiseSpec:
             source.add_all_qubit_readout_error(
                 _readout_error(readout_p))
         else:
-            # Backend real: el modelo calibrado ya trae ambas partes juntas.
+            # Real backend: the calibrated model already carries both parts.
             from qiskit_aer.noise import NoiseModel
             _fake = _resolve_fake_backend(lab)
             source = NoiseModel.from_backend(_fake)
@@ -460,59 +458,60 @@ class NoiseSpec:
     # ------------------------------------------------------------------ #
     @property
     def is_ideal(self) -> bool:
-        """True si este peldano es el limite ideal (sin ruido de ningun tipo).
+        """True if this rung is the ideal limit (no noise of any kind).
 
-        Cuando es True, TODA ruta de este modulo debe reducirse exactamente a
-        la del codigo previo al eje de ruido: mismo metodo de simulacion,
-        mismas lecturas, mismos numeros bit a bit. Es la condicion que hace
-        de `--noise none` una linea base valida y no una aproximacion.
+        When True, EVERY route of this module must reduce exactly to the code
+        that predates the noise axis: same simulation method, same readings,
+        same numbers bit for bit. This is the condition that makes
+        `--noise none` a valid baseline and not an approximation.
         """
         return self.source_model is None
 
     @property
     def has_readout(self) -> bool:
-        """True si el peldano incluye canal de lectura."""
+        """True if the rung includes a readout channel."""
         return bool(self.readout) or self.default_readout is not None
 
     # ------------------------------------------------------------------ #
     def full_model(self):
-        """NoiseModel CON error de lectura, para rutas que miden de verdad.
+        """NoiseModel WITH readout error, for routes that really measure.
 
-        Es el que usan el QGA, el motor de propuesta y el gemelo QPU: ahi el
-        circuito mide y Aer aplica el canal de lectura por si mismo, asi que
-        aplicarlo ademas con `apply_readout` seria doble conteo.
+        It is the one used by the QGA, the proposal engine and the QPU twin:
+        there the circuit measures and Aer applies the readout channel by
+        itself, so also applying it with `apply_readout` would double count.
 
-        Devuelve el modelo ORIGINAL sin reconstruirlo: la reconstruccion es
-        justo donde se perdio la semantica "todos los qubits" en [B-RO] y
-        donde el modelo calibrado perdia precision en [B-RECON].
+        Returns the ORIGINAL model without rebuilding it: rebuilding is
+        exactly where the "all qubits" semantics was lost in [B-RO] and where
+        the calibrated model lost precision in [B-RECON].
 
         Returns:
-            NoiseModel, o None si el peldano es ideal.
+            NoiseModel, or None if the rung is ideal.
         """
         return self.source_model
 
     # ------------------------------------------------------------------ #
     def simulator_kwargs(self, counts_route: bool) -> Dict[str, object]:
-        """kwargs para `cosmo_core.make_simulator` en este peldano.
+        """kwargs for `cosmo_core.make_simulator` at this rung.
 
-        La eleccion del modelo (con o sin lectura) NO se deja al llamador
-        porque equivocarla produce doble conteo del error de lectura o su
-        desaparicion silenciosa; se decide aqui a partir de `counts_route`.
+        The choice of model (with or without readout) is NOT left to the
+        caller, because getting it wrong double-counts the readout error or
+        makes it silently disappear; it is decided here from `counts_route`.
 
-        El modelo entregado es el mismo en ambas rutas; lo que cambia es quien
-        aplica el canal de lectura. En `counts_route=True` el circuito mide y
-        lo aplica Aer. En `counts_route=False` el circuito no mide, Aer ignora
-        el canal de lectura por construccion (verificado a 2e-16), y el
-        llamador DEBE aplicarlo despues con `apply_readout` — si no lo hace,
-        la columna `readout` del eje sale identica a la ideal.
+        The model handed over is the same on both routes; what changes is who
+        applies the readout channel. With `counts_route=True` the circuit
+        measures and Aer applies it. With `counts_route=False` the circuit does
+        not measure, Aer ignores the readout channel by construction (verified
+        to 2e-16), and the caller MUST apply it afterwards with
+        `apply_readout` — otherwise the `readout` column of the axis comes out
+        identical to the ideal one.
 
         Args:
-            counts_route: True si el circuito MIDE y el resultado se lee de
-                conteos (QGA, motor de propuesta, gemelo QPU). False si el
-                resultado se lee del estado (`rho[0,0]`, `diag(rho)`).
+            counts_route: True if the circuit MEASURES and the result is read
+                from counts (QGA, proposal engine, QPU twin). False if the
+                result is read from the state (`rho[0,0]`, `diag(rho)`).
 
         Returns:
-            dict con `method` y, si procede, `noise_model`.
+            dict with `method` and, when applicable, `noise_model`.
         """
         if self.is_ideal:
             return {'method': 'statevector'}
@@ -561,13 +560,13 @@ class NoiseSpec:
 
     # ------------------------------------------------------------------ #
     def readout_matrix(self, qubit: int) -> Optional[np.ndarray]:
-        """Matriz de confusion 2x2 del qubit dado, o None si no hay lectura.
+        """2x2 confusion matrix of the given qubit, or None if no readout.
 
         Args:
-            qubit: indice del qubit.
+            qubit: qubit index.
 
         Returns:
-            `M` con `M[a, b] = P(reportar a | verdadero b)`, o None.
+            `M` with `M[a, b] = P(report a | true b)`, or None.
         """
         if qubit in self.readout:
             return self.readout[qubit]
@@ -576,27 +575,26 @@ class NoiseSpec:
     # ------------------------------------------------------------------ #
     def apply_readout(self, probs: np.ndarray, n_qubits: int,
                       physical_qubits: Optional[List[int]] = None) -> np.ndarray:
-        """Aplica el canal de lectura en cerrado a un vector de probabilidades.
+        """Apply the readout channel in closed form to a probability vector.
 
-        Sobre n qubits el error de lectura es un producto tensorial de mapas
-        estocasticos 2x2, asi que actua EXACTAMENTE sobre `diag(rho)` sin
-        necesidad de medir y sin introducir ruido de disparo. La contraccion
-        se hace qubit a qubit en O(n * 2^n) en vez de construir la matriz
-        2^n x 2^n.
+        On n qubits the readout error is a tensor product of 2x2 stochastic
+        maps, so it acts EXACTLY on `diag(rho)` without needing to measure and
+        without introducing shot noise. The contraction is done qubit by qubit
+        in O(n * 2^n) instead of building the 2^n x 2^n matrix.
 
-        Convencion de bits: Qiskit es little-endian, el bit del qubit q del
-        indice i es `(i >> q) & 1`. Al hacer `reshape([2]*n)` en orden C el
-        eje 0 corresponde al bit MAS significativo, es decir al qubit n-1; de
-        ahi el mapeo `eje = n - 1 - q`.
+        Bit convention: Qiskit is little-endian, the bit of qubit q in index i
+        is `(i >> q) & 1`. With `reshape([2]*n)` in C order, axis 0
+        corresponds to the MOST significant bit, i.e. qubit n-1; hence the
+        mapping `axis = n - 1 - q`.
 
         Args:
-            probs: vector de probabilidades de longitud `2**n_qubits`, o lote
-                de forma `(B, 2**n_qubits)`.
-            n_qubits: numero de qubits del registro.
+            probs: probability vector of length `2**n_qubits`, or a batch of
+                shape `(B, 2**n_qubits)`.
+            n_qubits: number of qubits in the register.
 
         Returns:
-            Vector (o lote) de probabilidades tras la lectura ruidosa. Si el
-            peldano no tiene canal de lectura, devuelve `probs` sin copiar.
+            Probability vector (or batch) after the noisy readout. If the rung
+            has no readout channel, returns `probs` without copying.
         """
         if not self.has_readout:
             return probs
@@ -608,8 +606,8 @@ class NoiseSpec:
         b = p.shape[0]
         if p.shape[1] != 2 ** n_qubits:
             raise ValueError(
-                f"apply_readout: se esperaban {2 ** n_qubits} probabilidades "
-                f"para {n_qubits} qubits, llegaron {p.shape[1]}.")
+                f"apply_readout: expected {2 ** n_qubits} probabilities "
+                f"for {n_qubits} qubits, got {p.shape[1]}.")
 
         out = p.reshape((b,) + (2,) * n_qubits)
         for q in range(n_qubits):
@@ -618,7 +616,7 @@ class NoiseSpec:
                                     else q)
             if m is None:
                 continue
-            axis = n_qubits - q                      # +1 por el eje de lote
+            axis = n_qubits - q                      # +1 for the batch axis
             out = np.moveaxis(out, axis, -1)
             out = out @ m.T
             out = np.moveaxis(out, -1, axis)
@@ -627,10 +625,10 @@ class NoiseSpec:
 
     # ------------------------------------------------------------------ #
     def metadata(self) -> Dict[str, object]:
-        """Metadatos del peldano para el CSV y las figuras.
+        """Rung metadata for the CSV and the figures.
 
         Returns:
-            dict con la etiqueta, si es ideal, y los parametros efectivos.
+            dict with the label, whether it is ideal, and the effective parameters.
         """
         return {
             'noise': self.label,
@@ -651,77 +649,76 @@ class NoiseSpec:
         return bool(set(self.source_model.noise_instructions) - {'measure'})
 
     def __repr__(self) -> str:                              # pragma: no cover
-        """Representacion corta para depuracion."""
+        """Short representation for debugging."""
         return (f"NoiseSpec(label={self.label!r}, "
                 f"gates={self._has_gate_errors()}, "
                 f"readout={self.has_readout})")
 
 
 # =============================================================================
-# Techo de qubits
+# Qubit ceiling
 # =============================================================================
 
 def ansatz_n_params(n_qubits: int, n_layers: int = ANSATZ_LAYERS) -> int:
-    """Numero de angulos del ansatz variacional de `n_qubits`.
+    """Number of angles of the `n_qubits` variational ansatz.
 
-    Se mide sobre el circuito REAL cuando qiskit esta disponible, para que no
-    pueda desincronizarse si el ansatz cambia.
+    It is measured on the REAL circuit when qiskit is available, so that it
+    cannot drift out of sync if the ansatz changes.
 
-    [B-PLAN] Con respaldo de formula cerrada cuando qiskit NO se puede
-    importar. Construir el circuito arrastra qiskit a `cosmo_hpc_runner`, que
-    hasta ahora solo planificaba tareas y lanzaba subprocesos sin necesitar el
-    stack cuantico. En una HPC eso importa: se planifica y se envia desde un
-    nodo de login donde el entorno de computo no esta cargado, y el runner
-    moria con ModuleNotFoundError antes de escribir una sola tarea.
+    [B-PLAN] With a closed-form fallback when qiskit can NOT be imported.
+    Building the circuit drags qiskit into `cosmo_hpc_runner`, which until then
+    only planned tasks and launched subprocesses without needing the quantum
+    stack. On an HPC that matters: planning and submission happen on a login
+    node where the compute environment is not loaded, and the runner died with
+    ModuleNotFoundError before writing a single task.
 
-    La formula `n * (2*L + 1)` sale de la estructura del ansatz — L capas de
-    (RY, RZ) por qubit mas una capa final de RY — y esta verificada exacta
-    contra el circuito real para L = 1..5 y n = 2..18 por
-    `test_noise_axis.py`, de modo que el respaldo no puede divergir en
-    silencio del ansatz que de verdad se ejecuta.
+    The formula `n * (2*L + 1)` follows from the structure of the ansatz — L
+    layers of (RY, RZ) per qubit plus a final RY layer — and is verified exact
+    against the real circuit for L = 1..5 and n = 2..18 by
+    `test_noise_axis.py`, so the fallback cannot silently diverge from the
+    ansatz that actually runs.
 
     Args:
-        n_qubits: ancho del circuito.
-        n_layers: capas del ansatz.
+        n_qubits: circuit width.
+        n_layers: ansatz layers.
 
     Returns:
-        Cantidad de parametros libres.
+        Number of free parameters.
     """
     n, layers = int(n_qubits), int(n_layers)
     try:
         from qpu_cosmo_samplers import build_ansatz
         return int(build_ansatz(n, layers).num_parameters)
-    except Exception:                              # [B-PLAN] nodo sin qiskit
+    except Exception:                              # [B-PLAN] node without qiskit
         return n * (2 * layers + 1)
 
 
 def param_shift_batch_factor(n_qubits: int,
                              n_layers: int = ANSATZ_LAYERS) -> int:
-    """Multiplicador de memoria del lote de parameter-shift: 2 * n_phi.
+    """Memory multiplier of the parameter-shift batch: 2 * n_phi.
 
-    El entrenamiento cuantico del QVMC evalua el gradiente exacto materializando
-    `2 * n_phi` estados en un solo job de Aer. Sin ruido eso es barato porque
-    cada estado es un statevector (16 * 2^n); CON ruido cada uno es una matriz
-    de densidad (16 * 4^n) y el multiplicador se vuelve el termino dominante:
+    Quantum training in QVMC evaluates the exact gradient by materializing
+    `2 * n_phi` states in a single Aer job. Without noise that is cheap because
+    each state is a statevector (16 * 2^n); WITH noise each one is a density
+    matrix (16 * 4^n) and the multiplier becomes the dominant term:
 
-        n=12 -> rho 256 MB, lote  42 GB
-        n=13 -> rho 1.0 GB, lote 182 GB
+        n=12 -> rho 256 MB, batch  42 GB
+        n=13 -> rho 1.0 GB, batch 182 GB
 
-    Es decir, en un nodo de 95 GB el QVMC con entrenamiento cuantico y ruido
-    topa en 12 qubits, no en 13 ni en 16: lo que manda es el LOTE, no rho.
-    Trocear ese lote (pendiente ya identificado en el README) es lo que
-    desbloquearia resoluciones mayores.
+    That is, on a 95 GB node noisy QVMC with quantum training tops out at 12
+    qubits, not at 13 or 16: what rules is the BATCH, not rho. Chunking that
+    batch (an open item already identified in the README) is what would unlock
+    larger resolutions.
 
     Args:
-        n_qubits: ancho del circuito.
-        n_layers: capas del ansatz.
+        n_qubits: circuit width.
+        n_layers: ansatz layers.
 
     Returns:
         `2 * n_phi`.
     Examples:
-        Este es el numero que fija el techo de qubits del QVMC con ruido: el
-        entrenamiento cuantico materializa `2 * n_phi` matrices de densidad a
-        la vez, no una.
+        This is the number that sets the qubit ceiling of noisy QVMC: quantum
+        training materializes `2 * n_phi` density matrices at once, not one.
 
         >>> param_shift_batch_factor(4)
         56
@@ -732,21 +729,21 @@ def param_shift_batch_factor(n_qubits: int,
 
 
 def noisy_density_bytes(n_qubits: int, batch_factor: int = 1) -> int:
-    """Bytes de matriz de densidad de `n_qubits` (complejo de 16 B).
+    """Bytes of an `n_qubits` density matrix (16 B complex).
 
     Args:
-        n_qubits: ancho del circuito.
-        batch_factor: cuantas matrices de densidad viven a la vez (1 para una
-            evaluacion suelta; `param_shift_batch_factor(n)` para el lote de
-            entrenamiento cuantico del QVMC).
+        n_qubits: circuit width.
+        batch_factor: how many density matrices are alive at once (1 for a
+            single evaluation; `param_shift_batch_factor(n)` for the QVMC
+            quantum-training batch).
     Examples:
-        Una matriz de densidad suelta a 12 qubits son 256 MB...
+        A single density matrix at 12 qubits is 256 MB...
 
         >>> noisy_density_bytes(12) / 1e6
         268.435456
 
-        ...pero el lote de parameter-shift a esa anchura son 45 GB, y por eso
-        el techo del QVMC ruidoso esta muy por debajo del que da la RAM:
+        ...but the parameter-shift batch at that width is 45 GB, which is why
+        the ceiling of noisy QVMC is far below the one the RAM allows:
 
         >>> round(noisy_density_bytes(12, param_shift_batch_factor(12)) / 1e9, 1)
         45.1
@@ -756,19 +753,19 @@ def noisy_density_bytes(n_qubits: int, batch_factor: int = 1) -> int:
 
 def noisy_qubits_fitting_in(mem_mb: float, quantum_training: bool = True,
                             n_layers: int = ANSATZ_LAYERS) -> int:
-    """Mayor ancho cuyo coste con ruido cabe en `mem_mb`.
+    """Largest width whose noisy cost fits in `mem_mb`.
 
     Args:
-        mem_mb: memoria disponible para la tarea, en MB.
-        quantum_training: si True (por defecto) reserva sitio para el lote de
-            parameter-shift, que es el peldano mas caro de la escalera QVMC y
-            por tanto el que manda en un `--benchmark` completo. Ponlo en
-            False solo si la corrida no incluye rungs con entrenamiento
-            cuantico.
-        n_layers: capas del ansatz.
+        mem_mb: memory available for the task, in MB.
+        quantum_training: if True (default) reserves room for the
+            parameter-shift batch, which is the most expensive rung of the
+            QVMC ladder and therefore the one that rules in a full
+            `--benchmark`. Set it to False only if the run does not include
+            rungs with quantum training.
+        n_layers: ansatz layers.
 
     Returns:
-        Numero de qubits, 0 si no cabe ni el caso mas pequeno.
+        Number of qubits, 0 if not even the smallest case fits.
     """
     best = 0
     for n in range(1, 31):
@@ -781,76 +778,75 @@ def noisy_qubits_fitting_in(mem_mb: float, quantum_training: bool = True,
     return best
 
 
-# ── [B-TIME] Techo por TIEMPO del genetico con ruido ────────────────────────
+# ── [B-TIME] TIME ceiling of the noisy genetic optimizer ────────────────────
 #
-# La memoria NO es el limitante del QGA con ruido: una rho suelta a 14 qubits
-# son 4.3 GB, que caben de sobra en cualquier nodo util. El limitante es el
-# tiempo, y crece como ~4^n porque cada evaluacion propaga una matriz de
-# densidad de 4^n elementos.
+# Memory is NOT the limiting factor of the noisy QGA: a single rho at 14 qubits
+# is 4.3 GB, which fits easily on any useful node. The limiting factor is time,
+# and it grows as ~4^n because every evaluation propagates a density matrix
+# with 4^n elements.
 #
-# Medido en la campana 2026-09-03 (pop=500, ruido readout, nodo de 63 GiB,
-# leido de los logs por marca de tiempo entre generaciones):
+# Measured in the 2026-09-03 campaign (pop=500, readout noise, 63 GiB node,
+# read from the logs by timestamp between generations):
 #
-#     10 qubits (n_bits=5, d=2)  ->     73 s/generacion
-#     12 qubits (n_bits=6, d=2)  ->   1425 s/generacion   (23.8 min)
-#     14 qubits (n_bits=7, d=2)  ->  no habia registrado ni la generacion 0
-#                                    tras 7 h de reloj
+#     10 qubits (n_bits=5, d=2)  ->     73 s/generation
+#     12 qubits (n_bits=6, d=2)  ->   1425 s/generation   (23.8 min)
+#     14 qubits (n_bits=7, d=2)  ->  had not logged even generation 0
+#                                    after 7 h of wall clock
 #
-# Los dos primeros puntos fijan un crecimiento de x4.42 por qubit, que
-# extrapolado a 14 da 27810 s/generacion (7.7 h) — consistente con la tercera
-# observacion, que asi queda de validacion y no de ajuste.
+# The first two points fix a growth of x4.42 per qubit, which extrapolated to
+# 14 gives 27810 s/generation (7.7 h) — consistent with the third observation,
+# which thus serves as validation rather than as a fit point.
 #
-# Con ese ritmo, 500 generaciones a 14 qubits son ~4 MESES. El plan de esa
-# campana las acepto porque el techo se derivaba solo de la RAM, y la tarea
-# quedo colgada bloqueando ademas las figuras de resumen de toda la corrida
-# (el runner no las escribe hasta que la lista entera termina).
+# At that pace, 500 generations at 14 qubits take ~4 MONTHS. That campaign's
+# plan accepted them because the ceiling was derived from RAM alone, and the
+# task hung, also blocking the summary figures of the whole run (the runner
+# does not write them until the entire list finishes).
 #
-# Esto NO reintroduce la constante dura que se quito en [REV]. Aquel techo era
-# malo por dos razones distintas: estaba calibrado en una maquina de 7 GB, y se
-# aplicaba a los SAMPLERS, donde el que manda de verdad es el lote de
-# parameter-shift, o sea memoria. Aqui el limite es de tiempo — que no se
-# relaja con mas RAM — esta calibrado con medidas del nodo real, y no es una
-# constante: sale de un presupuesto de reloj por tarea que el usuario fija.
+# This does NOT reintroduce the hard constant removed in [REV]. That ceiling
+# was bad for two distinct reasons: it was calibrated on a 7 GB machine, and it
+# was applied to the SAMPLERS, where what really rules is the parameter-shift
+# batch, i.e. memory. Here the limit is time — which does not relax with more
+# RAM — it is calibrated with measurements from the real node, and it is not a
+# constant: it follows from a per-task wall-clock budget set by the user.
 GENETIC_NOISY_REF_QUBITS = 10
 GENETIC_NOISY_REF_SEC_PER_GEN = 73.0
 GENETIC_NOISY_GROWTH_PER_QUBIT = 4.42
 
-#: Presupuesto de reloj por tarea genetica ruidosa, en horas. Es el valor por
-#: defecto de `--noisy-task-hours`; dos dias deja pasar 12 qubits y corta 13.
+#: Wall-clock budget per noisy genetic task, in hours. It is the default of
+#: `--noisy-task-hours`; two days lets 12 qubits through and cuts 13.
 DEFAULT_NOISY_TASK_HOURS = 48.0
 
 
 def genetic_noisy_seconds_per_gen(n_qubits: int) -> float:
-    """Segundos por generacion del QGA con ruido, a `n_qubits`.
+    """Seconds per generation of the noisy QGA, at `n_qubits`.
 
-    Extrapolacion de las dos mediciones de la campana 2026-09-03 (ver el
-    bloque [B-TIME] de arriba). Es un orden de magnitud, no una promesa: sirve
-    para decidir si una celda tarda horas o meses, que es la unica pregunta que
-    hay que contestar al planificar.
+    Extrapolation of the two measurements from the 2026-09-03 campaign (see
+    the [B-TIME] block above). It is an order of magnitude, not a promise: it
+    serves to decide whether a cell takes hours or months, which is the only
+    question that needs answering when planning.
 
-    AVISO de alcance: las mediciones son con `--noise readout`, que es el
-    canal mas barato — se aplica analiticamente sobre diag(rho). Los niveles
-    `full` y los backends calibrados (FakeBrisbane) meten errores de puerta,
-    o sea mas operadores de Kraus por compuerta, y corren MAS LENTO que lo que
-    predice esta funcion. Con esos niveles en la barrida, baja
-    `--noisy-task-hours` para compensar, o cuenta con que el reloj real supere
-    al presupuesto.
+    SCOPE WARNING: the measurements are with `--noise readout`, which is the
+    cheapest channel — it is applied analytically on diag(rho). The `full`
+    levels and the calibrated backends (FakeBrisbane) add gate errors, i.e.
+    more Kraus operators per gate, and run SLOWER than this function
+    predicts. With those levels in the sweep, lower `--noisy-task-hours` to
+    compensate, or expect the real wall clock to exceed the budget.
 
     Args:
-        n_qubits: ancho del circuito en qubits.
+        n_qubits: circuit width in qubits.
 
     Returns:
         float
     Examples:
-        Reproduce las dos mediciones de la campana 2026-09-03...
+        Reproduces the two measurements from the 2026-09-03 campaign...
 
         >>> round(genetic_noisy_seconds_per_gen(10))
         73
         >>> round(genetic_noisy_seconds_per_gen(12))
         1426
 
-        ...y extrapola a 14 qubits el valor que motivo [B-TIME]: 7.7 h POR
-        generacion, o sea ~4 meses las 500 que se pidieron.
+        ...and extrapolates to 14 qubits the value that motivated [B-TIME]:
+        7.7 h PER generation, i.e. ~4 months for the 500 that were requested.
 
         >>> round(genetic_noisy_seconds_per_gen(14) / 3600, 1)
         7.7
@@ -862,25 +858,25 @@ def genetic_noisy_seconds_per_gen(n_qubits: int) -> float:
 def genetic_noisy_time_ceiling(generations: int,
                                budget_hours: float = DEFAULT_NOISY_TASK_HOURS
                                ) -> int:
-    """Mayor ancho cuyo QGA con ruido cabe en `budget_hours` de reloj.
+    """Largest width whose noisy QGA fits in `budget_hours` of wall clock.
 
     Args:
-        generations: generaciones que se van a correr.
-        budget_hours: presupuesto de reloj por tarea, en horas.
+        generations: generations to be run.
+        budget_hours: wall-clock budget per task, in hours.
 
     Returns:
-        Techo de qubits; al menos 1, para que un presupuesto absurdo no
-        produzca un plan vacio sin explicacion.
+        Qubit ceiling; at least 1, so that an absurd budget does not produce
+        an empty plan with no explanation.
     Examples:
-        Con 120 generaciones y dos dias de presupuesto caben 12 qubits; con
-        las 500 de la campana vieja, solo 11:
+        With 120 generations and a two-day budget, 12 qubits fit; with the
+        500 of the old campaign, only 11:
 
         >>> genetic_noisy_time_ceiling(120, 48)
         12
         >>> genetic_noisy_time_ceiling(500, 48)
         11
 
-        No es una constante: mas presupuesto concede mas anchura.
+        It is not a constant: a larger budget grants more width.
 
         >>> genetic_noisy_time_ceiling(120, 480)
         13
@@ -901,40 +897,41 @@ def noisy_qubit_ceiling(requested: Optional[int] = None,
                         quantum_training: bool = True,
                         generations: Optional[int] = None,
                         budget_hours: float = DEFAULT_NOISY_TASK_HOURS) -> int:
-    """Techo de qubits admisible para una tarea con ruido.
+    """Admissible qubit ceiling for a noisy task.
 
-    [REV] Antes devolvia una constante dura, argumentando que el limitante era
-    el tiempo. Era una mala generalizacion, calibrada en una maquina pequena:
-    en un nodo con RAM de verdad y sin presion de tiempo el limitante vuelve a
-    ser la memoria, y esa SI se relaja al tener mas. Ahora el techo se deriva
-    de `mem_mb` igual que los otros dos modelos del runner, y la constante
-    queda como respaldo para cuando no hay cifra de RAM.
+    [REV] It used to return a hard constant, arguing that time was the
+    limiting factor. That was a bad generalization, calibrated on a small
+    machine: on a node with real RAM and no time pressure the limiting factor
+    is memory again, and that DOES relax with more of it. The ceiling is now
+    derived from `mem_mb` just like the runner's other two models, and the
+    constant remains as a fallback for when there is no RAM figure.
 
-    El coste con ruido no es un unico numero: depende de cuantas matrices de
-    densidad viven a la vez. Con entrenamiento cuantico el lote de
-    parameter-shift multiplica por `2 * n_phi` y es el termino que manda.
+    The noisy cost is not a single number: it depends on how many density
+    matrices are alive at once. With quantum training the parameter-shift
+    batch multiplies by `2 * n_phi` and is the term that rules.
 
     Args:
-        requested: tope pedido por el usuario, o None. Actua como cota
-            superior; nunca concede mas de lo que cabe en memoria.
-        mem_mb: memoria disponible por tarea. None usa `DEFAULT_NOISY_QUBITS`.
-        quantum_training: reservar sitio para el lote de parameter-shift.
-            False es la ruta del genetico, donde ademas se aplica el techo por
-            tiempo de [B-TIME].
-        generations: generaciones previstas. Solo se usa con
-            `quantum_training=False`; sin ella no se aplica el techo temporal.
-        budget_hours: presupuesto de reloj por tarea para ese techo.
+        requested: cap requested by the user, or None. Acts as an upper
+            bound; never grants more than what fits in memory.
+        mem_mb: memory available per task. None uses `DEFAULT_NOISY_QUBITS`.
+        quantum_training: reserve room for the parameter-shift batch.
+            False is the genetic route, where the [B-TIME] time ceiling is
+            also applied.
+        generations: planned generations. Only used with
+            `quantum_training=False`; without it the time ceiling is not
+            applied.
+        budget_hours: wall-clock budget per task for that ceiling.
 
     Returns:
-        Techo efectivo de qubits.
+        Effective qubit ceiling.
     """
     if mem_mb is None:
         ceiling = DEFAULT_NOISY_QUBITS
     else:
         ceiling = noisy_qubits_fitting_in(mem_mb, quantum_training)
-    # [B-TIME] El QGA con ruido no lo frena la memoria sino el reloj: a 14
-    # qubits caben 4.3 GB de rho en cualquier nodo, pero son ~7.7 h por
-    # generacion. Sin este techo el plan acepta celdas de meses.
+    # [B-TIME] The noisy QGA is held back by the clock, not by memory: at 14
+    # qubits 4.3 GB of rho fits on any node, but it is ~7.7 h per
+    # generation. Without this ceiling the plan accepts months-long cells.
     if not quantum_training and generations is not None:
         ceiling = min(ceiling,
                       genetic_noisy_time_ceiling(generations, budget_hours))
@@ -944,38 +941,38 @@ def noisy_qubit_ceiling(requested: Optional[int] = None,
 
 
 def add_noise_cli(parser) -> None:
-    """Anade el flag `--noise` (y sus parametros) a un ArgumentParser.
+    """Add the `--noise` flag (and its parameters) to an ArgumentParser.
 
-    Se centraliza aqui para que los tres ejecutables y el runner HPC ofrezcan
-    exactamente la misma interfaz y los mismos valores por defecto.
+    It is centralized here so that the three executables and the HPC runner
+    offer exactly the same interface and the same defaults.
 
     Args:
-        parser: `argparse.ArgumentParser` al que anadir el grupo.
+        parser: `argparse.ArgumentParser` to add the group to.
     """
-    g = parser.add_argument_group('eje de ruido NISQ')
+    g = parser.add_argument_group('NISQ noise axis')
     g.add_argument('--noise', type=str, default='none',
-                   help="nivel de ruido: none | readout | full | "
-                        "<backend> (p. ej. FakeBrisbane). Por defecto 'none', "
-                        "que reproduce bit a bit los resultados ideales.")
+                   help="noise level: none | readout | full | "
+                        "<backend> (e.g. FakeBrisbane). Default 'none', "
+                        "which reproduces the ideal results bit for bit.")
     g.add_argument('--noise-readout-p', type=float, default=DEFAULT_READOUT_P,
-                   help=f"probabilidad de volteo de lectura de los peldanos "
-                        f"sinteticos (por defecto {DEFAULT_READOUT_P})")
+                   help=f"readout flip probability of the synthetic rungs "
+                        f"(default {DEFAULT_READOUT_P})")
     g.add_argument('--noise-gate-p1', type=float, default=DEFAULT_GATE_P1,
-                   help=f"despolarizacion de 1 qubit en 'full' "
-                        f"(por defecto {DEFAULT_GATE_P1})")
+                   help=f"1-qubit depolarization in 'full' "
+                        f"(default {DEFAULT_GATE_P1})")
     g.add_argument('--noise-gate-p2', type=float, default=DEFAULT_GATE_P2,
-                   help=f"despolarizacion de 2 qubits en 'full' "
-                        f"(por defecto {DEFAULT_GATE_P2})")
+                   help=f"2-qubit depolarization in 'full' "
+                        f"(default {DEFAULT_GATE_P2})")
 
 
 def spec_from_args(args) -> NoiseSpec:
-    """Construye el `NoiseSpec` a partir de los args de `add_noise_cli`.
+    """Build the `NoiseSpec` from the args of `add_noise_cli`.
 
     Args:
-        args: namespace de argparse.
+        args: argparse namespace.
 
     Returns:
-        El `NoiseSpec` resuelto.
+        The resolved `NoiseSpec`.
     """
     return NoiseSpec.from_level(
         getattr(args, 'noise', 'none'),

@@ -2,7 +2,7 @@
 """
 data_manifest.py — data provenance and integrity for reproducibility.
 
-Why this exists (FASE-1 audit item 4). Reproducible computational physics
+Why this exists (PHASE-1 audit item 4). Reproducible computational physics
 requires that every input dataset be identified by SOURCE, VERSION and a
 cryptographic CHECKSUM, so a third party can confirm they are fitting the
 exact same numbers. This module:
@@ -66,11 +66,11 @@ MANIFEST = "data_checksums.json"
 
 
 def sha256(path: str, chunk: int = 1 << 20) -> str:
-    """SHA-256 de un archivo, leido por bloques para no cargarlo entero.
+    """SHA-256 of a file, read in blocks so it is never loaded whole.
 
     Args:
-        path: ruta del archivo.
-        chunk: tamano del bloque de lectura, en bytes. Por defecto 1 << 20.
+        path: path to the file.
+        chunk: read block size, in bytes. Defaults to 1 << 20.
 
     Returns:
         str
@@ -86,7 +86,7 @@ def generate(root: str = ".") -> dict:
     """Compute checksums for whatever data files are present; write manifest.
 
     Args:
-        root: carpeta raiz sobre la que operar. Por defecto '.'.
+        root: root folder to operate on. Defaults to '.'.
 
     Returns:
         dict
@@ -110,7 +110,7 @@ def verify(root: str = ".") -> int:
     """Verify present files against the manifest. Returns process exit code.
 
     Args:
-        root: carpeta raiz sobre la que operar. Por defecto '.'.
+        root: root folder to operate on. Defaults to '.'.
 
     Returns:
         int
@@ -138,7 +138,7 @@ def verify(root: str = ".") -> int:
 
 
 def main() -> int:
-    """Punto de entrada: genera o verifica el manifiesto de datos."""
+    """Entry point: generate or verify the data manifest."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     g = ap.add_mutually_exclusive_group(required=True)

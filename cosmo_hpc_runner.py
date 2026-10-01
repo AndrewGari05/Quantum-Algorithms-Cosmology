@@ -112,24 +112,25 @@ ALL_MODELS = list(MODEL_DIM)
 # going to be used).
 #
 # SAMPLERS (cosmo_modular_quantum.py — QVMC/VI):
-#   La rejilla son 2^(nqpp*d) estados Y la verosimilitud construye arreglos
-#   auxiliares de forma (n_states, N_data) sobre ella.
+#   The grid is 2^(nqpp*d) states AND the likelihood builds auxiliary arrays
+#   of shape (n_states, N_data) over it.
 #
-#   [B-MEM] La primera version usaba UNA constante, 1660*8 = 13.3 kB/estado,
-#   heredada de la validacion de cosmo_modular_quantum.py (_validate_args).
-#   Es un numero de diseno que NUNCA se calibro contra una medicion, y el
-#   error es estructural, no de calibracion: el comentario original decia que
-#   los 1660 floats/estado ERAN los arreglos de forma (n_states, N_data), pero
-#   1660 es una constante — no depende de N_data. O sea, el modelo capturaba
-#   solo la parte independiente del dataset y tiraba el termino dominante.
+#   [B-MEM] The first version used ONE constant, 1660*8 = 13.3 kB/state,
+#   inherited from the validation in cosmo_modular_quantum.py (_validate_args).
+#   It is a design number that was NEVER calibrated against a measurement, and
+#   the error is structural, not a calibration issue: the original comment said
+#   the 1660 floats/state WERE the (n_states, N_data) arrays, but 1660 is a
+#   constant — it does not depend on N_data. In other words, the model only
+#   captured the dataset-independent part and dropped the dominant term.
 #
-#   Consecuencia real, medida en la campana CC+BAO+Pantheon de 2026-08-31: el
-#   planificador estimo 3.7 GB para 18 qubits, se midieron 17.9–19.6 GB (5.3x),
-#   y tres tareas (cpl/nqpp5 a 20q, gede/nqpp7 y wcdm/nqpp7 a 21q) llegaron al
-#   OOM killer — rc=-9, SIGKILL, sin traceback ni resultados parciales.
+#   Real consequence, measured in the CC+BAO+Pantheon campaign of 2026-08-31:
+#   the planner estimated 3.7 GB for 18 qubits, 17.9–19.6 GB were measured
+#   (5.3x), and three tasks (cpl/nqpp5 at 20q, gede/nqpp7 and wcdm/nqpp7 at
+#   21q) hit the OOM killer — rc=-9, SIGKILL, no traceback or partial results.
 #
-#   Recalibrado contra 26 mediciones de peak RSS de dos campanas con datasets
-#   de tamano muy distinto (misma maquina, mismo codigo, subproceso limpio):
+#   Recalibrated against 26 peak-RSS measurements from two campaigns with
+#   datasets of very different size (same machine, same code, clean
+#   subprocess):
 #
 #       total_q    N_data=51 (CC+BAO)     N_data=1099 (CC+BAO+Pantheon)
 #          12          --                      521 MB
@@ -140,57 +141,57 @@ ALL_MODELS = list(MODEL_DIM)
 #          20          --                    >59580 MB  (OOMKill)
 #          21          --                    >56366 MB  (OOMKill)
 #
-#   Restando la linea base del proceso y dividiendo entre 2^q, el coste por
-#   estado converge por abajo a 14.4 kB con N_data=51 y a 73.7 kB con
-#   N_data=1099. Los dos puntos fijan una recta en N_data, que es justo la
-#   forma que predice el arreglo (n_states, N_data):
+#   Subtracting the process baseline and dividing by 2^q, the per-state cost
+#   converges from below to 14.4 kB with N_data=51 and to 73.7 kB with
+#   N_data=1099. The two points fix a straight line in N_data, which is exactly
+#   the shape predicted by the (n_states, N_data) array:
 #
-#       bytes/estado = 11500 + 57 * N_data
+#       bytes/state = 11500 + 57 * N_data
 #
-#   Los 57 B/dato son ~7 float64 por punto de datos y por estado (residuo,
-#   modelo, chi2 parcial y sus copias temporales); los 11.5 kB fijos son la
-#   rejilla y sus auxiliares independientes del dataset — y son, casualmente,
-#   lo unico que capturaba la constante vieja.
+#   The 57 B/datum are ~7 float64 per data point and per state (residual,
+#   model, partial chi2 and their temporary copies); the fixed 11.5 kB are the
+#   grid and its dataset-independent auxiliaries — and they are, incidentally,
+#   the only thing the old constant captured.
 #
-#   (Cubre tambien el lote de entrenamiento del QVMC, que materializa
-#   2*n_phi statevectors a 16 B/estado: menor que los auxiliares en todo nqpp
-#   que el tope permite, asi que este modelo sigue siendo el limitante.)
+#   (It also covers the QVMC training batch, which materializes 2*n_phi
+#   statevectors at 16 B/state: smaller than the auxiliaries for every nqpp
+#   the cap allows, so this model is still the limiting one.)
 BYTES_PER_STATE_SAMPLERS_FIXED = 11_500
 BYTES_PER_STATE_SAMPLERS_PER_DATUM = 57
 
-#: Margen sobre el ajuste. El ajuste reproduce las mediciones por arriba en
-#: todo el rango util (12–18 q, ambos datasets), pero un pico de RSS es una
-#: marca de agua muestreada: el maximo real puede ser mas alto que el visto.
-#: Equivocarse por abajo aqui es un SIGKILL sin resultados; por arriba, una
-#: tarea menos en paralelo.
+#: Margin over the fit. The fit reproduces the measurements from above over
+#: the whole useful range (12–18 q, both datasets), but a peak RSS is a sampled
+#: high-water mark: the true maximum may be higher than the one observed.
+#: Erring low here means a SIGKILL with no results; erring high, one fewer
+#: task in parallel.
 SAMPLERS_MEM_SAFETY = 1.15
 
-#: N_data aproximado por dataset, SOLO para planificar. El planificador no
-#: puede cargar los datos de verdad sin arrastrar numpy/astropy al proceso
-#: padre — ese fue el bug [B-PLAN] — asi que se queda con esta tabla.
+#: Approximate N_data per dataset, ONLY for planning. The planner cannot load
+#: the real data without dragging numpy/astropy into the parent process — that
+#: was bug [B-PLAN] — so it sticks with this table.
 DATASET_N_DATA: Dict[str, int] = {
     'CC+BAO': 51,
     'CC+BAO+Pantheon': 1099,
     'CC+BAO+Pantheon+': 1752,
 }
-#: Fallback para un dataset desconocido: el mayor de la tabla. Sobreestimar es
-#: la direccion segura.
+#: Fallback for an unknown dataset: the largest in the table. Overestimating
+#: is the safe direction.
 DEFAULT_PLAN_N_DATA = max(DATASET_N_DATA.values())
 
 
 def bytes_per_state_samplers(n_data: Optional[int] = None) -> float:
-    """Coste de memoria por estado de rejilla para una tarea de samplers.
+    """Memory cost per grid state for a samplers task.
 
     Args:
-        n_data: numero de puntos de datos del dataset activo. `None` usa
-            `DEFAULT_PLAN_N_DATA` (el dataset mas grande de la tabla), que es
-            la direccion conservadora.
+        n_data: number of data points of the active dataset. `None` uses
+            `DEFAULT_PLAN_N_DATA` (the largest dataset in the table), which is
+            the conservative direction.
 
     Returns:
-        Bytes por estado, margen de seguridad incluido.
+        Bytes per state, safety margin included.
     Examples:
-        El coste por estado depende del DATASET, no es una constante — ese fue
-        el bug [B-MEM]. Con 51 puntos un estado cuesta 16 kB; con 1099, 84 kB:
+        The per-state cost depends on the DATASET, it is not a constant — that
+        was bug [B-MEM]. With 51 points a state costs 16 kB; with 1099, 84 kB:
 
         >>> round(bytes_per_state_samplers(51) / 1024)
         16
@@ -203,10 +204,10 @@ def bytes_per_state_samplers(n_data: Optional[int] = None) -> float:
 
 
 def dataset_n_data(dataset: Optional[str]) -> int:
-    """N_data del dataset para planificar, con fallback conservador.
+    """N_data of the dataset for planning, with a conservative fallback.
 
     Args:
-        dataset: nombre del dataset (o alias) cuyo tamano se busca.
+        dataset: name of the dataset (or alias) whose size is looked up.
 
     Returns:
         int
@@ -216,9 +217,9 @@ def dataset_n_data(dataset: Optional[str]) -> int:
         >>> dataset_n_data('CC+BAO+Pantheon')
         1099
 
-        Un dataset desconocido usa el mayor de la tabla, que es la direccion
-        segura: sobreestimar cuesta una tarea menos en paralelo, subestimar
-        cuesta un OOMKill.
+        An unknown dataset uses the largest in the table, which is the safe
+        direction: overestimating costs one fewer task in parallel,
+        underestimating costs an OOMKill.
 
         >>> dataset_n_data('CC+BAO+DESI') == DEFAULT_PLAN_N_DATA
         True
@@ -228,9 +229,9 @@ def dataset_n_data(dataset: Optional[str]) -> int:
     return DATASET_N_DATA.get(dataset, DEFAULT_PLAN_N_DATA)
 
 
-#: Alias retrocompatible: el valor que da el modelo para el dataset mas
-#: grande. Cualquier script externo que importara el nombre viejo sigue
-#: recibiendo un numero de la misma clase, ahora calibrado.
+#: Backward-compatible alias: the value the model gives for the largest
+#: dataset. Any external script that imported the old name still receives a
+#: number of the same kind, now calibrated.
 BYTES_PER_STATE_SAMPLERS = bytes_per_state_samplers()
 #
 # GENETIC (cosmo_genetic_optimizers.py — QGA):
@@ -258,25 +259,26 @@ BYTES_PER_STATE_GENETIC = 16
 #     genetic/cpl,  24q: 510 MB peak - 268 MB statevector -> ~242 MB baseline
 PROCESS_BASELINE_MB = 250.0
 
-# Kind -> per-state cost, so callers can stay declarative. El de samplers
-# depende de N_data, asi que se resuelve con la funcion de abajo y no con el
-# diccionario (que queda para el caso 'n_bits' y para compatibilidad).
+# Kind -> per-state cost, so callers can stay declarative. The samplers one
+# depends on N_data, so it is resolved with the function below and not with
+# the dictionary (which remains for the 'n_bits' case and for compatibility).
 BYTES_PER_STATE_BY_KIND = {
-    'nqpp': BYTES_PER_STATE_SAMPLERS,     # samplers tasks (dataset por defecto)
+    'nqpp': BYTES_PER_STATE_SAMPLERS,     # samplers tasks (default dataset)
     'n_bits': BYTES_PER_STATE_GENETIC,    # genetic tasks
 }
 
 
 def bytes_per_state(kind: str = 'nqpp', n_data: Optional[int] = None) -> float:
-    """Coste por estado del pipeline `kind`.
+    """Per-state cost of the `kind` pipeline.
 
-    El genetico no toca la verosimilitud sobre la rejilla, asi que su coste no
-    depende del dataset; el de samplers si — ver [B-MEM] arriba.
+    The genetic optimizer does not touch the likelihood over the grid, so its
+    cost does not depend on the dataset; the samplers one does — see [B-MEM]
+    above.
 
     Args:
-        kind: pipeline: 'nqpp' (samplers) o 'n_bits' (genetico). Por defecto
+        kind: pipeline: 'nqpp' (samplers) or 'n_bits' (genetic). Default
             'nqpp'.
-        n_data: numero de puntos de datos del dataset. Por defecto None.
+        n_data: number of data points of the dataset. Default None.
 
     Returns:
         float
@@ -285,26 +287,26 @@ def bytes_per_state(kind: str = 'nqpp', n_data: Optional[int] = None) -> float:
         return float(BYTES_PER_STATE_GENETIC)
     return bytes_per_state_samplers(n_data)
 #
-# NOISY (tercer modelo de memoria — segundo eje de ablacion):
-#   Simular con ruido exige matriz de densidad: 2^(2n) amplitudes complejas en
-#   vez de 2^n, es decir 16 * 4^n bytes. No SUSTITUYE a los dos modelos de
-#   arriba, se SUMA a ellos: la tarea de samplers sigue construyendo su grid de
-#   verosimilitud (1660 floats/estado) y ademas mantiene rho.
+# NOISY (third memory model — second ablation axis):
+#   Simulating with noise requires a density matrix: 2^(2n) complex amplitudes
+#   instead of 2^n, i.e. 16 * 4^n bytes. It does NOT REPLACE the two models
+#   above, it is ADDED to them: the samplers task still builds its likelihood
+#   grid (1660 floats/state) and additionally keeps rho.
 #
-#   El termino de rho domina en cuanto n crece:
-#       n=10 ->  16.0 MB de rho   frente a  13.6 MB de grid
-#       n=12 -> 256.0 MB de rho   frente a  54.4 MB de grid
-#       n=13 ->   1.0 GB de rho   frente a 108.9 MB de grid
+#   The rho term dominates as soon as n grows:
+#       n=10 ->  16.0 MB of rho   versus  13.6 MB of grid
+#       n=12 -> 256.0 MB of rho   versus  54.4 MB of grid
+#       n=13 ->   1.0 GB of rho   versus 108.9 MB of grid
 #
-#   Pero el limitante REAL de este eje no es la memoria sino el TIEMPO, y por
-#   eso el techo (cosmo_noise.MAX_NOISY_QUBITS = 13) es una constante explicita
-#   y no un valor derivado de la RAM detectada como los otros dos. Medido con
-#   el ansatz real (3 capas, B=2 bindings, 4096 disparos, FakeBrisbane):
+#   But the REAL limiting factor of this axis is not memory but TIME, which is
+#   why the ceiling (cosmo_noise.MAX_NOISY_QUBITS = 13) is an explicit constant
+#   and not a value derived from the detected RAM like the other two. Measured
+#   with the real ansatz (3 layers, B=2 bindings, 4096 shots, FakeBrisbane):
 #       n=10 ->   3.8 s/job      n=12 ->  34.4 s/job      n=13 -> 216.5 s/job
-#   A n=14 la matriz de densidad son 4.0 GB y ~14 min por job; una maquina con
-#   mas RAM no mueve ese limite, solo lo hace mas caro.
+#   At n=14 the density matrix is 4.0 GB and ~14 min per job; a machine with
+#   more RAM does not move that limit, it only makes it more expensive.
 BYTES_PER_STATE_NOISY_NOTE = (
-    "rho = 16 * 4^n bytes, sumado al modelo de la tarea; techo por TIEMPO")
+    "rho = 16 * 4^n bytes, added to the task's model; TIME-bound ceiling")
 
 # Backwards-compatible alias (any external script importing the old name keeps
 # the samplers semantics it used to get).
@@ -312,23 +314,23 @@ BYTES_PER_STATE = BYTES_PER_STATE_SAMPLERS
 
 
 def _cgroup_memory_limit_mb() -> Optional[float]:
-    """Limite de RAM del CONTENEDOR en MB, o None si no hay ninguno.
+    """RAM limit of the CONTAINER in MB, or None if there is none.
 
-    [B-CGROUP] `psutil.virtual_memory().total` reporta la RAM del NODO, no la
-    del contenedor. En un pod de Kubernetes con "Maximum memory 63Gi" sobre un
-    nodo de, digamos, 512 GB, el runner creia tener 512 GB, admitia decenas de
-    tareas a la vez y el runtime mataba el pod por OOM.
+    [B-CGROUP] `psutil.virtual_memory().total` reports the RAM of the NODE, not
+    of the container. In a Kubernetes pod with "Maximum memory 63Gi" on a node
+    of, say, 512 GB, the runner believed it had 512 GB, admitted dozens of
+    tasks at once and the runtime killed the pod for OOM.
 
-    Y un OOMKill no es un MemoryError de Python: es un SIGKILL. No hay
-    traceback, no hay resultados parciales, no queda ni una linea en el log
-    explicando por que. La corrida entera desaparece.
+    And an OOMKill is not a Python MemoryError: it is a SIGKILL. There is no
+    traceback, no partial results, not a single log line explaining why. The
+    whole run disappears.
 
-    Lee cgroup v2 y v1. Un valor gigantesco ('max', o el centinela de v1)
-    significa sin limite, y entonces devuelve None para que el llamador use la
-    RAM del nodo como antes.
+    Reads cgroup v2 and v1. A gigantic value ('max', or the v1 sentinel) means
+    no limit, and then it returns None so that the caller uses the node's RAM
+    as before.
 
     Returns:
-        Limite en MB, o None si no hay cgroup o es ilimitado.
+        Limit in MB, or None if there is no cgroup or it is unlimited.
     """
     candidates = (
         '/sys/fs/cgroup/memory.max',                       # cgroup v2
@@ -345,8 +347,8 @@ def _cgroup_memory_limit_mb() -> Optional[float]:
             value = float(raw)
         except ValueError:
             continue
-        # v1 usa 2^63-1 (o similar) como "sin limite"; cualquier cosa por
-        # encima de 1 PB es claramente un centinela y no un limite real.
+        # v1 uses 2^63-1 (or similar) as "no limit"; anything above 1 PB is
+        # clearly a sentinel and not a real limit.
         if value <= 0 or value > 1e15:
             return None
         return value / 1e6
@@ -354,15 +356,15 @@ def _cgroup_memory_limit_mb() -> Optional[float]:
 
 
 def _cgroup_cpu_limit() -> Optional[int]:
-    """Nucleos que el CONTENEDOR puede usar, o None si no hay limite.
+    """Cores the CONTAINER may use, or None if there is no limit.
 
-    [B-CGROUP] Mismo problema que la memoria: `os.cpu_count()` devuelve los
-    nucleos del nodo. Con "Maximum CPU 15" sobre un nodo de 128, el runner
-    lanzaba 128 procesos peleandose por 15 nucleos — mas lento que hacerlo
-    bien, y con mucha mas RAM en vuelo.
+    [B-CGROUP] Same problem as memory: `os.cpu_count()` returns the node's
+    cores. With "Maximum CPU 15" on a 128-core node, the runner launched 128
+    processes fighting over 15 cores — slower than doing it right, and with
+    far more RAM in flight.
 
     Returns:
-        Numero de nucleos (>=1), o None si no hay limite declarado.
+        Number of cores (>=1), or None if no limit is declared.
     """
     try:                                                   # cgroup v2
         quota, period = open('/sys/fs/cgroup/cpu.max').read().split()
@@ -382,12 +384,12 @@ def _cgroup_cpu_limit() -> Optional[int]:
 
 
 def detected_cores() -> int:
-    """Nucleos usables: el limite del contenedor si lo hay, si no los del nodo."""
+    """Usable cores: the container limit if there is one, otherwise the node's."""
     return _cgroup_cpu_limit() or os.cpu_count() or 1
 
 
 def detected_memory_mb() -> float:
-    """RAM usable en MB: el limite del contenedor si lo hay, si no la del nodo."""
+    """Usable RAM in MB: the container limit if there is one, otherwise the node's."""
     limit = _cgroup_memory_limit_mb()
     if limit is not None:
         return limit
@@ -400,12 +402,12 @@ def detected_memory_mb() -> float:
 
 @dataclass
 class Task:
-    """Una tarea de la campana: que ejecutar, con que argumentos y cuanto pesa.
+    """One campaign task: what to run, with which arguments and how heavy it is.
 
-    Agrupa todo lo que el planificador necesita saber ANTES de lanzarla
-    (memoria estimada, qubits, nivel de ruido) y lo que se sabe DESPUES
-    (codigo de salida, RSS pico, tiempos), para que `master_profile.csv`
-    salga de un solo sitio.
+    Groups everything the planner needs to know BEFORE launching it
+    (estimated memory, qubits, noise level) and what is known AFTER (exit
+    code, peak RSS, timings), so that `master_profile.csv` comes from a
+    single place.
     """
     name: str                       # human-readable label
     script: str                     # cosmo_modular_quantum.py | cosmo_genetic_optimizers.py
@@ -416,8 +418,8 @@ class Task:
     outdir: str
     grid_value: int = 0             # EFFECTIVE nqpp (samplers) or n_bits (genetic)
     grid_kind: str = ""             # 'nqpp' | 'n_bits'
-    # [NOISE] Segunda dimension del eje de ablacion, tratada como una mas
-    # (igual que nqpp y n_bits): etiqueta canonica del peldano de ruido.
+    # [NOISE] Second dimension of the ablation axis, treated like any other
+    # (just like nqpp and n_bits): canonical label of the noise rung.
     noise: str = "none"
     # Results (filled in at run time):
     pid: Optional[int] = None
@@ -433,7 +435,7 @@ class Task:
 
     @property
     def wall_s(self) -> float:
-        """Segundos de reloj de la tarea, o 0.0 si aun no ha terminado."""
+        """Wall-clock seconds of the task, or 0.0 if it has not finished yet."""
         if self.t_start and self.t_end:
             return self.t_end - self.t_start
         return 0.0
@@ -450,37 +452,37 @@ def estimate_qubits_and_mem(total_q: int, kind: str = 'nqpp',
     states, plus the fixed per-process interpreter cost.
 
     `kind` selects the per-state cost: 'nqpp' (samplers — grid + likelihood
-    auxiliaries, que dependen de N_data) o 'n_bits' (genetico — un statevector
-    liso, independiente del dataset). Ver los comentarios BYTES_PER_STATE_*:
-    usar la constante de samplers para el QGA lo sobreestimaba ~830x, y usar
-    una constante independiente de N_data para los samplers lo SUBestimaba
-    5.3x, que es lo que mando tres tareas al OOM killer ([B-MEM]).
+    auxiliaries, which depend on N_data) or 'n_bits' (genetic — a plain
+    statevector, independent of the dataset). See the BYTES_PER_STATE_*
+    comments: using the samplers constant for the QGA overestimated it ~830x,
+    and using an N_data-independent constant for the samplers UNDERestimated
+    it 5.3x, which is what sent three tasks to the OOM killer ([B-MEM]).
 
     Args:
         total_q: total circuit/grid qubits (nqpp*d or n_bits*d).
         kind: 'nqpp' | 'n_bits'.
-        noisy: si True, ANADE la matriz de densidad (16 * 4^total_q). Es un
-            tercer modelo aditivo, no un sustituto: la tarea de samplers sigue
-            necesitando su grid ademas de rho.
-        n_data: puntos de datos del dataset activo; `None` usa el mayor de
-            `DATASET_N_DATA` (conservador). Se ignora con kind='n_bits'.
+        noisy: if True, ADDS the density matrix (16 * 4^total_q). It is a
+            third additive model, not a replacement: the samplers task still
+            needs its grid in addition to rho.
+        n_data: data points of the active dataset; `None` uses the largest in
+            `DATASET_N_DATA` (conservative). Ignored with kind='n_bits'.
     Examples:
-        A 18 qubits con CC+BAO+Pantheon una tarea pesa ~22 GB (se midieron
-        19.6); con CC+BAO, ~4.6 GB (se midieron 4.0):
+        At 18 qubits with CC+BAO+Pantheon a task weighs ~22 GB (19.6 were
+        measured); with CC+BAO, ~4.6 GB (4.0 were measured):
 
         >>> round(estimate_qubits_and_mem(18, 'nqpp', n_data=1099) / 1024, 1)
         22.1
         >>> round(estimate_qubits_and_mem(18, 'nqpp', n_data=51) / 1024, 1)
         4.5
 
-        Y a 20 qubits — la tarea `cpl/nqpp5` que fue OOMKilled — son 88 GB,
-        que es lo que el modelo viejo estimaba en 14:
+        And at 20 qubits — the `cpl/nqpp5` task that was OOMKilled — it is
+        88 GB, which the old model estimated at 14:
 
         >>> round(estimate_qubits_and_mem(20, 'nqpp', n_data=1099) / 1024)
         88
 
-        El genetico no evalua la verosimilitud sobre la rejilla, asi que su
-        coste no depende del dataset:
+        The genetic optimizer does not evaluate the likelihood over the grid,
+        so its cost does not depend on the dataset:
 
         >>> (estimate_qubits_and_mem(20, 'n_bits', n_data=51)
         ...  == estimate_qubits_and_mem(20, 'n_bits', n_data=1099))
@@ -489,10 +491,10 @@ def estimate_qubits_and_mem(total_q: int, kind: str = 'nqpp',
     per_state = bytes_per_state(kind, n_data)
     mb = (2 ** total_q) * per_state / 1e6 + PROCESS_BASELINE_MB
     if noisy:
-        # [REV] Con entrenamiento cuantico el coste no es rho suelta sino el
-        # lote de parameter-shift (2*n_phi matrices de densidad a la vez), que
-        # a 12 qubits son 42 GB frente a los 256 MB de una sola. El genetico
-        # no tiene ese lote.
+        # [REV] With quantum training the cost is not a single rho but the
+        # parameter-shift batch (2*n_phi density matrices at once), which at
+        # 12 qubits is 42 GB versus 256 MB for a single one. The genetic
+        # optimizer has no such batch.
         factor = (cnoise.param_shift_batch_factor(total_q)
                   if kind == 'nqpp' else 1)
         mb += cnoise.noisy_density_bytes(total_q, factor) / 1e6
@@ -504,14 +506,14 @@ def qubits_fitting_in(mem_mb: float, kind: str = 'nqpp',
     """Largest number of qubits whose 2^q states fit in mem_mb, for the given
     pipeline `kind` (the per-process baseline is reserved first).
 
-    `n_data` solo importa para 'nqpp': el coste por estado de los samplers
-    crece con el tamano del dataset ([B-MEM]).
+    `n_data` only matters for 'nqpp': the per-state cost of the samplers grows
+    with the size of the dataset ([B-MEM]).
 
     Args:
-        mem_mb: memoria disponible, en MB.
-        kind: pipeline: 'nqpp' (samplers) o 'n_bits' (genetico). Por defecto
+        mem_mb: available memory, in MB.
+        kind: pipeline: 'nqpp' (samplers) or 'n_bits' (genetic). Default
             'nqpp'.
-        n_data: numero de puntos de datos del dataset. Por defecto None.
+        n_data: number of data points of the dataset. Default None.
 
     Returns:
         int
@@ -543,29 +545,28 @@ def qubit_ceiling(max_qubits: Optional[int], mem_ceiling_mb: float,
     You can never exceed what fits in RAM this way — it stays the ultimate
     backstop regardless of what you pass.
 
-    [NOISE] Con `noisy=True` se aplica ADEMAS el techo del eje de ruido, que
-    tambien se deriva de la RAM — igual que los otros dos, y a diferencia de
-    lo que hacia la primera version de este eje, que lo fijaba en 13 duro
-    argumentando un limite de tiempo. Era una mala generalizacion sacada de
-    una maquina pequena: en un nodo grande y sin prisa el limitante vuelve a
-    ser la memoria, y esa si se relaja.
+    [NOISE] With `noisy=True` the noise-axis ceiling is applied AS WELL, and
+    it is also derived from RAM — like the other two, and unlike the first
+    version of this axis, which hard-fixed it at 13 arguing a time limit. That
+    was a bad generalization drawn from a small machine: on a large node with
+    no hurry the limiting factor is memory again, and that does relax.
 
-    Lo que manda con ruido no es rho suelta sino el LOTE de parameter-shift
-    del entrenamiento cuantico del QVMC (`2 * n_phi` matrices de densidad a la
-    vez). Como una tarea de samplers recorre la escalera entera, ese peldano
-    es el que fija su techo. El genetico no tiene ese lote y por eso recibe
+    What rules under noise is not a single rho but the parameter-shift BATCH
+    of QVMC quantum training (`2 * n_phi` density matrices at once). Since a
+    samplers task walks the whole ladder, that rung is the one that sets its
+    ceiling. The genetic optimizer has no such batch and therefore gets
     `quantum_training=False`.
 
     Args:
-        max_qubits: tope pedido por el usuario, o None.
-        mem_ceiling_mb: RAM disponible por tarea.
+        max_qubits: cap requested by the user, or None.
+        mem_ceiling_mb: RAM available per task.
         kind: 'nqpp' | 'n_bits'.
-        noisy: aplica el techo del eje de ruido.
-        n_data: puntos de datos del dataset activo (solo afecta a 'nqpp').
-        generations: generaciones previstas, para el techo por TIEMPO del
-            genetico ruidoso ([B-TIME] en cosmo_noise). Solo aplica con
-            kind='n_bits' y noisy=True.
-        budget_hours: presupuesto de reloj por tarea para ese techo.
+        noisy: apply the noise-axis ceiling.
+        n_data: data points of the active dataset (only affects 'nqpp').
+        generations: planned generations, for the TIME ceiling of the noisy
+            genetic optimizer ([B-TIME] in cosmo_noise). Only applies with
+            kind='n_bits' and noisy=True.
+        budget_hours: wall-clock budget per task for that ceiling.
     """
     ram_ceiling = qubits_fitting_in(mem_ceiling_mb, kind, n_data)
     ceiling = (ram_ceiling if max_qubits is None
@@ -594,14 +595,14 @@ def grid_values_for_model(single: int, sweep: Optional[List[int]], d: int,
     even LO fits, the model produces no tasks (with a notice).
 
     Args:
-        single: valor unico pedido por el usuario.
-        sweep: rango pedido, o None.
-        d: numero de parametros libres del modelo.
-        q_ceiling: techo de qubits por tarea.
-        strict: no recortar; fallar si no cabe.
-        notices: lista donde se acumulan los avisos del recorte por modelo.
-        kind: pipeline: 'nqpp' (samplers) o 'n_bits' (genetico).
-        model: modelo cosmologico (`cosmo_core.CosmoModel`).
+        single: single value requested by the user.
+        sweep: requested range, or None.
+        d: number of free parameters of the model.
+        q_ceiling: qubit ceiling per task.
+        strict: do not clamp; fail if it does not fit.
+        notices: list where the per-model clamp notices accumulate.
+        kind: pipeline: 'nqpp' (samplers) or 'n_bits' (genetic).
+        model: cosmological model (`cosmo_core.CosmoModel`).
 
     Returns:
         List[int]
@@ -650,25 +651,25 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
     --strict-qubits), so a heavy model (CPL, d=4) is lowered on its own while
     the light ones (LCDM, d=2) stay at the target value.
 
-    [NOISE] El nivel de ruido es una dimension de tarea MAS, exactamente igual
-    que nqpp y n_bits: `--noise-sweep none,readout,full` genera la matriz
-    bidimensional (quantumness x ruido) en una sola invocacion. Cada peldano
-    ruidoso lleva su PROPIO techo de qubits y su propio modelo de memoria,
-    porque la matriz de densidad cambia ambos: el techo baja a 13 y el coste
-    de RAM gana un termino 16*4^n que domina al del grid.
+    [NOISE] The noise level is ONE MORE task dimension, exactly like nqpp and
+    n_bits: `--noise-sweep none,readout,full` generates the two-dimensional
+    matrix (quantumness x noise) in a single invocation. Each noisy rung
+    carries its OWN qubit ceiling and its own memory model, because the
+    density matrix changes both: the ceiling drops to 13 and the RAM cost
+    gains a 16*4^n term that dominates the grid term.
 
     Args:
-        args: namespace del parser del runner.
-        master_dir: carpeta maestra de la corrida.
-        q_ceiling: techo de qubits de samplers SIN ruido.
-        notices: lista donde acumular avisos de recorte.
-        q_ceiling_genetic: techo de qubits genetico SIN ruido.
-        noise_levels: peldanos a generar. None equivale a `['none']`.
-        noisy_q_ceiling: techo de samplers CON ruido.
-        noisy_q_ceiling_genetic: techo genetico CON ruido.
+        args: namespace of the runner's parser.
+        master_dir: master folder of the run.
+        q_ceiling: samplers qubit ceiling WITHOUT noise.
+        notices: list where clamp notices accumulate.
+        q_ceiling_genetic: genetic qubit ceiling WITHOUT noise.
+        noise_levels: rungs to generate. None is equivalent to `['none']`.
+        noisy_q_ceiling: samplers ceiling WITH noise.
+        noisy_q_ceiling_genetic: genetic ceiling WITH noise.
 
     Returns:
-        Lista de tareas.
+        List of tasks.
     """
     tasks: List[Task] = []
     models = args.models or ALL_MODELS
@@ -687,23 +688,23 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
     levels = [cnoise.canonical_level(x) for x in (noise_levels or ['none'])]
     sweeping_noise = len(levels) > 1
 
-    # [NOISE-CONTROL] La columna de control.
+    # [NOISE-CONTROL] The control column.
     #
-    # El peldano ideal usa por defecto la ruta de amplitudes y cualquier
-    # peldano con ruido usa la ruta por conteos, porque Re(psi)*sign(Im(psi))
-    # no existe para un estado mezclado. Comparar la columna ideal contra las
-    # ruidosas mezcla entonces DOS efectos: el ruido y el cambio de operador
-    # de lectura.
+    # The ideal rung uses the amplitude route by default and any noisy rung
+    # uses the counts route, because Re(psi)*sign(Im(psi)) does not exist for
+    # a mixed state. Comparing the ideal column against the noisy ones then
+    # mixes TWO effects: the noise and the change of readout operator.
     #
-    # No es teorico. En la primera corrida del eje, leer 'none' -> 'readout'
-    # daba que el ruido de lectura ESTRECHA el posterior y MEJORA el mezclado
-    # (sigma 0.0208 -> 0.0176, ESS 101 -> 141). Con el control se ve que
-    # ideal-por-conteos y readout son identicas: el canal de lectura no toca
-    # la propuesta y todo el salto era el cambio de ruta.
+    # This is not theoretical. In the first run of the axis, reading
+    # 'none' -> 'readout' suggested that readout noise NARROWS the posterior
+    # and IMPROVES mixing (sigma 0.0208 -> 0.0176, ESS 101 -> 141). With the
+    # control one sees that ideal-by-counts and readout are identical: the
+    # readout channel does not touch the proposal and the whole jump was the
+    # change of route.
     #
-    # Por eso el control se anade SOLO — una barrida de ruido sin el produce
-    # una matriz que invita a conclusiones invertidas. `--no-noise-control`
-    # lo desactiva para quien lo quiera explicitamente.
+    # That is why the control is added AUTOMATICALLY — a noise sweep without
+    # it produces a matrix that invites inverted conclusions.
+    # `--no-noise-control` disables it for whoever explicitly wants that.
     route = getattr(args, 'proposal_route', 'auto')
     plan: List[Tuple[str, str, str]] = [
         (lvl, route, f"noise-{lvl}" if sweeping_noise else "") for lvl in levels]
@@ -717,11 +718,11 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
 
     for noise, proposal_route, ntag in plan:
         noisy = (noise != 'none')
-        # El control comparte el peldano 'none' pero es una columna propia:
-        # se etiqueta distinto para que no colisione en el CSV ni en disco.
+        # The control shares the 'none' rung but is a column of its own: it is
+        # labeled differently so it does not collide in the CSV or on disk.
         noise_col = 'none-counts' if proposal_route == 'counts' and not noisy \
             else noise
-        # [NOISE] Techos y modelo de memoria propios del peldano.
+        # [NOISE] The rung's own ceilings and memory model.
         q_cap = (noisy_q_ceiling if noisy and noisy_q_ceiling is not None
                  else q_ceiling)
         g_cap_base = (q_ceiling if q_ceiling_genetic is None
@@ -729,9 +730,9 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
         g_cap = (noisy_q_ceiling_genetic
                  if noisy and noisy_q_ceiling_genetic is not None
                  else g_cap_base)
-        # El peldano solo entra en el nombre/carpeta cuando hay mas de uno, de
-        # modo que una corrida ideal produce EXACTAMENTE las mismas rutas de
-        # salida que antes de este eje y los CSV previos siguen alineando.
+        # The rung only enters the name/folder when there is more than one, so
+        # that an ideal run produces EXACTLY the same output paths as before
+        # this axis and the previous CSVs still line up.
         noise_argv = (['--noise', noise] if noisy or sweeping_noise else [])
         # [E-HPC2] Forward the channel strengths. They used to be parsed here
         # and dropped, so every child ran with the defaults. Only non-default
@@ -797,9 +798,9 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
                         noise=noise_col))
 
             # ---- Genetic tasks (CGA + QGA), one per n_bits value ----
-            # [NOISE-CONTROL] El control es una columna de la PROPUESTA del
-            # QMCMC; el QGA no tiene ruta de lectura conmutable, asi que
-            # duplicarlo aqui solo repetiria la columna ideal.
+            # [NOISE-CONTROL] The control is a column of the QMCMC PROPOSAL;
+            # the QGA has no switchable readout route, so duplicating it here
+            # would only repeat the ideal column.
             if not args.only_samplers and proposal_route == 'auto':
                 # [FIX] The genetic pipeline has its OWN ceiling: the QGA does
                 # not build the 2^(n*d) likelihood grid the samplers do, so it
@@ -852,7 +853,7 @@ def child_env(threads_per_worker: int) -> Dict[str, str]:
     is the safety belt against oversubscription.
 
     Args:
-        threads_per_worker: hilos que se asignan a cada subproceso.
+        threads_per_worker: threads assigned to each subprocess.
 
     Returns:
         Dict[str, str]
@@ -873,7 +874,7 @@ def proc_tree_rss_mb(pid: int) -> float:
     else /proc as a fallback (Linux). Returns 0 if the process is already
 
     Args:
-        pid: identificador del proceso raiz del arbol.
+        pid: identifier of the root process of the tree.
 
     Returns:
         float
@@ -907,15 +908,15 @@ def run_pool(tasks: List[Task], max_parallel: int, threads_per_worker: int,
     """Run the tasks with at most `max_parallel` in flight, honoring an
 
     Args:
-        tasks: lista de tareas de la campana.
-        max_parallel: tareas simultaneas como maximo.
-        threads_per_worker: hilos que se asignan a cada subproceso.
-        mem_budget_mb: presupuesto agregado de memoria, en MB.
-        max_qubits: tope de qubits por tarea.
-        project_dir: carpeta del proyecto donde viven los scripts.
-        poll: segundos entre sondeos del estado de los hijos. Por defecto 0.5.
-        max_qubits_genetic: tope de qubits para las tareas geneticas. Por
-            defecto None.
+        tasks: list of campaign tasks.
+        max_parallel: maximum number of simultaneous tasks.
+        threads_per_worker: threads assigned to each subprocess.
+        mem_budget_mb: aggregate memory budget, in MB.
+        max_qubits: qubit cap per task.
+        project_dir: project folder where the scripts live.
+        poll: seconds between polls of the children's state. Default 0.5.
+        max_qubits_genetic: qubit cap for the genetic tasks. Default
+            None.
     aggregate RAM budget, and sample each tree's peak RSS."""
     pending = list(tasks)
     running: List[Task] = []
@@ -923,7 +924,7 @@ def run_pool(tasks: List[Task], max_parallel: int, threads_per_worker: int,
     procs: Dict[int, subprocess.Popen] = {}
 
     def admitted_mem() -> float:
-        """Memoria estimada (MB) de las tareas actualmente en ejecucion."""
+        """Estimated memory (MB) of the tasks currently running."""
         return sum(t.est_mem_mb for t in running)
 
     print(f"\n{'='*74}\nPLAN: {len(tasks)} tasks | "
@@ -1082,12 +1083,12 @@ def _tail(path: str, n: int = 12) -> None:
 # =============================================================================
 
 def report(tasks: List[Task], master_dir: str, t_wall0: float) -> None:
-    """Imprime el resumen final de la campana: estado, tiempo y RSS por tarea.
+    """Print the final campaign summary: status, time and RSS per task.
 
     Args:
-        tasks: lista de tareas de la campana.
-        master_dir: carpeta raiz de la campana.
-        t_wall0: marca de tiempo del inicio de la campana.
+        tasks: list of campaign tasks.
+        master_dir: root folder of the campaign.
+        t_wall0: timestamp of the start of the campaign.
     """
     total_wall = time.time() - t_wall0
     print(f"\n{'='*74}\nSUMMARY - total wall time: "
@@ -1112,9 +1113,9 @@ def report(tasks: List[Task], master_dir: str, t_wall0: float) -> None:
             'status': status, 'returncode': t.rc,
             'total_qubits': t.total_qubits,
             'grid_kind': t.grid_kind, 'grid_value': t.grid_value,
-            # [NOISE] Segunda coordenada del eje de ablacion. Se escribe
-            # SIEMPRE, tambien en corridas ideales ('none'), para que la
-            # matriz bidimensional se pueda pivotar sin casos especiales.
+            # [NOISE] Second coordinate of the ablation axis. It is ALWAYS
+            # written, also in ideal runs ('none'), so that the
+            # two-dimensional matrix can be pivoted without special cases.
             'noise': t.noise,
             'wall_s': round(t.wall_s, 1),
             'wall_min': round(t.wall_s / 60, 2),
@@ -1187,7 +1188,7 @@ PARAM_LATEX = {'Om': r'$\Omega_m$', 'H0': r'$H_0$', 'w': r'$w$',
 
 
 def _to_float(s) -> float:
-    """float(s) tolerante: devuelve nan en vez de levantar si no se puede."""
+    """Tolerant float(s): returns nan instead of raising if it cannot convert."""
     try:
         return float(s)
     except (TypeError, ValueError):
@@ -1197,15 +1198,17 @@ def _to_float(s) -> float:
 def _find_result_csvs(master_dir: str) -> List[str]:
     """Per-model result CSVs under `master_dir`.
 
-    [E-QPU6] The cumulative `resultados_TODOS_los_modelos.csv` repeats the
-    rows of the per-model files, so reading both counted every run twice.
+    [E-QPU6] The cumulative `results_all_models.csv` (legacy name
+    `resultados_TODOS_los_modelos.csv`) repeats the rows of the per-model
+    files, so reading both counted every run twice. Both the current and the
+    legacy file names are accepted; the cumulative file is never read.
     """
     import campaign_io
     return campaign_io.result_csvs_any_layout(master_dir)
 
 
 def _infer_model(path: str) -> str:
-    """Nombre del modelo deducido de la ruta de la carpeta de la tarea."""
+    """Model name inferred from the path of the task's folder."""
     for part in path.split(os.sep):
         if part.startswith(('samplers_', 'genetic_')):
             return part.split('_')[1]
@@ -1276,26 +1279,26 @@ def _read_master_profile_rss(master_dir: str):
     return rss
 
 
-def _familia_de_metodo(method: str) -> str:
-    """Familia a la que pertenece un metodo: 'genetic' o 'samplers'.
+def _method_family(method: str) -> str:
+    """Family a method belongs to: 'genetic' or 'samplers'.
 
-    [B-NBITS] Hace falta porque las dos familias reportan su resolucion en la
-    MISMA columna del CSV (`nqpp`) pero midiendo cosas distintas: para los
-    samplers es qubits por parametro de la rejilla del posterior, para el
-    genetico es bits por gen de la codificacion. Dibujarlas en un solo eje
-    etiquetado 'nqpp' — que es lo que se hacia — pone juntos dos numeros que
-    no son comparables.
+    [B-NBITS] It is needed because the two families report their resolution
+    in the SAME CSV column (`nqpp`) but measure different things: for the
+    samplers it is qubits per parameter of the posterior grid, for the genetic
+    optimizer it is bits per gene of the encoding. Drawing them on a single
+    axis labeled 'nqpp' — which is what used to be done — puts together two
+    numbers that are not comparable.
 
     Args:
-        method: nombre del metodo tal como aparece en la columna `Method`.
+        method: method name as it appears in the `Method` column.
 
     Returns:
-        'genetic' o 'samplers'.
+        'genetic' or 'samplers'.
 
     Examples:
-        >>> _familia_de_metodo('CGA'), _familia_de_metodo('QGA (q=33%)')
+        >>> _method_family('CGA'), _method_family('QGA (q=33%)')
         ('genetic', 'genetic')
-        >>> _familia_de_metodo('QMCMC 50%'), _familia_de_metodo('Classical VI')
+        >>> _method_family('QMCMC 50%'), _method_family('Classical VI')
         ('samplers', 'samplers')
     """
     m = method.upper()
@@ -1303,10 +1306,10 @@ def _familia_de_metodo(method: str) -> str:
 
 
 def _is_grid_method(method: str) -> bool:
-    """True si el metodo vive sobre la rejilla (QVMC o VI clasico).
+    """True if the method lives on the grid (QVMC or classical VI).
 
-    Se usa para no mezclar en una figura metodos con rejilla y sin ella: el
-    nqpp solo significa algo para los primeros.
+    Used to avoid mixing grid and grid-free methods in one figure: nqpp only
+    means something for the former.
     """
     m = method.lower()
     return ('vmc' in m) or ('vi' in m) or ('varia' in m)
@@ -1333,17 +1336,17 @@ NOISE_ORDER = ['none', 'none-counts', 'readout', 'full']
 
 
 def _infer_noise(path: str) -> str:
-    """Peldano de ruido de una tarea, deducido del nombre de su carpeta.
+    """Noise rung of a task, inferred from the name of its folder.
 
-    Las carpetas de tarea se llaman `<pipeline>_<modelo>[_<tag>]_noise-<nivel>`
-    cuando hay barrido de ruido, y sin el sufijo cuando no lo hay. Esa ausencia
-    significa 'none' — una corrida ideal conserva las rutas de siempre.
+    Task folders are named `<pipeline>_<model>[_<tag>]_noise-<level>` when
+    there is a noise sweep, and without the suffix when there is not. That
+    absence means 'none' — an ideal run keeps the usual paths.
 
     Args:
-        path: ruta del CSV de resultados.
+        path: path of the results CSV.
 
     Returns:
-        Etiqueta del peldano.
+        Rung label.
     """
     for part in path.split(os.sep):
         if '_noise-' in part:
@@ -1352,43 +1355,44 @@ def _infer_noise(path: str) -> str:
 
 
 def _noise_sort_key(level: str):
-    """Orden del eje: los peldanos con nombre primero, backends al final."""
+    """Axis order: named rungs first, backends last."""
     return (NOISE_ORDER.index(level) if level in NOISE_ORDER
             else len(NOISE_ORDER), level)
 
 
 def _infer_grid(path: str, row: dict) -> str:
-    """Resolucion de la tarea ('nqpp3', 'nb5', ...) o '' si no se puede saber.
+    """Resolution of the task ('nqpp3', 'nb5', ...) or '' if it cannot be known.
 
-    Se toma del nombre de la carpeta, que el runner etiqueta cuando hay
-    barrido; si no lo lleva, se cae a la columna `nqpp` del CSV.
+    It is taken from the folder name, which the runner tags when there is a
+    sweep; if the folder carries no tag, it falls back to the CSV's `nqpp`
+    column.
 
     Args:
-        path: ruta del CSV.
-        row: fila ya parseada (sin usar; se conserva por compatibilidad).
+        path: path of the CSV.
+        row: already parsed row (unused; kept for compatibility).
 
     Returns:
-        Etiqueta de resolucion, o cadena vacia.
+        Resolution label, or empty string.
     """
     import re as _re
     for part in path.split(os.sep):
         m = _re.search(r'_(nqpp\d+|nb\d+)(?:_|$)', part)
         if m:
             return m.group(1)
-    # Sin etiqueta en la carpeta no hubo barrido, asi que TODAS las filas de
-    # ese CSV son la misma resolucion. Deducirla fila a fila de la columna
-    # `nqpp` seria peor: el MCMC clasico la deja vacia, de modo que un mismo
-    # CSV se partia en dos grupos ('' y 'nqpp3') y salian figuras duplicadas
-    # con la mitad de los metodos cada una.
+    # Without a tag on the folder there was no sweep, so ALL rows of that CSV
+    # have the same resolution. Inferring it row by row from the `nqpp` column
+    # would be worse: classical MCMC leaves it empty, so a single CSV was split
+    # into two groups ('' and 'nqpp3') and duplicate figures came out with
+    # half of the methods each.
     return ''
 
 
 def _parse_noise_rows(csv_paths: List[str]) -> List[dict]:
-    """Aplana los CSV en registros {model, method, noise, param, mean, std, ...}.
+    """Flatten the CSVs into records {model, method, noise, param, mean, std, ...}.
 
-    A diferencia de `_parse_result_rows`, NO exige la columna `nqpp`: las
-    tareas geneticas no la tienen y aqui si interesan, porque el QGA es una de
-    las escaleras que el eje de ruido debe comparar.
+    Unlike `_parse_result_rows`, it does NOT require the `nqpp` column: the
+    genetic tasks do not have it and here they do matter, because the QGA is
+    one of the ladders the noise axis must compare.
     """
     import csv as _csv
     out: List[dict] = []
@@ -1403,14 +1407,14 @@ def _parse_noise_rows(csv_paths: List[str]) -> List[dict]:
                     common = dict(
                         model=row.get('model', '') or _infer_model(path),
                         method=row.get('Method', '?'), noise=noise,
-                        # [B-GRID] La resolucion TIENE que viajar en el
-                        # registro. Sin ella, comparar a lo largo del eje de
-                        # ruido mezclaba nqpp distintos: con --nqpp-sweep y
-                        # --noise-sweep a la vez, el techo con ruido recorta
-                        # unos peldanos y no otros, asi que la columna ideal
-                        # podia quedarse con nqpp=5 y la ruidosa con nqpp=3.
-                        # La figura entonces atribuia al ruido lo que era un
-                        # cambio de resolucion.
+                        # [B-GRID] The resolution HAS to travel in the
+                        # record. Without it, comparing along the noise axis
+                        # mixed different nqpp: with --nqpp-sweep and
+                        # --noise-sweep together, the noisy ceiling clamps
+                        # some rungs and not others, so the ideal column
+                        # could keep nqpp=5 and the noisy one nqpp=3. The
+                        # figure then attributed to noise what was a change
+                        # of resolution.
                         grid=_infer_grid(path, row),
                         chi2_red=_to_float(row.get('chi2_red', 'nan')),
                         final_KL=_to_float(row.get('final_KL', 'nan')),
@@ -1433,36 +1437,38 @@ def _parse_noise_rows(csv_paths: List[str]) -> List[dict]:
                                     std=_to_float(row.get(f'{p}_std', ''))))
         except Exception:
             continue
-    return [r for r in out if r['mean'] == r['mean']]      # descarta NaN
+    return [r for r in out if r['mean'] == r['mean']]      # drop NaN
 
 
 def generate_noise_comparison_plots(master_dir: str,
                                     outdir: Optional[str] = None
                                     ) -> List[str]:
-    """Una figura por modelo comparando CADA rung con y sin ruido.
+    """One figure per model comparing EVERY rung with and without noise.
 
-    [PLOT-NOISE] Responde directamente a "quiero ver cada quantumness de cada
-    modelo con y sin ruido". El eje x es el peldano de ruido en orden, cada
-    linea es un rung de quantumness, y hay un panel por parametro mas uno de
-    calidad de ajuste. Asi la degradacion de un rung se lee como la pendiente
-    de su propia linea, y la comparacion entre rungs como la separacion entre
-    lineas — las dos preguntas del eje, en una sola imagen.
+    [PLOT-NOISE] Directly answers "I want to see every quantumness level of
+    every model with and without noise". The x axis is the noise rung in
+    order, each line is a quantumness rung, and there is one panel per
+    parameter plus one for fit quality. That way the degradation of a rung
+    reads as the slope of its own line, and the comparison between rungs as
+    the separation between lines — the two questions of the axis, in a single
+    image.
 
-    Se usa una linea por rung y no un panel por rung a proposito: lo que
-    interesa no es la forma de cada curva por separado sino si unos rungs
-    aguantan el ruido mejor que otros, y eso solo se ve superponiendolos.
+    One line per rung rather than one panel per rung is deliberate: what
+    matters is not the shape of each curve on its own but whether some rungs
+    withstand noise better than others, and that is only visible by
+    overlaying them.
 
-    La columna `none-counts`, cuando existe, se dibuja como parte del eje: es
-    el control que separa el efecto del ruido del efecto del cambio de
-    operador de lectura, y sin ella la pendiente entre `none` y `readout`
-    mezcla ambos.
+    The `none-counts` column, when present, is drawn as part of the axis: it
+    is the control that separates the effect of noise from the effect of the
+    change of readout operator, and without it the slope between `none` and
+    `readout` mixes both.
 
     Args:
-        master_dir: carpeta maestra de la corrida.
-        outdir: donde escribir (por defecto, la misma).
+        master_dir: master folder of the run.
+        outdir: where to write (by default, the same folder).
 
     Returns:
-        Lista de rutas generadas.
+        List of generated paths.
     """
     try:
         import numpy as np
@@ -1470,36 +1476,36 @@ def generate_noise_comparison_plots(master_dir: str,
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
     except Exception as e:                                  # pragma: no cover
-        print(f"  (sin graficas de ruido: no pude importar matplotlib: {e})")
+        print(f"  (no noise plots: could not import matplotlib: {e})")
         return []
 
     outdir = outdir or master_dir
     records = _parse_noise_rows(_find_result_csvs(master_dir))
     if not records:
-        print("  (sin graficas de ruido: no encontre filas legibles)")
+        print("  (no noise plots: found no readable rows)")
         return []
 
     levels = sorted({r['noise'] for r in records}, key=_noise_sort_key)
     if len(levels) < 2:
-        print(f"  (sin graficas de ruido: solo un peldano, '{levels[0]}')")
+        print(f"  (no noise plots: only one rung, '{levels[0]}')")
         return []
 
-    # [PLOT-NOISE] Samplers y genetico van en figuras SEPARADAS, y no por
-    # estetica: sus sigmas no son la misma cantidad.
+    # [PLOT-NOISE] Samplers and genetic go in SEPARATE figures, and not for
+    # aesthetics: their sigmas are not the same quantity.
     #
-    # Para MCMC/VI, sigma es la anchura del posterior — un intervalo de
-    # credibilidad — asi que "desplazamiento en unidades de sigma" responde
-    # "se movio mas de lo que el metodo sabe del parametro?".
+    # For MCMC/VI, sigma is the width of the posterior — a credible interval —
+    # so "shift in units of sigma" answers "did it move more than what the
+    # method knows about the parameter?".
     #
-    # Para un genetico, sigma es la dispersion de una poblacion YA CONVERGIDA:
-    # una cantidad diminuta que solo mide cuanto se apretaron los individuos.
-    # Dividir por ella produce desplazamientos de 5 o 9 sigmas que no
-    # significan nada — se vieron en la primera corrida y parecian un efecto
-    # enorme del ruido cuando eran un denominador casi nulo. El genetico se
-    # dibuja por tanto en unidades ABSOLUTAS, que es lo que tiene sentido para
-    # un optimizador cuyo resultado es un punto.
+    # For a genetic optimizer, sigma is the spread of an ALREADY CONVERGED
+    # population: a tiny quantity that only measures how tightly the
+    # individuals clustered. Dividing by it produces shifts of 5 or 9 sigmas
+    # that mean nothing — they showed up in the first run and looked like a
+    # huge noise effect when they were a near-zero denominator. The genetic
+    # optimizer is therefore drawn in ABSOLUTE units, which is what makes
+    # sense for an optimizer whose result is a point.
     def _is_genetic(method: str) -> bool:
-        """True si la etiqueta del metodo corresponde al genetico (CGA o QGA)."""
+        """True if the method label belongs to the genetic family (CGA or QGA)."""
         m = (method or '').upper()
         return m.startswith('CGA') or m.startswith('QGA')
 
@@ -1512,21 +1518,21 @@ def generate_noise_comparison_plots(master_dir: str,
                     and keep(r['method'])]
             if not pool:
                 continue
-            # [B-GRID] Una figura por RESOLUCION. Mezclar nqpp distintos en un
-            # mismo eje de ruido convierte un recorte de techo en lo que parece
-            # un efecto del ruido.
+            # [B-GRID] One figure per RESOLUTION. Mixing different nqpp on the
+            # same noise axis turns a ceiling clamp into what looks like a
+            # noise effect.
             grids = sorted({r['grid'] for r in pool})
-            # Con una sola resolucion no hay nada que separar: el nombre y el
-            # titulo se quedan como antes, para no romper referencias previas.
+            # With a single resolution there is nothing to split: the name and
+            # the title stay as before, so as not to break earlier references.
             split = len(grids) > 1
             for g in grids:
                 sub = [r for r in pool if r['grid'] == g]
-                # Solo tiene sentido comparar si esa resolucion existe en mas
-                # de un peldano; si el techo la recorto en los ruidosos, no hay
-                # comparacion que hacer y dibujarla enganaria.
+                # Comparing only makes sense if that resolution exists in more
+                # than one rung; if the ceiling clamped it in the noisy ones,
+                # there is no comparison to make and drawing it would mislead.
                 if len({r['noise'] for r in sub}) < 2:
-                    print(f"  . {model} [{kind}] {g or 'sin-grid'}: solo "
-                          f"1 peldano de ruido, no hay comparacion (omitida)")
+                    print(f"  . {model} [{kind}] {g or 'no-grid'}: only "
+                          f"1 noise rung, no comparison (skipped)")
                     continue
                 gsuf = f"{suffix}_{g}" if (split and g) else suffix
                 label = f"{model} ({g})" if (split and g) else model
@@ -1542,21 +1548,21 @@ def generate_noise_comparison_plots(master_dir: str,
 
 def _one_noise_figure(model, rows, levels, outdir, suffix, pull, np, plt,
                       title_label=None):
-    """Dibuja UNA figura de comparacion de ruido.
+    """Draw ONE noise comparison figure.
 
     Args:
-        model: nombre del modelo.
-        rows: registros de un solo pipeline (samplers o genetico).
-        levels: peldanos de ruido, ya ordenados.
-        outdir: carpeta de salida.
-        suffix: sufijo del nombre de archivo ('' o '_genetic').
-        pull: True para dibujar el desplazamiento en unidades de sigma (solo
-            tiene sentido cuando sigma es la anchura de un posterior); False
-            para valores absolutos (genetico).
-        np, plt: modulos ya importados por el llamador.
+        model: model name.
+        rows: records of a single pipeline (samplers or genetic).
+        levels: noise rungs, already sorted.
+        outdir: output folder.
+        suffix: file name suffix ('' or '_genetic').
+        pull: True to draw the shift in units of sigma (only meaningful when
+            sigma is the width of a posterior); False for absolute values
+            (genetic).
+        np, plt: modules already imported by the caller.
 
     Returns:
-        Ruta de la figura, o cadena vacia si no habia nada que dibujar.
+        Path of the figure, or empty string if there was nothing to draw.
     """
     if True:
         params, seen = [], set()
@@ -1567,7 +1573,7 @@ def _one_noise_figure(model, rows, levels, outdir, suffix, pull, np, plt,
         if not params or not methods:
             return ""
 
-        # Metrica de calidad: la KL si el modelo la produce (QVMC), si no chi2.
+        # Quality metric: the KL if the model produces it (QVMC), else chi2.
         has_kl = any(r['final_KL'] == r['final_KL'] for r in rows)
         metric, mlabel = (('final_KL', 'final KL (lower = better fit)')
                           if has_kl else ('chi2_red', r'reduced $\chi^2$'))
@@ -1582,8 +1588,8 @@ def _one_noise_figure(model, rows, levels, outdir, suffix, pull, np, plt,
             ax.set_visible(False)
 
         x = np.arange(len(levels))
-        # Color y marcador por metodo, fijos en todos los paneles: la identidad
-        # nunca depende solo del color.
+        # Color and marker per method, fixed across all panels: identity never
+        # depends on color alone.
         cyc = ['#1f77b4', '#d62728', '#ff7f0e', '#2ca02c', '#9467bd',
                '#17becf', '#8c564b', '#e377c2']
         mks = ['o', 's', '^', 'D', 'v', 'P', 'X', '*']
@@ -1591,16 +1597,16 @@ def _one_noise_figure(model, rows, levels, outdir, suffix, pull, np, plt,
                  for i, m in enumerate(methods)}
 
         def series(method, key, sub=None):
-            """Serie (valor, error) de un metodo a lo largo del eje de ruido.
+            """(value, error) series of a method along the noise axis.
 
             Args:
-                method: nombre del metodo.
-                key: clave de la magnitud a extraer.
-                sub: subindice del parametro dentro de la clave. Por defecto
+                method: method name.
+                key: key of the quantity to extract.
+                sub: parameter name to select within the key. Default
                     None.
 
             Returns:
-                Ver la descripcion de arriba.
+                See the description above.
             """
             ys, es = [], []
             for lvl in levels:
@@ -1612,20 +1618,20 @@ def _one_noise_figure(model, rows, levels, outdir, suffix, pull, np, plt,
                           else float('nan'))
             return np.array(ys, float), np.array(es, float)
 
-        # [PLOT-NOISE] Los paneles de parametro muestran el DESPLAZAMIENTO en
-        # unidades de sigma respecto al peldano ideal, no el valor absoluto.
+        # [PLOT-NOISE] The parameter panels show the SHIFT in units of sigma
+        # relative to the ideal rung, not the absolute value.
         #
-        # Con el valor absoluto la barra de sigma del posterior (~0.016 en Om)
-        # es un orden de magnitud mayor que lo que el ruido mueve la media
-        # (~0.002), asi que todas las lineas se aplastan en una banda comun y
-        # la figura no distingue un rung de otro. La pregunta real no es
-        # "cuanto vale Om" — eso ya esta en los corner plots — sino "cuanto lo
-        # movio el ruido comparado con lo que el metodo sabe de el". Eso es
-        # exactamente (mean - mean_ideal) / sigma_ideal.
+        # With the absolute value the posterior's sigma bar (~0.016 in Om) is
+        # an order of magnitude larger than what noise moves the mean
+        # (~0.002), so all lines get squashed into a common band and the
+        # figure cannot tell one rung from another. The real question is not
+        # "what is Om" — that is already in the corner plots — but "how much
+        # did noise move it compared with what the method knows about it".
+        # That is exactly (mean - mean_ideal) / sigma_ideal.
         #
-        # La banda gris de +-1 sigma da la escala: una linea dentro de ella se
-        # movio menos que la propia incertidumbre del metodo, es decir, el
-        # ruido no la desplazo de forma detectable.
+        # The grey +-1 sigma band gives the scale: a line inside it moved less
+        # than the method's own uncertainty, i.e. noise did not shift it
+        # detectably.
         for j, p in enumerate(params):
             ax = flat[j]
             if pull:
@@ -1691,25 +1697,25 @@ def _one_noise_figure(model, rows, levels, outdir, suffix, pull, np, plt,
 def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
                                only_grid_methods: bool = False,
                                xlabel: str = 'nqpp',
-                               familia: Optional[str] = None,
-                               sufijo: str = '') -> List[str]:
+                               family: Optional[str] = None,
+                               suffix: str = '') -> List[str]:
     """Generate convergence_<model>.png and cost_<model>.png for each model with
     >=2 grid values. Returns the paths created. Does not raise if matplotlib is
 
     Args:
-        master_dir: carpeta raiz de la campana.
-        outdir: carpeta donde escribir la salida. Por defecto None.
-        only_grid_methods: restringir a los metodos que viven sobre la
-            rejilla. Por defecto False.
-        xlabel: etiqueta del eje x. Por defecto 'nqpp'.
-        familia: [B-NBITS] restringe a una familia de metodos: 'samplers'
-            (QMCMC/QVMC/clasicos) o 'genetic' (CGA/QGA). None dibuja todos,
-            que es lo que hacia antes y estaba MAL: el eje x del genetico es
-            n_bits (bits por gen) y el de los samplers es nqpp (qubits por
-            parametro de la rejilla). Son cantidades distintas y compartir
-            eje las hace incomparables. Por defecto None.
-        sufijo: se agrega al nombre del archivo para no pisar la figura de
-            la otra familia. Por defecto ''.
+        master_dir: root folder of the campaign.
+        outdir: folder to write the output to. Default None.
+        only_grid_methods: restrict to the methods that live on the grid.
+            Default False.
+        xlabel: x-axis label. Default 'nqpp'.
+        family: [B-NBITS] restricts to one family of methods: 'samplers'
+            (QMCMC/QVMC/classical) or 'genetic' (CGA/QGA). None draws all of
+            them, which is what it did before and was WRONG: the genetic x
+            axis is n_bits (bits per gene) and the samplers one is nqpp
+            (qubits per grid parameter). They are different quantities and
+            sharing an axis makes them incomparable. Default None.
+        suffix: appended to the file name so as not to overwrite the other
+            family's figure. Default ''.
 
     Returns:
         List[str]
@@ -1736,14 +1742,14 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
     models = sorted({r['model'] for r in records})
 
     def series(model, param):
-        """Agrupa los registros de un (modelo, parametro) por metodo y resolucion.
+        """Group the records of a (model, parameter) by method and resolution.
 
         Args:
-            model: modelo cosmologico (`cosmo_core.CosmoModel`).
-            param: nombre del parametro.
+            model: cosmological model (`cosmo_core.CosmoModel`).
+            param: parameter name.
 
         Returns:
-            Ver la descripcion de arriba.
+            See the description above.
         """
         from collections import defaultdict
         by = defaultdict(list)
@@ -1760,14 +1766,14 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
 
     made: List[str] = []
     for model in models:
-        # [B-NBITS] El eje x lo fijan SOLO los registros de la familia que se
-        # esta dibujando. Sin este filtro la figura del genetico heredaba los
-        # valores de nqpp de los samplers (p. ej. 2 y 3) y el eje salia de 2 a
-        # 5 con datos solo en 4 y 5 — media grafica vacia y una escala que no
-        # corresponde a ninguna de las dos familias.
+        # [B-NBITS] The x axis is set ONLY by the records of the family being
+        # drawn. Without this filter the genetic figure inherited the nqpp
+        # values of the samplers (e.g. 2 and 3) and the axis ran from 2 to 5
+        # with data only at 4 and 5 — half an empty plot and a scale that
+        # belongs to neither family.
         grids = sorted({r['grid'] for r in records if r['model'] == model
-                        and (not familia
-                             or _familia_de_metodo(r['method']) == familia)})
+                        and (not family
+                             or _method_family(r['method']) == family)})
         if len(grids) < 2:
             print(f"  . {model}: only {len(grids)} {xlabel} value(s); "
                   f"no convergence to plot (skipped).")
@@ -1790,7 +1796,7 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
             for method in sorted(series(model, param)):
                 if only_grid_methods and not _is_grid_method(method):
                     continue
-                if familia and _familia_de_metodo(method) != familia:
+                if family and _method_family(method) != family:
                     continue
                 g, m, s = series(model, param)[method]
                 col, mk, ls = style[method]
@@ -1833,7 +1839,7 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
                      fontsize=13, fontweight='bold')
         fig.tight_layout(rect=[0, 0, 1, 0.96])
         os.makedirs(outdir, exist_ok=True)
-        p1 = os.path.join(outdir, f'convergence_{model}{sufijo}.png')
+        p1 = os.path.join(outdir, f'convergence_{model}{suffix}.png')
         fig.savefig(p1, dpi=150, bbox_inches='tight')
         fig.savefig(p1.replace('.png', '.pdf'), bbox_inches='tight')
         plt.close(fig); made.append(p1)
@@ -1844,14 +1850,14 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
         for r in records:
             if r['model'] != model or np.isnan(r['time_s']):
                 continue
-            # [B-NBITS2] El MISMO filtro de familia que usa la figura de
-            # convergencia. Sin el, la figura de costo de los samplers
-            # dibujaba tambien las curvas del genetico —cuyo eje x es n_bits,
-            # no nqpp— sobre un eje etiquetado 'nqpp' y con los ticks puestos
-            # en los valores de la otra familia: los puntos del genetico caian
-            # a la derecha del ultimo tick, sin etiqueta. Es el mismo error
-            # que [B-NBITS] arreglo arriba, que aqui se habia quedado.
-            if familia and _familia_de_metodo(r['method']) != familia:
+            # [B-NBITS2] The SAME family filter the convergence figure uses.
+            # Without it, the samplers cost figure also drew the genetic
+            # curves —whose x axis is n_bits, not nqpp— on an axis labeled
+            # 'nqpp' with the ticks placed at the other family's values: the
+            # genetic points fell to the right of the last tick, unlabeled.
+            # It is the same error that [B-NBITS] fixed above, which had been
+            # left behind here.
+            if family and _method_family(r['method']) != family:
                 continue
             times[r['method']].append((r['grid'], r['time_s']))
         grids_rss = sorted([(g, v) for (mm, g), v in rss_map.items()
@@ -1877,10 +1883,10 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
             fig.suptitle(f'Cost vs resolution - model {model.upper()}',
                          fontsize=12, fontweight='bold')
             fig.tight_layout()
-            p2 = os.path.join(outdir, f'cost_{model}{sufijo}.png')
+            p2 = os.path.join(outdir, f'cost_{model}{suffix}.png')
             fig.savefig(p2, dpi=150, bbox_inches='tight')
-            # [B-PDF] Tambien en PDF, como la figura de convergencia de
-            # arriba. Faltaba solo aqui, y el paper necesita vectorial.
+            # [B-PDF] Also as PDF, like the convergence figure above. It was
+            # missing only here, and the paper needs vector graphics.
             fig.savefig(p2.replace('.png', '.pdf'), bbox_inches='tight')
             plt.close(fig); made.append(p2)
 
@@ -1894,7 +1900,7 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
 # =============================================================================
 
 def build_parser() -> argparse.ArgumentParser:
-    """Construye el parser de la linea de comandos del orquestador."""
+    """Build the orchestrator's command-line parser."""
     p = argparse.ArgumentParser(
         prog='cosmo_hpc_runner.py',
         description="Parallel orchestrator for the samplers and genetic "
@@ -1952,27 +1958,27 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Sweep n_bits from LO to HI (one genetic task per '
                         'value). The QGA analogue of --nqpp-sweep.')
 
-    # --- [NOISE] segundo eje de ablacion ---
+    # --- [NOISE] second ablation axis ---
     cnoise.add_noise_cli(p)
     p.add_argument('--proposal-route', type=str, default='auto',
                    choices=('auto', 'amplitude', 'counts'),
-                   help="ruta de lectura del motor de propuesta, reenviada a "
-                        "las tareas de samplers. Por defecto 'auto'.")
+                   help="readout route of the proposal engine, forwarded to "
+                        "the samplers tasks. Default 'auto'.")
     p.add_argument('--no-noise-control', action='store_true',
-                   help="NO generar la columna de control ideal-por-conteos "
-                        "al barrer ruido. Por defecto se genera: sin ella, "
-                        "comparar el peldano ideal (que lee amplitudes) "
-                        "contra los ruidosos (que leen conteos) mezcla el "
-                        "efecto del ruido con el del cambio de operador de "
-                        "lectura, y en la primera corrida del eje eso "
-                        "invirtio tres conclusiones.")
-    p.add_argument('--noise-sweep', type=str, default=None, metavar='LISTA',
-                   help="peldanos de ruido separados por comas, p. ej. "
-                        "'none,readout,full' o 'none,FakeBrisbane'. Genera "
-                        "una tarea por peldano, igual que --nqpp-sweep genera "
-                        "una por valor de nqpp: juntos producen la matriz "
-                        "bidimensional quantumness x ruido. Sustituye a "
-                        "--noise cuando se da.")
+                   help="Do NOT generate the ideal-by-counts control column "
+                        "when sweeping noise. It is generated by default: "
+                        "without it, comparing the ideal rung (which reads "
+                        "amplitudes) against the noisy ones (which read "
+                        "counts) mixes the effect of noise with that of the "
+                        "change of readout operator, and in the first run of "
+                        "the axis that inverted three conclusions.")
+    p.add_argument('--noise-sweep', type=str, default=None, metavar='LIST',
+                   help="comma-separated noise rungs, e.g. "
+                        "'none,readout,full' or 'none,FakeBrisbane'. Generates "
+                        "one task per rung, just as --nqpp-sweep generates "
+                        "one per nqpp value: together they produce the "
+                        "two-dimensional quantumness x noise matrix. Replaces "
+                        "--noise when given.")
 
     # --- shared ---
     p.add_argument('--max-qubits', type=int, default=None, metavar='N',
@@ -1993,14 +1999,14 @@ def build_parser() -> argparse.ArgumentParser:
                         'number only to be more conservative.')
     p.add_argument('--noisy-task-hours', type=float,
                    default=cnoise.DEFAULT_NOISY_TASK_HOURS, metavar='H',
-                   help='[B-TIME] Presupuesto de reloj por tarea GENETICA con '
-                        'ruido, en horas (por defecto %(default)s). Al QGA con '
-                        'matriz de densidad no lo frena la RAM sino el tiempo: '
-                        'crece x4.4 por qubit (medido: 73 s/gen a 10 q, '
-                        '1425 s/gen a 12 q, ~7.7 h/gen a 14 q). De este '
-                        'presupuesto y de --generations sale el techo de '
-                        'qubits del eje de ruido en el genetico. Subirlo '
-                        'admite celdas mas anchas y mas lentas.')
+                   help='[B-TIME] Wall-clock budget per noisy GENETIC task, '
+                        'in hours (default %(default)s). The density-matrix '
+                        'QGA is held back by time, not RAM: it grows x4.4 per '
+                        'qubit (measured: 73 s/gen at 10 q, 1425 s/gen at '
+                        '12 q, ~7.7 h/gen at 14 q). This budget and '
+                        '--generations set the noise-axis qubit ceiling of '
+                        'the genetic pipeline. Raising it admits wider and '
+                        'slower cells.')
     p.add_argument('--max-task-gb', type=float, default=None,
                    help='Max RAM per task for the clamp (default: the aggregate '
                         'budget). Together with --max-qubits it sets the '
@@ -2010,7 +2016,7 @@ def build_parser() -> argparse.ArgumentParser:
                         'SKIPPED instead of having their grid lowered.')
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--gpu-check', action='store_true',
-                   help='imprime por que la GPU esta o no disponible y sale, sin correr nada. Util en una HPC nueva: --gpu degrada a CPU cuando Aer no expone GPU, y sin este chequeo eso solo se nota por el tiempo de pared.')
+                   help='print why the GPU is or is not available and exit, without running anything. Useful on a new HPC: --gpu degrades to CPU when Aer does not expose a GPU, and without this check that is only noticeable from the wall time.')
     p.add_argument('--gpu', action='store_true',
                    help='Pass --gpu to each child (a single GPU is shared: mind '
                         'the concurrency)')
@@ -2035,10 +2041,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    """Punto de entrada: planifica la campana, la ejecuta y genera las figuras.
+    """Entry point: plans the campaign, runs it and generates the figures.
 
     Returns:
-        Codigo de salida del proceso (0 si todo fue bien).
+        Process exit code (0 if everything went well).
     """
     args = build_parser().parse_args()
     args.profile = not args.no_profile
@@ -2050,10 +2056,10 @@ def main() -> int:
             return 2
         made = generate_convergence_plots(
             args.plot_only, only_grid_methods=args.only_grid_methods,
-            xlabel='nqpp', familia='samplers')
+            xlabel='nqpp', family='samplers')
         made += generate_convergence_plots(
             args.plot_only, only_grid_methods=args.only_grid_methods,
-            xlabel='n_bits', familia='genetic', sufijo='_genetico')
+            xlabel='n_bits', family='genetic', suffix='_genetic')
         if not made:
             print("Nothing to plot: you need >=2 grid values per model "
                   "(run a sweep with --nqpp-sweep).")
@@ -2076,7 +2082,7 @@ def main() -> int:
     if args.mem_budget_gb:
         mem_budget_mb = args.mem_budget_gb * 1024
     elif _PSUTIL:
-        # [B-CGROUP] Limite del contenedor si lo hay; si no, la RAM del nodo.
+        # [B-CGROUP] Container limit if there is one; otherwise the node's RAM.
         mem_budget_mb = detected_memory_mb() * 0.85
     else:
         mem_budget_mb = 125 * 1024 * 0.85
@@ -2091,9 +2097,9 @@ def main() -> int:
     # or, if not given, the aggregate budget as a single-task cap).
     task_mem_ceiling = (args.max_task_gb * 1024 if args.max_task_gb
                         else mem_budget_mb)
-    # [B-MEM] El techo de samplers depende del dataset: con CC+BAO (51 puntos)
-    # un estado cuesta 14 kB y con CC+BAO+Pantheon (1099) cuesta 74 kB, asi que
-    # el mismo --max-task-gb concede ~2 qubits menos en el segundo caso.
+    # [B-MEM] The samplers ceiling depends on the dataset: with CC+BAO (51
+    # points) a state costs 14 kB and with CC+BAO+Pantheon (1099) it costs
+    # 74 kB, so the same --max-task-gb grants ~2 fewer qubits in the latter.
     plan_n_data = dataset_n_data(getattr(args, 'dataset', None))
     q_ceiling = qubit_ceiling(args.max_qubits, task_mem_ceiling, 'nqpp',
                               n_data=plan_n_data)
@@ -2103,27 +2109,27 @@ def main() -> int:
     q_ceiling_genetic = qubit_ceiling(args.max_qubits_genetic,
                                       task_mem_ceiling, 'n_bits')
 
-    # [NOISE] Peldanos pedidos, y sus techos PROPIOS. Los techos ruidosos se
-    # calculan con el modelo de memoria de la matriz de densidad y ademas
-    # quedan acotados por MAX_NOISY_QUBITS, que es un limite de TIEMPO y no se
-    # relaja con mas RAM.
+    # [NOISE] Requested rungs, and their OWN ceilings. The noisy ceilings are
+    # computed with the density-matrix memory model and are also bounded by
+    # MAX_NOISY_QUBITS, which is a TIME limit and does not relax with more
+    # RAM.
     if args.noise_sweep:
         noise_levels = [cnoise.canonical_level(s)
                         for s in args.noise_sweep.split(',') if s.strip()]
     else:
         noise_levels = [cnoise.canonical_level(args.noise)]
-    # Validar temprano: un nombre de backend mal escrito debe fallar aqui, no
-    # a mitad de una campana de horas.
+    # Validate early: a misspelled backend name must fail here, not halfway
+    # through a campaign that takes hours.
     for lvl in noise_levels:
         cnoise.NoiseSpec.from_level(lvl)
     any_noisy = any(lvl != 'none' for lvl in noise_levels)
 
     noisy_q_ceiling = qubit_ceiling(args.max_qubits, task_mem_ceiling,
                                     'nqpp', noisy=True, n_data=plan_n_data)
-    # [B-TIME] El genetico ruidoso lo acota el RELOJ, no la RAM: a 14 qubits
-    # una rho son 4.3 GB (caben) pero ~7.7 h por generacion (no caben en
-    # ninguna campana). El techo sale del presupuesto por tarea y de cuantas
-    # generaciones se pidieron.
+    # [B-TIME] The noisy genetic optimizer is bounded by the CLOCK, not the
+    # RAM: at 14 qubits a rho is 4.3 GB (fits) but ~7.7 h per generation
+    # (fits in no campaign). The ceiling follows from the per-task budget and
+    # from how many generations were requested.
     noisy_q_ceiling_genetic = qubit_ceiling(
         args.max_qubits_genetic, task_mem_ceiling, 'n_bits', noisy=True,
         generations=args.generations, budget_hours=args.noisy_task_hours)
@@ -2159,25 +2165,25 @@ def main() -> int:
     # [AUTO] Report WHY each ceiling is what it is: derived purely from
     # detected RAM (the default, no flag needed), or lowered by an explicit
     # user override.
-    # [B-BUDGETMISMATCH] Un --max-task-gb mayor que --mem-budget-gb es una
-    # contradiccion silenciosa. El planificador acota los qubits con el primero,
-    # pero el pool admite SIEMPRE al menos una tarea aunque no quepa en el
-    # presupuesto agregado (si no, una tarea mas grande que el presupuesto
-    # bloquearia la campana para siempre). O sea que con esta combinacion se
-    # puede lanzar una tarea que excede el presupuesto entero, y la unica senal
-    # seria un OOMKill horas despues.
+    # [B-BUDGETMISMATCH] A --max-task-gb larger than --mem-budget-gb is a
+    # silent contradiction. The planner bounds the qubits with the former, but
+    # the pool ALWAYS admits at least one task even if it does not fit in the
+    # aggregate budget (otherwise a task larger than the budget would block
+    # the campaign forever). So with this combination a task exceeding the
+    # whole budget can be launched, and the only signal would be an OOMKill
+    # hours later.
     #
-    # Medido: --max-task-gb 40 --mem-budget-gb 10 con CC+BAO+Pantheon concedia
-    # 18 qubits, que son ~22 GB para UNA tarea, contra un presupuesto de 10.
+    # Measured: --max-task-gb 40 --mem-budget-gb 10 with CC+BAO+Pantheon
+    # granted 18 qubits, i.e. ~22 GB for ONE task, against a budget of 10.
     if args.max_task_gb and args.max_task_gb * 1024 > mem_budget_mb:
-        print(f"\n  !! AVISO: --max-task-gb ({args.max_task_gb:.0f} GB) es MAYOR "
-              f"que el presupuesto agregado ({mem_budget_mb/1024:.0f} GB).\n"
-              f"     El techo de qubits sale de --max-task-gb, pero el pool "
-              f"admite siempre al menos\n"
-              f"     una tarea aunque no quepa en el presupuesto: puedes lanzar "
-              f"una tarea que se\n"
-              f"     salga y acabar en un OOMKill. Baja --max-task-gb a "
-              f"{mem_budget_mb/1024:.0f} GB o menos, o sube --mem-budget-gb.\n")
+        print(f"\n  !! WARNING: --max-task-gb ({args.max_task_gb:.0f} GB) is LARGER "
+              f"than the aggregate budget ({mem_budget_mb/1024:.0f} GB).\n"
+              f"     The qubit ceiling comes from --max-task-gb, but the pool "
+              f"always admits at least\n"
+              f"     one task even if it does not fit in the budget: you may "
+              f"launch a task that\n"
+              f"     overflows it and end in an OOMKill. Lower --max-task-gb to "
+              f"{mem_budget_mb/1024:.0f} GB or less, or raise --mem-budget-gb.\n")
 
     src_s = (f"user override --max-qubits={args.max_qubits}"
              if args.max_qubits is not None else
@@ -2195,23 +2201,23 @@ def main() -> int:
               f"    ({task_mem_ceiling/1024:.0f} GB available -> "
               f"{qubits_fitting_in(task_mem_ceiling, 'n_bits')}q fit at "
               f"{BYTES_PER_STATE_GENETIC} B/state)")
-    # [NOISE] Reportar el eje y POR QUE su techo es distinto: no lo fija la
-    # RAM sino el tiempo de simulacion con matriz de densidad.
+    # [NOISE] Report the axis and WHY its ceiling is different: it is not set
+    # by RAM alone but by the density-matrix simulation cost.
     if any_noisy:
-        print(f"Eje de ruido: {', '.join(noise_levels)}")
+        print(f"Noise axis: {', '.join(noise_levels)}")
         f_s = cnoise.param_shift_batch_factor(max(noisy_q_ceiling, 1))
-        print(f"    techo con ruido (derivado de la RAM, no una constante):")
-        print(f"      samplers  {noisy_q_ceiling}q  -- lo fija el LOTE de "
-              f"parameter-shift del entrenamiento cuantico del QVMC "
+        print(f"    noisy ceiling (derived from RAM, not a constant):")
+        print(f"      samplers  {noisy_q_ceiling}q  -- set by the "
+              f"parameter-shift BATCH of QVMC quantum training "
               f"({f_s}x rho = "
               f"{cnoise.noisy_density_bytes(noisy_q_ceiling, f_s)/2**30:.0f} "
-              f"GB), no rho suelta "
+              f"GB), not a single rho "
               f"({cnoise.noisy_density_bytes(noisy_q_ceiling)/2**30:.2f} GB)")
-        print(f"      genetico  {noisy_q_ceiling_genetic}q  -- una rho por "
-              f"operador, sin lote")
-        print(f"      QMCMC no aparece: su motor usa max(2,d) qubits (2-4) y "
-              f"la aceptacion 1, asi que nqpp no toca sus circuitos y el "
-              f"ruido le sale gratis a cualquier resolucion.")
+        print(f"      genetic   {noisy_q_ceiling_genetic}q  -- one rho per "
+              f"operator, no batch")
+        print(f"      QMCMC is not listed: its engine uses max(2,d) qubits "
+              f"(2-4) and the acceptance 1, so nqpp does not touch its "
+              f"circuits and noise comes free at any resolution.")
     print(f"Split: J={J} processes x T={T} threads = {J*T} cores "
           f"(of {args.total_cores})")
     print(f"Master folder: {master_dir}")
@@ -2245,17 +2251,18 @@ def main() -> int:
     # --- convergence plots at the end of ALL the runs ---
     if not args.no_plots:
         print("\nGenerating convergence plots...")
-        # [B-NBITS] Dos figuras, una por familia: el eje x del genetico es
-        # n_bits y el de los samplers es nqpp, y mezclarlos en un solo eje
-        # etiquetado 'nqpp' ponia lado a lado dos cantidades distintas.
+        # [B-NBITS] Two figures, one per family: the genetic x axis is n_bits
+        # and the samplers one is nqpp, and mixing them on a single axis
+        # labeled 'nqpp' put two different quantities side by side.
         generate_convergence_plots(
             master_dir, only_grid_methods=args.only_grid_methods,
-            xlabel='nqpp', familia='samplers')
+            xlabel='nqpp', family='samplers')
         generate_convergence_plots(
             master_dir, only_grid_methods=args.only_grid_methods,
-            xlabel='n_bits', familia='genetic', sufijo='_genetico')
-        # [PLOT-NOISE] Solo produce algo si hubo mas de un peldano; con una
-        # corrida ideal se salta sola y no ensucia la carpeta.
+            xlabel='n_bits', family='genetic', suffix='_genetic')
+        # [PLOT-NOISE] Only produces something if there was more than one
+        # rung; with an ideal run it skips itself and does not clutter the
+        # folder.
         if any_noisy or len(noise_levels) > 1:
             print("\nGenerating noise-comparison plots...")
             generate_noise_comparison_plots(master_dir)

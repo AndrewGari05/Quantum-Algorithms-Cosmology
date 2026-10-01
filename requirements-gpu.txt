@@ -1,26 +1,26 @@
 # ============================================================================
-# EXTRAS GPU
+# GPU EXTRAS
 # ============================================================================
-# [B-GPU] LEE ESTO ANTES DE INSTALAR.
+# [B-GPU] READ THIS BEFORE INSTALLING.
 #
-# Estos paquetes por si solos NO habilitan la GPU. La rueda `qiskit-aer` que
-# instala requirements.txt desde PyPI esta compilada SOLO PARA CPU: poner
-# cuQuantum a su lado no la convierte en una version con GPU. Aer tiene que
-# estar CONSTRUIDA con soporte CUDA (la rueda con GPU que publica el propio
-# proyecto Aer, o compilarlo con AER_THRUST_BACKEND=CUDA).
+# These packages on their own do NOT enable the GPU. The `qiskit-aer` wheel
+# that requirements.txt installs from PyPI is compiled FOR CPU ONLY: putting
+# cuQuantum next to it does not turn it into a GPU build. Aer has to be BUILT
+# with CUDA support (the GPU wheel published by the Aer project itself, or a
+# build with AER_THRUST_BACKEND=CUDA).
 #
-# Si no, `--gpu` degrada a CPU. Antes lo hacia en SILENCIO — la corrida
-# terminaba, los numeros salian bien, y solo el tiempo de pared delataba que no
-# se habia usado el acelerador. Ahora avisa y explica por que.
+# Otherwise `--gpu` falls back to CPU. It used to do so SILENTLY — the run
+# finished, the numbers came out right, and only the wall-clock time revealed
+# that the accelerator had not been used. Now it warns and explains why.
 #
-# Comprueba en cualquier nodo nuevo ANTES de lanzar una corrida larga:
+# On any new node, check BEFORE launching a long run:
 #
 #     python cosmo_hpc_runner.py --gpu-check
 #
-# Te dira que dispositivos declara Aer, que paquetes hay instalados y si
-# nvidia-smi ve una tarjeta. Consulta la documentacion de qiskit-aer para saber
-# que rueda con GPU corresponde a la version 0.17.x antes de instalar nada: el
-# nombre y la disponibilidad han cambiado entre versiones.
+# It will tell you which devices Aer declares, which packages are installed and
+# whether nvidia-smi sees a card. Check the qiskit-aer documentation to find out
+# which GPU wheel matches version 0.17.x before installing anything: the name
+# and availability have changed between versions.
 # ============================================================================
 
 # =============================================================================

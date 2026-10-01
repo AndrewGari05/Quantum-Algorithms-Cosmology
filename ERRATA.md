@@ -15,6 +15,15 @@ changes numbers that were already computed.
   reproduces the reference set bit for bit.
 * Every fix has a regression test in `tests/test_errata.py` that fails on
   `v0.8.1-thesis` and passes after the fix.
+* Since errata(11) the code is in English (numbers bit-identical). Renamed
+  scripts: `comparar_algoritmos.py` → `compare_algorithms.py`,
+  `comparar_semillas.py` → `compare_seeds.py`, `graficas_ruido.py` →
+  `noise_plots.py`, `triage_campana.py` → `triage_campaign.py`,
+  `rehacer_todo.sh` → `rebuild_all.sh`; flags `--salida` → `--out`,
+  `--peldano` → `--rung`. New runs write `results_config.csv` and
+  `results_all_models.csv`; every reader also accepts the legacy names
+  (`resultados_config.csv`, `resultados_TODOS_los_modelos.csv`) of campaigns
+  already on disk. Legacy names quoted below describe those older files.
 
 ## 1. Fixes that change results
 

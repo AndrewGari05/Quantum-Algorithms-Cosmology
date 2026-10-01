@@ -40,7 +40,7 @@
         an OVERLAY option that superimposes the genetic MAP + final spread
         on top of the MCMC/VI corner plots (reusing `plot_corner_multi`).
 
- [CSV]  The MAP and its final χ² are appended to `resultados_config.csv`
+ [CSV]  The MAP and its final χ² are appended to `results_config.csv`
         under "Method" = "CGA" / "QGA (q=NN%)", matching the schema written
         by `lcdm_quantum_samplers_personal.py` so all runs share one table.
 
@@ -96,43 +96,43 @@ from cosmo_core import (MODELS, Posterior, fit_statistics, fmt_theta,
 # AerSimulator is built through make_simulator honoring this flag.
 USE_GPU = False
 
-# [ANIM] Formatos de la animacion del genetico, fijados por main() desde --anim.
-# Mismo patron que USE_GPU: un global que toda ruta de figuras consulta, para no
-# arrastrar el parametro por cinco firmas.
-#   ()            -> no animar
-#   ('gif',)      -> GIF (por defecto: no necesita ffmpeg y se pega en slides)
-#   ('gif','mp4') -> ambos
+# [ANIM] Formats of the genetic animation, set by main() from --anim.
+# Same pattern as USE_GPU: a global that every figure path consults, so the
+# parameter does not have to be dragged through five signatures.
+#   ()            -> no animation
+#   ('gif',)      -> GIF (default: needs no ffmpeg and drops into slides)
+#   ('gif','mp4') -> both
 ANIM_FORMATS: Sequence[str] = ('gif',)
 
-# [B-OVERLAP] Disposicion de la animacion: 'overlay' o 'facets'.
+# [B-OVERLAP] Animation layout: 'overlay' or 'facets'.
 ANIM_LAYOUT: str = 'overlay'
 
 # =============================================================================
-#  [NOISE] Segundo eje de ablacion — nivel de ruido del modulo.
+#  [NOISE] Second ablation axis — the module's noise level.
 # =============================================================================
 #
-#  El QGA es el metodo mas facil de llevar al eje de ruido, y no por casualidad:
-#  ya opera al 100% por MEDICION. Sus tres operadores cuanticos leen
-#  `result.get_memory(...)` — cadenas de bits medidas — y no tocan una sola
-#  amplitud. Por eso aqui no hay ninguna conversion de lectura que hacer: basta
-#  con entregarle a Aer el modelo de ruido y el propio simulador aplica el canal
-#  de compuertas y el de lectura donde corresponde.
+#  The QGA is the easiest method to bring onto the noise axis, and not by
+#  chance: it already operates 100% by MEASUREMENT. Its three quantum operators
+#  read `result.get_memory(...)` — measured bit strings — and never touch a
+#  single amplitude. So there is no readout conversion to do here: it is enough
+#  to hand Aer the noise model and the simulator itself applies the gate
+#  channel and the readout channel where they belong.
 #
-#  Consecuencia para la interpretacion de la escalera: el error de lectura
-#  voltea bits medidos, que es casi indistinguible de mutacion adicional. Es la
-#  razon estructural por la que cabe esperar que el QGA sea el metodo mas
-#  robusto del eje — pero es una hipotesis a medir, no un resultado.
+#  Consequence for interpreting the ladder: readout error flips measured bits,
+#  which is almost indistinguishable from extra mutation. That is the
+#  structural reason to expect the QGA to be the most robust method on the
+#  axis — but it is a hypothesis to measure, not a result.
 NOISE: "cnoise.NoiseSpec" = cnoise.NoiseSpec.from_level('none')
 
 
 def set_noise(spec: "cnoise.NoiseSpec") -> None:
-    """Fija el peldano de ruido del modulo.
+    """Set the module's noise rung.
 
-    Debe llamarse ANTES de construir cualquier QGA: el simulador se crea en
-    `__init__` y los circuitos se transpilan una sola vez contra el.
+    Must be called BEFORE building any QGA: the simulator is created in
+    `__init__` and the circuits are transpiled against it only once.
 
     Args:
-        spec: peldano del eje, de `cosmo_noise.NoiseSpec`.
+        spec: axis rung, from `cosmo_noise.NoiseSpec`.
     """
     global NOISE
     NOISE = spec
@@ -152,10 +152,10 @@ def _transpile_for(qga, qc, **kwargs):
 
 
 def _qga_sim():
-    """AerSimulator del peldano de ruido actual, para la ruta por medicion.
+    """AerSimulator for the current noise rung, for the measurement route.
 
-    `counts_route=True` porque los circuitos del QGA MIDEN: Aer aplica el
-    canal de lectura por si mismo y no debe volver a aplicarse en cerrado.
+    `counts_route=True` because the QGA circuits MEASURE: Aer applies the
+    readout channel by itself and it must not be applied again in closed form.
     """
     return make_simulator(prefer_gpu=USE_GPU,
                           **NOISE.simulator_kwargs(counts_route=True))
@@ -173,8 +173,8 @@ C_QUANTUM2  = '#ff7f0e'   # orange — QVMC
 C_GENETIC  = '#2ca02c'    # green  — CGA (classical genetic)
 C_GENETIC2 = '#9467bd'    # purple — QGA (quantum genetic)
 
-# [B-OVERLAP] Estilos de linea para series que se solapan. Nombrados (no
-# tuplas) porque las colecciones de contorno de matplotlib exigen nombres.
+# [B-OVERLAP] Line styles for overlapping series. Named (not tuples)
+# because matplotlib contour collections require names.
 _LS_CYCLE = ['solid', 'dashed', 'dashdot', 'dotted', (0, (3, 1, 1, 1))]
 
 
@@ -210,11 +210,12 @@ def ensure_interactive_backend() -> bool:
     backend = matplotlib.get_backend().lower()
 
     def _works() -> bool:
-        """True si matplotlib puede abrir de verdad una ventana.
+        """True if matplotlib can really open a window.
 
-        No basta con mirar variables de entorno: en un nodo de HPC pueden estar
-        puestas y no haber servidor grafico. Se abre una figura de 1x1 y se
-        cierra; si el toolkit falta o no hay display, levanta y devolvemos False.
+        Looking at environment variables is not enough: on an HPC node they may
+        be set with no graphics server. A 1x1 figure is opened and closed; if
+        the toolkit is missing or there is no display, it raises and we return
+        False.
         """
         # A real smoke test: open a 1x1 figure and close it. If the toolkit is
         # missing or there is no display, this raises and we move on.
@@ -371,14 +372,14 @@ def compute_qga_quantumness(config: dict) -> float:
     """QGA ablation index: 100 · (#quantum operators)/3 (uniform weighting).
 
     Args:
-        config: que componentes del algoritmo son cuanticos.
+        config: which components of the algorithm are quantum.
 
     Returns:
         float
     Examples:
-        Tres operadores conmutables, asi que los peldanos son 0, 33, 67 y
-        100 %. El de 0 % es la celda FAITHFUL: debe reproducir al CGA bit a
-        bit, y eso es un test de correccion falsable, no una expectativa.
+        Three switchable operators, so the rungs are 0, 33, 67 and 100 %.
+        The 0 % one is the FAITHFUL cell: it must reproduce the CGA bit for
+        bit, and that is a falsifiable correctness test, not an expectation.
 
         >>> compute_qga_quantumness({})
         0.0
@@ -397,7 +398,7 @@ def legacy_qga_weighted_index(config: dict) -> float:
     """Historical hand-weighted QGA index (heuristic; CSV continuity only).
 
     Args:
-        config: que componentes del algoritmo son cuanticos.
+        config: which components of the algorithm are quantum.
 
     Returns:
         float
@@ -463,12 +464,12 @@ class GeneticBase:
 
     def __init__(self, post: Posterior, ga: GAConfig,
                  rng: Optional[np.random.Generator] = None):
-        """Algoritmo genetico clasico sobre el posterior.
+        """Classical genetic algorithm over the posterior.
 
         Args:
-            post: posterior objetivo.
-            ga: hiperparametros (poblacion, generaciones, elitismo, mutacion).
-            rng: generador ya sembrado; None crea uno con `ga.seed`.
+            post: target posterior.
+            ga: hyper-parameters (population, generations, elitism, mutation).
+            rng: already-seeded generator; None creates one with `ga.seed`.
         """
         self.post = post
         self.model = post.model
@@ -498,7 +499,7 @@ class GeneticBase:
         naturally purged by selection.
 
         Args:
-            pop: poblacion actual, de forma (P, d).
+            pop: current population, of shape (P, d).
 
         Returns:
             np.ndarray
@@ -536,9 +537,9 @@ class GeneticBase:
         highest fitness. Fully vectorized — no Python loop over individuals.
 
         Args:
-            pop: poblacion actual, de forma (P, d).
-            fit: log-posterior de cada individuo de la poblacion.
-            n: tamano de la muestra o del torneo.
+            pop: current population, of shape (P, d).
+            fit: log-posterior of each individual in the population.
+            n: number of parents to select.
 
         Returns:
             np.ndarray
@@ -560,8 +561,8 @@ class GeneticBase:
         once.
 
         Args:
-            parents_a: primer conjunto de padres.
-            parents_b: segundo conjunto de padres.
+            parents_a: first set of parents.
+            parents_b: second set of parents.
 
         Returns:
             np.ndarray
@@ -578,7 +579,7 @@ class GeneticBase:
         """Per-gene Gaussian mutation scaled by each box width, vectorized.
 
         Args:
-            pop: poblacion actual, de forma (P, d).
+            pop: current population, of shape (P, d).
 
         Returns:
             np.ndarray
@@ -607,15 +608,16 @@ class GAResult:
     Attributes:
         method: 'CGA' or 'QGA'.
         quantumness: 0–100 % (0 for CGA).
-        theta_map: MAP tras el refinamiento local continuo. Es lo comparable
-            contra los samplers, pero [B-REFINE] NO distingue un rung de otro:
-            el refinador converge al mismo minimo desde cualquier celda.
-        chi2_map: χ² en `theta_map` (refinado).
-        stats: dict completo de `fit_statistics` en el MAP (χ², χ²_red, AIC, BIC…).
-        theta_grid: [B-REFINE] mejor individuo de la REJILLA, SIN refinar. Es lo
-            que el genetico encontro de verdad, y el unico de los dos que
-            distingue los peldanos de la escalera.
-        chi2_grid: χ² en `theta_grid`.
+        theta_map: MAP after the continuous local refinement. It is what is
+            comparable against the samplers, but [B-REFINE] it does NOT tell one
+            rung from another: the refiner converges to the same minimum from
+            any cell.
+        chi2_map: χ² at `theta_map` (refined).
+        stats: full `fit_statistics` dict at the MAP (χ², χ²_red, AIC, BIC…).
+        theta_grid: [B-REFINE] best individual on the GRID, NOT refined. It is
+            what the genetic algorithm actually found, and the only one of the
+            two that tells the ladder rungs apart.
+        chi2_grid: χ² at `theta_grid`.
         final_pop: (P, d) last-generation population.
         final_fit: (P,) log-posterior fitness of the last population.
         final_weights: (P,) normalized fitness weights (for weighted corner).
@@ -623,9 +625,9 @@ class GAResult:
         elapsed: wall-clock seconds.
         config: the quantum-component config (QGA) or {} (CGA).
         label: human-readable label used in legends and the CSV.
-        pop_history: [ANIM] poblacion completa por generacion, para animar la
-            convergencia. Vacia si se corrio con record_population=False.
-        fit_history: [ANIM] log-posterior por individuo y generacion.
+        pop_history: [ANIM] full population per generation, to animate the
+            convergence. Empty if run with record_population=False.
+        fit_history: [ANIM] log-posterior per individual and generation.
     """
     method: str
     quantumness: float
@@ -641,14 +643,14 @@ class GAResult:
     label: str = ''
     pop_history: List[np.ndarray] = field(default_factory=list)
     fit_history: List[np.ndarray] = field(default_factory=list)
-    # [B-REFINE] Al final y con valor por defecto para no romper ningun
-    # constructor existente. `None` significa "no se registro", y entonces se
-    # cae al MAP refinado, que es lo unico disponible.
+    # [B-REFINE] Last and with a default value so as not to break any existing
+    # constructor. `None` means "not recorded", and then it falls back to the
+    # refined MAP, which is the only thing available.
     theta_grid: Optional[np.ndarray] = None
     chi2_grid: float = float('nan')
 
     def __post_init__(self):
-        """Rellena la rejilla con el MAP si el llamador no la dio."""
+        """Fill in the grid point with the MAP if the caller did not provide it."""
         if self.theta_grid is None:
             self.theta_grid = np.asarray(self.theta_map, dtype=float)
         if not np.isfinite(self.chi2_grid):
@@ -688,15 +690,15 @@ class GeneticEvolver(GeneticBase):
 
     # Subclasses override these three to switch an operator to quantum.
     def do_init(self) -> np.ndarray:
-        """Poblacion inicial. En el CGA es la clasica; el QGA la sobreescribe."""
+        """Initial population. In the CGA it is the classical one; the QGA overrides it."""
         return self.init_population()
 
     def do_crossover(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        """Cruce de dos padres. Punto de sustitucion de la escalera cuantica.
+        """Crossover of two parents. Substitution point of the quantum ladder.
 
         Args:
-            a: primer padre del cruce.
-            b: segundo padre del cruce.
+            a: first crossover parent.
+            b: second crossover parent.
 
         Returns:
             np.ndarray
@@ -704,10 +706,10 @@ class GeneticEvolver(GeneticBase):
         return self.crossover_classical(a, b)
 
     def do_mutate(self, pop: np.ndarray) -> np.ndarray:
-        """Mutacion de la poblacion. Punto de sustitucion de la escalera.
+        """Mutation of the population. Substitution point of the ladder.
 
         Args:
-            pop: poblacion actual, de forma (P, d).
+            pop: current population, of shape (P, d).
 
         Returns:
             np.ndarray
@@ -777,12 +779,12 @@ class GeneticEvolver(GeneticBase):
             history.append(dict(gen=gen, best_chi2=best_chi2,
                                 mean_chi2=mean_chi2,
                                 theta_best=theta_best.tolist()))
-            # [ANIM] Instantanea de la poblacion para la animacion. Es lo unico
-            # que permite MOSTRAR la convergencia en vez de resumirla: el
-            # historial solo guardaba el mejor individuo, y con eso no se ve
-            # que la nube se contrae, que es la mitad del fenomeno.
-            # Coste: P*d floats por generacion (200x4x120 ~ 0.8 MB), asi que se
-            # graba siempre y se submuestrea al animar, no al grabar.
+            # [ANIM] Population snapshot for the animation. It is the only way
+            # to SHOW the convergence instead of summarizing it: the history
+            # only stored the best individual, and with that one cannot see
+            # the cloud contract, which is half of the phenomenon.
+            # Cost: P*d floats per generation (200x4x120 ~ 0.8 MB), so it is
+            # always recorded and subsampled when animating, not when recording.
             if record_population:
                 pop_history.append(pop.copy())
                 fit_history.append(fit.copy())
@@ -802,30 +804,32 @@ class GeneticEvolver(GeneticBase):
 
         # ── finalize: refine the MAP with the SAME fit_statistics as samplers
         #
-        # [B-REFINE] OJO con lo que significa el chi2 que sale de aqui.
+        # [B-REFINE] CAREFUL with what the chi2 coming out of here means.
         #
-        # El genetico devuelve un punto de la REJILLA. Despues, este bloque lo
-        # refina localmente con `fit_statistics(refine=True)`, que es un
-        # optimizador continuo. Ese refinamiento **borra la diferencia entre
-        # rungs**: medido con lcdm/CC+BAO, n_bits=4, 8 generaciones, los cuatro
-        # peldanos aterrizan en celdas de rejilla DISTINTAS,
+        # The genetic algorithm returns a GRID point. Then this block refines
+        # it locally with `fit_statistics(refine=True)`, which is a continuous
+        # optimizer. That refinement **erases the difference between rungs**:
+        # measured with lcdm/CC+BAO, n_bits=4, 8 generations, the four rungs
+        # land on DIFFERENT grid cells,
         #
         #     q=  0%   [0.26496, 70.3148]   chi2 = 27.6502
         #     q= 33%   [0.25769, 70.6918]   chi2 = 27.4717
         #     q= 67%   [0.27000, 70.3125]   chi2 = 28.3992
         #     q=100%   [0.27000, 70.3125]   chi2 = 28.3992
         #
-        # o sea con un rango de 0.93 en chi2 entre el mejor y el peor rung —
-        # pero tras refinar los cuatro dan chi2 = 27.469109, IDENTICO a la
-        # sexta cifra. Eso explica por que en las campanas publicadas el chi2
-        # del genetico sale byte a byte igual en CGA y en los cuatro rungs del
-        # QGA: no es que los operadores cuanticos reproduzcan al clasico, es
-        # que el refinador converge al mismo minimo desde donde sea.
+        # i.e. with a range of 0.93 in chi2 between the best and the worst
+        # rung — but after refining all four give chi2 = 27.469109, IDENTICAL
+        # to the sixth digit. That explains why in the published campaigns the
+        # genetic chi2 comes out byte-for-byte equal for the CGA and the four
+        # QGA rungs: it is not that the quantum operators reproduce the
+        # classical one, it is that the refiner converges to the same minimum
+        # from wherever it starts.
         #
-        # Refinar NO es un error — el chi2/AIC/BIC refinado es el que hay que
-        # comparar contra los samplers, y por eso se conserva. El error seria
-        # leer esas columnas como si midieran al genetico. Las que SI lo miden
-        # son las de la rejilla, que a partir de ahora tambien se reportan.
+        # Refining is NOT a mistake — the refined chi2/AIC/BIC is the one to
+        # compare against the samplers, and that is why it is kept. The
+        # mistake would be to read those columns as if they measured the
+        # genetic algorithm. The ones that DO measure it are the grid columns,
+        # which are now reported as well.
         best_i = int(np.argmax(fit))
         theta_grid = pop[best_i].copy()
         chi2_grid = float(self.post.chi2(theta_grid)[0])
@@ -838,11 +842,11 @@ class GeneticEvolver(GeneticBase):
             f"MAP: {fmt_theta(self.model, theta_map)} | "
             f"χ²={stats['chi2']:.3f}  χ²_red={stats['chi2_red']:.3f}  "
             f"AIC={stats['AIC']:.2f}  BIC={stats['BIC']:.2f}")
-        # [B-REFINE] Lo que encontro el genetico ANTES de refinar. Es el unico
-        # numero de esta linea que distingue un rung de otro.
-        say(f"[{self.method_name}]   mejor de la rejilla (SIN refinar): "
+        # [B-REFINE] What the genetic algorithm found BEFORE refining. It is
+        # the only number on this line that tells one rung from another.
+        say(f"[{self.method_name}]   best on the grid (NOT refined): "
             f"{fmt_theta(self.model, theta_grid)} | χ²={chi2_grid:.3f} "
-            f"(el refinamiento lo mejoro en {chi2_grid - stats['chi2']:+.3f})")
+            f"(refinement improved it by {chi2_grid - stats['chi2']:+.3f})")
 
         if live and gui is not None:
             snap = None
@@ -926,9 +930,9 @@ try:
     from qiskit import QuantumCircuit, transpile
     from qiskit.circuit import ParameterVector
     from qiskit.circuit.library import UnitaryGate
-    from qiskit_aer import AerSimulator            # noqa: F401  (sonda de
-    # disponibilidad: si este import falla, _QISKIT_OK queda en False y todo
-    # el modulo cae a la ruta clasica)
+    from qiskit_aer import AerSimulator            # noqa: F401  (availability
+    # probe: if this import fails, _QISKIT_OK stays False and the whole
+    # module falls back to the classical path)
 except Exception:                                       # pragma: no cover
     _QISKIT_OK = False
 
@@ -953,20 +957,20 @@ class QGA(GeneticEvolver):
     def __init__(self, post: Posterior, ga: GAConfig, config: dict,
                  n_bits: int = 6, rng: Optional[np.random.Generator] = None,
                  shots: int = 1, crossover_alpha: float = 0.5):
-        """Algoritmo genetico con operadores cuanticos conmutables.
+        """Genetic algorithm with switchable quantum operators.
 
         Args:
-            post: posterior objetivo.
-            ga: hiperparametros del genetico.
-            config: que operadores son cuanticos ('init', 'crossover', 'mutation').
-            n_bits: qubits por parametro (rejilla de 2^n_bits por eje).
-            rng: generador compartido con el CGA, para que la celda faithful
-                (q=0%) reproduzca al clasico bit a bit.
-            shots: disparos por circuito.
-            crossover_alpha: mezcla del cruce cuantico.
+            post: target posterior.
+            ga: genetic hyper-parameters.
+            config: which operators are quantum ('init', 'crossover', 'mutation').
+            n_bits: qubits per parameter (grid of 2^n_bits per axis).
+            rng: generator shared with the CGA, so that the faithful cell
+                (q=0%) reproduces the classical one bit for bit.
+            shots: shots per circuit.
+            crossover_alpha: mixing of the quantum crossover.
 
         Raises:
-            RuntimeError: si Qiskit o qiskit-aer no estan instalados.
+            RuntimeError: if Qiskit or qiskit-aer are not installed.
         """
         super().__init__(post, ga, rng)
         if not _QISKIT_OK:
@@ -983,10 +987,10 @@ class QGA(GeneticEvolver):
         # bits are ALWAYS preserved regardless of α.
         self.crossover_alpha = float(np.clip(crossover_alpha, 0.0, 1.0))
         self._levels = 2 ** self.n_bits                  # grid points per axis
-        # [NOISE] Sin ruido esto es exactamente `make_simulator('statevector',
-        # prefer_gpu=USE_GPU)`, la construccion previa al eje. Con ruido pasa a
-        # matriz de densidad con el modelo completo; el QGA no necesita ningun
-        # otro cambio porque ya lee por medicion.
+        # [NOISE] Without noise this is exactly `make_simulator('statevector',
+        # prefer_gpu=USE_GPU)`, the construction from before the axis. With
+        # noise it switches to density matrix with the full model; the QGA
+        # needs no other change because it already reads by measurement.
         self.sim = _qga_sim()
         self.noise_label = NOISE.label
         self._noise = NOISE        # [E-HPC3] transpiles for this noise level
@@ -1114,37 +1118,36 @@ class QGA(GeneticEvolver):
 
     # ── [B-RZZ] ────────────────────────────────────────────────────────────
     def _transpile_cx(self, qc_cx: "QuantumCircuit") -> "QuantumCircuit":
-        """Transpila el cruce cuantico, con red de seguridad para `noise=full`.
+        """Transpile the quantum crossover, with a safety net for `noise=full`.
 
-        El cruce es el UNICO circuito del QGA que lleva una compuerta de dos
-        qubits arbitraria (`UnitaryGate(SWAP^alpha)`), asi que es el unico que
-        obliga al transpilador a SINTETIZAR un unitario de dos qubits. Para
-        elegir con que compuerta descomponerlo, Qiskit recorre las compuertas
-        de dos qubits del `target` y evalua `Operator(g)` en cada una.
+        The crossover is the ONLY QGA circuit that carries an arbitrary
+        two-qubit gate (`UnitaryGate(SWAP^alpha)`), so it is the only one that
+        forces the transpiler to SYNTHESIZE a two-qubit unitary. To choose
+        which gate to decompose it with, Qiskit walks the two-qubit gates of
+        the `target` and evaluates `Operator(g)` on each one.
 
-        El peldano `full` declara como base, entre otras, `rzz`, `rxx` y `ryy`
-        (`cosmo_noise._GATES_2Q`: ahi se le cuelga el canal despolarizante).
-        Esas tres son parametricas, y en algunas versiones de Qiskit
-        `Operator(RZZGate(Parameter))` levanta
+        The `full` rung declares as basis, among others, `rzz`, `rxx` and `ryy`
+        (`cosmo_noise._GATES_2Q`: that is where the depolarizing channel is
+        attached). Those three are parametric, and in some Qiskit versions
+        `Operator(RZZGate(Parameter))` raises
 
             TypeError: ParameterExpression with unbound parameters
                        (dict_keys([Parameter(theta)])) cannot be cast to a float
 
-        que mata el QGA en `__init__`, ANTES de correr un solo peldano.
-        Medido: en la campana de Nicte-Ha `hpc_20260907_130425` la tarea
-        `genetic_lcdm_nb4_noise-full` murio asi y dejo el CSV con la fila del
-        CGA y nada mas; ninguna otra tarea de las 135 fallo.
+        which kills the QGA in `__init__`, BEFORE running a single rung.
+        Measured: in the Nicte-Ha campaign `hpc_20260907_130425` the task
+        `genetic_lcdm_nb4_noise-full` died this way and left the CSV with the
+        CGA row and nothing else; none of the other 135 tasks failed.
 
-        La via principal queda INTACTA a proposito: donde hoy transpila, sigue
-        transpilando exactamente igual, asi que ningun resultado ya obtenido
-        cambia. Solo cuando esa via revienta con este error concreto se
-        reintenta sin las tres compuertas parametricas — que de todos modos no
-        son supercontroladas y el sintetizador nunca habria elegido. El aviso
-        se emite para que la celda quede marcada como obtenida por el
-        reintento.
+        The main path is left INTACT on purpose: where it transpiles today, it
+        keeps transpiling exactly the same, so no result already obtained
+        changes. Only when that path blows up with this specific error is it
+        retried without the three parametric gates — which in any case are
+        not supercontrolled and the synthesizer would never have picked. The
+        warning is emitted so the cell is marked as obtained by the retry.
 
         Args:
-            qc_cx: plantilla del cruce, sin transpilar.
+            qc_cx: crossover template, not transpiled.
 
         Returns:
             QuantumCircuit
@@ -1161,11 +1164,11 @@ class QGA(GeneticEvolver):
             if not basis:
                 raise
             warnings.warn(
-                "[B-RZZ] el transpilador no pudo inspeccionar las compuertas "
-                "parametricas de dos qubits del modelo de ruido "
-                f"('{self.noise_label}'); se reintenta el cruce cuantico sin "
-                "rzz/rxx/ryy en la base. Esta celda NO es comparable bit a "
-                "bit con una transpilada por la via principal.",
+                "[B-RZZ] the transpiler could not inspect the two-qubit "
+                "parametric gates of the noise model "
+                f"('{self.noise_label}'); retrying the quantum crossover "
+                "without rzz/rxx/ryy in the basis. This cell is NOT bit-for-"
+                "bit comparable with one transpiled by the main path.",
                 RuntimeWarning, stacklevel=2)
             return _transpile_for(self, qc_cx, basis_gates=basis)
 
@@ -1200,7 +1203,7 @@ class QGA(GeneticEvolver):
         """Coherent RY mutation on gene-qubits (or classical if disabled).
 
         Args:
-            pop: poblacion actual, de forma (P, d).
+            pop: current population, of shape (P, d).
 
         Returns:
             np.ndarray
@@ -1274,8 +1277,8 @@ class QGA(GeneticEvolver):
         """Entangling crossover of parent pairs (or classical if disabled).
 
         Args:
-            a: primer padre del cruce.
-            b: segundo padre del cruce.
+            a: first crossover parent.
+            b: second crossover parent.
 
         Returns:
             np.ndarray
@@ -1348,13 +1351,13 @@ class LiveGA:
 
     def __init__(self, model, method_name: str, quantumness: float,
                  pause: float = 0.05):
-        """Ventana en vivo de la evolucion del genetico.
+        """Live window of the genetic evolution.
 
         Args:
-            model: modelo cosmologico activo.
-            method_name: 'CGA' o 'QGA', para el titulo.
-            quantumness: porcentaje de componentes cuanticos.
-            pause: segundos entre refrescos.
+            model: active cosmological model.
+            method_name: 'CGA' or 'QGA', for the title.
+            quantumness: percentage of quantum components.
+            pause: seconds between refreshes.
         """
         self.model = model
         self.method = method_name
@@ -1426,12 +1429,12 @@ class LiveGA:
         """Refresh both panels with the current generation (no-op if closed).
 
         Args:
-            gen: numero de generacion.
-            pop: poblacion actual, de forma (P, d).
-            fit: log-posterior de cada individuo de la poblacion.
-            theta_best: mejor punto de esta generacion.
-            best_chi2: mejor chi2 de la poblacion.
-            mean_chi2: chi2 medio de la poblacion.
+            gen: generation number.
+            pop: current population, of shape (P, d).
+            fit: log-posterior of each individual in the population.
+            theta_best: best point of this generation.
+            best_chi2: best chi2 of the population.
+            mean_chi2: mean chi2 of the population.
         """
         if self.closed:
             return
@@ -1477,10 +1480,10 @@ class LiveGA:
         """Mark the final MAP, optionally save a snapshot, keep window open.
 
         Args:
-            theta_map: estimacion puntual (MAP).
-            chi2_map: chi2 en el MAP.
-            save_path: ruta donde guardar la figura; None no la guarda. Por
-                defecto None.
+            theta_map: point estimate (MAP).
+            chi2_map: chi2 at the MAP.
+            save_path: path to save the figure to; None does not save it.
+                Defaults to None.
         """
         if not self.closed:
             self._best_pt.set_data(
@@ -1515,7 +1518,7 @@ class LiveGA:
 #    * overlay of the genetic MAP + spread on the MCMC/VI corner plots
 #      (reusing cosmo_modular_quantum.plot_corner_multi),
 #    * the standalone fitness-vs-generation curve,
-#    * a row in `resultados_config.csv` matching the shared schema.
+#    * a row in `results_config.csv` matching the shared schema.
 
 
 def plot_population_corner(result: GAResult, model, outdir: str,
@@ -1528,11 +1531,11 @@ def plot_population_corner(result: GAResult, model, outdir: str,
     as a marker via corner's truth lines.
 
     Args:
-        result: `GAResult` de una corrida del genetico.
-        model: modelo cosmologico (`cosmo_core.CosmoModel`).
-        outdir: carpeta donde escribir la salida.
-        tag: etiqueta corta que va al nombre de archivo y a los mensajes. Por
-            defecto None.
+        result: `GAResult` of a genetic run.
+        model: cosmological model (`cosmo_core.CosmoModel`).
+        outdir: folder to write the output into.
+        tag: short label used in the file name and in messages. Defaults to
+            None.
 
     Returns:
         str
@@ -1559,44 +1562,44 @@ def plot_population_corner(result: GAResult, model, outdir: str,
 
 def plot_genetic_convergence(results, model, outdir: str,
                              tag: Optional[str] = None) -> str:
-    """Convergencia y estimacion final del genetico, para TODOS los rungs.
+    """Convergence and final estimate of the genetic algorithm, for ALL rungs.
 
-    [PLOT-GA] Sustituye al corner plot de la poblacion final.
+    [PLOT-GA] Replaces the corner plot of the final population.
 
-    Por que se cambio: un algoritmo genetico CONVERGE a un punto. Con elitismo
-    y unas decenas de generaciones, la poblacion final se concentra en una o
-    dos celdas de la rejilla, asi que su corner plot es literalmente un punto
-    con unos pocos pixeles alrededor. Gasta una figura entera en no mostrar
-    nada, y sobre todo no muestra lo unico que distingue un rung de otro: COMO
-    llego ahi y DONDE aterrizo respecto a los demas.
+    Why it was changed: a genetic algorithm CONVERGES to a point. With elitism
+    and a few dozen generations, the final population concentrates in one or
+    two grid cells, so its corner plot is literally a dot with a few pixels
+    around it. It spends a whole figure showing nothing, and above all it does
+    not show the only thing that tells one rung from another: HOW it got there
+    and WHERE it landed relative to the others.
 
-    Un corner plot responde "que forma tiene el posterior", que es la pregunta
-    correcta para MCMC/VI, donde la nube de muestras ES el resultado. El
-    resultado de un GA es un punto y una trayectoria, asi que la figura
-    correcta es otra:
+    A corner plot answers "what shape does the posterior have", which is the
+    right question for MCMC/VI, where the sample cloud IS the result. The
+    result of a GA is a point and a trajectory, so the right figure is a
+    different one:
 
-      Fila 1 — una traza por parametro: theta_best contra generacion, un color
-        por rung. Aqui se ve la velocidad de convergencia, si un rung se queda
-        atascado, y si dos rungs convergen al mismo sitio por caminos
-        distintos. Es la informacion que el corner destruye al mostrar solo el
-        estado final.
+      Row 1 — one trace per parameter: theta_best versus generation, one color
+        per rung. Here one sees the convergence speed, whether a rung gets
+        stuck, and whether two rungs converge to the same place by different
+        paths. It is the information the corner plot destroys by showing only
+        the final state.
 
-      Fila 2 — un punto-y-bigote por parametro: MAP final con la dispersion de
-        la poblacion final como barra. Compara todos los rungs en un vistazo y
-        deja ver si las diferencias entre ellos son mayores o menores que la
-        dispersion interna de cada uno — que es justo lo que hay que saber
-        antes de afirmar que un rung difiere de otro.
+      Row 2 — one dot-and-whisker per parameter: final MAP with the spread of
+        the final population as a bar. It compares all rungs at a glance and
+        shows whether the differences between them are larger or smaller than
+        the internal spread of each — which is exactly what one needs to know
+        before claiming that one rung differs from another.
 
-    La linea punteada marca el valor fiducial de referencia del modelo.
+    The dotted line marks the model's fiducial reference value.
 
     Args:
-        results: iterable de `GAResult` (CGA y los rungs del QGA).
-        model: `CosmoModel` activo.
-        outdir: carpeta de salida.
-        tag: sufijo del nombre de archivo.
+        results: iterable of `GAResult` (CGA and the QGA rungs).
+        model: active `CosmoModel`.
+        outdir: output folder.
+        tag: file-name suffix.
 
     Returns:
-        Ruta del PNG generado.
+        Path of the generated PNG.
     """
     os.makedirs(outdir, exist_ok=True)
     results = [r for r in results if getattr(r, 'history', None)]
@@ -1607,8 +1610,8 @@ def plot_genetic_convergence(results, model, outdir: str,
     names = model.param_names
     latex = getattr(model, 'param_latex', names)
 
-    # Un color y un marcador por rung: la identidad no descansa solo en el
-    # color (requisito de accesibilidad y de impresion en blanco y negro).
+    # One color and one marker per rung: identity does not rest on color alone
+    # (an accessibility and black-and-white printing requirement).
     palette = [C_GENETIC, C_GENETIC2, C_QUANTUM2, C_CLASSICAL2, C_QUANTUM]
     markers = ['o', 's', '^', 'D', 'v']
     styles = {}
@@ -1618,49 +1621,51 @@ def plot_genetic_convergence(results, model, outdir: str,
     fig, axes = plt.subplots(2, d, figsize=(4.6 * d, 8.2), squeeze=False)
     order = sorted(results, key=lambda x: x.quantumness)
 
-    # ── fila 1: trayectoria de theta_best ────────────────────────────────
-    # [PLOT-GA] QGA(0%) reproduce al CGA bit a bit por diseno (es la celda
-    # faithful del genetico), asi que sus curvas se solapan EXACTAMENTE y la
-    # de abajo desaparece. Sin avisarlo parece una serie perdida, cuando en
-    # realidad es el resultado. Se detecta y se anota en la leyenda, y se
-    # dibuja con grosor decreciente para que la de abajo asome como halo.
+    # ── row 1: theta_best trajectory ─────────────────────────────────────
+    # [PLOT-GA] QGA(0%) reproduces the CGA bit for bit by design (it is the
+    # genetic faithful cell), so their curves overlap EXACTLY and the one
+    # underneath disappears. Without a note it looks like a missing series,
+    # when in fact it is the result. It is detected and annotated in the
+    # legend, and drawn with decreasing line width so the lower one peeks out
+    # as a halo.
     def _traj(r):
-        """Trayectoria (n_gen, d) del mejor individuo de un rung."""
+        """Trajectory (n_gen, d) of a rung's best individual."""
         return np.array([h['theta_best'] for h in r.history], float)
 
-    coincide = {}
+    coincident = {}
     for a in range(len(order)):
         for b in range(a + 1, len(order)):
             ta, tb = _traj(order[a]), _traj(order[b])
             if ta.shape == tb.shape and np.allclose(ta, tb, atol=0, rtol=0):
-                coincide.setdefault(order[b].label, []).append(order[a].label)
+                coincident.setdefault(order[b].label, []).append(order[a].label)
 
     def _label(r):
-        """Etiqueta del rung, con la marca ≡ si coincide con otro bit a bit."""
-        same = coincide.get(r.label)
+        """Rung label, with the ≡ mark if it matches another one bit for bit."""
+        same = coincident.get(r.label)
         return f"{r.label}  ≡ {same[0]}" if same else r.label
 
     for j in range(d):
         ax = axes[0][j]
-        todos = []
+        all_vals = []
         for i, r in enumerate(order):
             col, mk = styles[r.label]
             gens = [h['gen'] for h in r.history]
             vals = [h['theta_best'][j] for h in r.history]
-            todos.extend(vals)
+            all_vals.extend(vals)
             ax.plot(gens, vals, '-', color=col,
                     lw=max(1.4, 4.0 - 0.7 * i), label=_label(r) if j == 0 else None,
                     marker=mk, markevery=max(1, len(gens) // 8), ms=5,
                     alpha=0.95, zorder=2 + i)
-        # [B-FIDSCALE] El fiducial NO puede fijar la escala del eje. En
-        # lcdm/CC+BAO+Pantheon los rungs viven entre 0.2763 y 0.2775 y el
-        # fiducial de Planck esta en 0.3111: dejarlo dentro de los limites
-        # estiraba el eje a 0.275-0.311 y las diferencias entre rungs — que
-        # son el contenido de la figura — quedaban en un pixel. Se dibuja la
-        # linea igual, pero los limites los ponen las trayectorias; si el
-        # fiducial cae fuera, se anota en el borde en vez de deformar el eje.
-        if todos:
-            lo, hi = min(todos), max(todos)
+        # [B-FIDSCALE] The fiducial must NOT set the axis scale. In
+        # lcdm/CC+BAO+Pantheon the rungs live between 0.2763 and 0.2775 and
+        # the Planck fiducial is at 0.3111: keeping it inside the limits
+        # stretched the axis to 0.275-0.311 and the differences between rungs
+        # — which are the content of the figure — shrank to one pixel. The
+        # line is still drawn, but the limits are set by the trajectories; if
+        # the fiducial falls outside, it is annotated at the edge instead of
+        # distorting the axis.
+        if all_vals:
+            lo, hi = min(all_vals), max(all_vals)
             pad = max((hi - lo) * 0.25, abs(hi) * 1e-4, 1e-12)
             ax.set_ylim(lo - pad, hi + pad)
         fid = getattr(model, 'fiducial', None)
@@ -1669,16 +1674,16 @@ def plot_genetic_convergence(results, model, outdir: str,
             if y0 <= fid[j] <= y1:
                 ax.axhline(fid[j], ls=':', color='0.45', lw=1.2, zorder=0)
             else:
-                arriba = fid[j] > y1
+                above = fid[j] > y1
                 ax.annotate(f"fiducial = {fid[j]:.4g} "
-                            f"({'arriba' if arriba else 'abajo'} del rango)",
-                            xy=(0.99, 0.985 if arriba else 0.015),
+                            f"({'above' if above else 'below'} the range)",
+                            xy=(0.99, 0.985 if above else 0.015),
                             xycoords='axes fraction', ha='right',
-                            va='top' if arriba else 'bottom',
+                            va='top' if above else 'bottom',
                             fontsize=8, color='0.35')
         ax.set_xlabel('Generation', fontsize=11)
-        # param_latex ya viene con sus delimitadores $...$: envolverlo otra
-        # vez rompe el parser de mathtext.
+        # param_latex already comes with its $...$ delimiters: wrapping it
+        # again breaks the mathtext parser.
         ax.set_ylabel(latex[j] if j < len(latex) else names[j], fontsize=12)
         ax.grid(True, alpha=0.25, lw=0.6)
         for s in ('top', 'right'):
@@ -1686,31 +1691,33 @@ def plot_genetic_convergence(results, model, outdir: str,
         if j == 0:
             ax.legend(fontsize=8, frameon=False)
 
-    # ── fila 2: estimacion final, LA MISMA que reporta el CSV ───────────
-    # [B-GAPLOT] Esta fila dibujaba `theta_map` con la desviacion SIN PESOS de
-    # la poblacion final, mientras que la fila del CSV (`_ga_side`) reporta la
-    # media y la desviacion PONDERADAS POR FITNESS. Son dos cosas distintas y
-    # la diferencia no es cosmetica: en lcdm/nb6 de la campana 2026-09-03 el
-    # CSV daba Om = 0.276289 +- 0.001407 y la figura pintaba la misma fila con
-    # una barra de +-0.0165, doce veces mas ancha. Quien comparara tabla y
-    # figura veria una contradiccion y no sabria a cual creerle.
+    # ── row 2: final estimate, THE SAME one the CSV reports ─────────────
+    # [B-GAPLOT] This row drew `theta_map` with the UNWEIGHTED deviation of
+    # the final population, while the CSV row (`_ga_side`) reports the
+    # FITNESS-WEIGHTED mean and deviation. They are two different things and
+    # the difference is not cosmetic: in lcdm/nb6 of the 2026-09-03 campaign
+    # the CSV gave Om = 0.276289 +- 0.001407 and the figure drew the same row
+    # with a bar of +-0.0165, twelve times wider. Anyone comparing table and
+    # figure would see a contradiction and not know which one to believe.
     #
-    # Se unifica en la version ponderada, que es la que va al CSV y a la tesis:
-    # la poblacion final de un GA con elitismo tiene una cola de individuos
-    # malos que la desviacion sin pesos cuenta igual que a los buenos, asi que
-    # mide el ancho de la poblacion, no la incertidumbre de la estimacion.
+    # It is unified on the weighted version, which is the one that goes to the
+    # CSV and the thesis: the final population of a GA with elitism has a
+    # tail of bad individuals that the unweighted deviation counts the same as
+    # the good ones, so it measures the width of the population, not the
+    # uncertainty of the estimate.
     #
-    # El MAP se conserva como marcador abierto encima, porque es el punto que
-    # define chi2/AIC/BIC y no coincide exactamente con la media ponderada.
+    # The MAP is kept as an open marker on top, because it is the point that
+    # defines chi2/AIC/BIC and it does not coincide exactly with the weighted
+    # mean.
     #
-    # ADVERTENCIA que va en el pie de figura: esta barra es dispersion de
-    # convergencia del optimizador, NO un intervalo de credibilidad. Comparar
-    # un rung con otro en unidades de esta barra sobreestima cualquier
-    # discrepancia — para eso esta sigma del MCMC.
+    # WARNING that goes in the figure caption: this bar is the optimizer's
+    # convergence spread, NOT a credible interval. Comparing one rung with
+    # another in units of this bar overstates any discrepancy — that is what
+    # the MCMC sigma is for.
     ypos = np.arange(len(order))
     for j in range(d):
         ax = axes[1][j]
-        extremos: List[float] = []
+        extremes: List[float] = []
         for i, r in enumerate(order):
             col, mk = styles[r.label]
             finite = np.isfinite(r.final_fit)
@@ -1729,14 +1736,15 @@ def plot_genetic_convergence(results, model, outdir: str,
             ax.plot(r.theta_map[j], ypos[i], marker='|', ms=13, mew=1.6,
                     color=col, alpha=0.9, zorder=5,
                     label='MAP' if (i == 0 and j == 0) else None)
-            extremos.extend([mu_j - spread, mu_j + spread,
+            extremes.extend([mu_j - spread, mu_j + spread,
                              float(r.theta_map[j])])
-        # [B-FIDSCALE] Mismo criterio que arriba: el fiducial se dibuja si cae
-        # dentro, y se anota en el borde si no. Que Planck quede fuera del
-        # rango del genetico ES un resultado (tension en Om con este dataset),
-        # pero no puede costar la legibilidad de la comparacion entre rungs.
-        if extremos:
-            lo, hi = min(extremos), max(extremos)
+        # [B-FIDSCALE] Same criterion as above: the fiducial is drawn if it
+        # falls inside, and annotated at the edge if not. Planck falling
+        # outside the genetic range IS a result (tension in Om with this
+        # dataset), but it must not cost the readability of the comparison
+        # between rungs.
+        if extremes:
+            lo, hi = min(extremes), max(extremes)
             pad = max((hi - lo) * 0.30, abs(hi) * 1e-4, 1e-12)
             ax.set_xlim(lo - pad, hi + pad)
         fid = getattr(model, 'fiducial', None)
@@ -1745,18 +1753,18 @@ def plot_genetic_convergence(results, model, outdir: str,
             if x0 <= fid[j] <= x1:
                 ax.axvline(fid[j], ls=':', color='0.45', lw=1.2, zorder=0)
             else:
-                der = fid[j] > x1
+                right_side = fid[j] > x1
                 ax.annotate(f"fiducial = {fid[j]:.4g} "
-                            f"({'>' if der else '<'} rango)",
-                            xy=(0.985 if der else 0.015, 0.02),
+                            f"({'>' if right_side else '<'} range)",
+                            xy=(0.985 if right_side else 0.015, 0.02),
                             xycoords='axes fraction',
-                            ha='right' if der else 'left', va='bottom',
+                            ha='right' if right_side else 'left', va='bottom',
                             fontsize=8, color='0.35')
         ax.set_yticks(ypos)
         ax.set_yticklabels([_label(r) for r in order] if j == 0 else [],
                            fontsize=8)
         if j > 0:
-            # sin etiquetas no hacen falta las marcas: dejaban un guion suelto
+            # without labels the ticks are not needed: they left a stray dash
             ax.tick_params(axis='y', length=0)
         ax.set_ylim(-0.6, len(order) - 0.4)
         ax.invert_yaxis()
@@ -1782,20 +1790,20 @@ def plot_genetic_convergence(results, model, outdir: str,
 
 
 def _coincidence_label(result, others) -> str:
-    """Etiqueta con una marca si otro rung produjo la MISMA trayectoria.
+    """Label with a mark if another rung produced the SAME trajectory.
 
-    QGA(0%) reproduce al CGA bit a bit: es la celda faithful del genetico y su
-    identidad ES el resultado. Pero sus curvas se solapan exactamente y la de
-    abajo desaparece, con lo que una figura honesta parece tener una serie
-    perdida. Anotarlo convierte un artefacto visual confuso en la afirmacion
-    que el proyecto quiere hacer.
+    QGA(0%) reproduces the CGA bit for bit: it is the genetic faithful cell
+    and that identity IS the result. But their curves overlap exactly and the
+    lower one disappears, so an honest figure looks like it has a missing
+    series. Annotating it turns a confusing visual artifact into the claim
+    the project wants to make.
 
     Args:
-        result: el `GAResult` a etiquetar.
-        others: los demas rungs de la misma figura.
+        result: the `GAResult` to label.
+        others: the other rungs of the same figure.
 
     Returns:
-        La etiqueta, con sufijo " ≡ <otro>" si coincide con uno anterior.
+        The label, with a " ≡ <other>" suffix if it matches an earlier one.
     """
     mine = np.array([h['theta_best'] for h in result.history], float)
     for o in others:
@@ -1812,47 +1820,47 @@ def animate_genetic_evolution(results, model, outdir: str,
                               fps: int = 8, max_frames: int = 120,
                               formats: Sequence[str] = ('gif',),
                               layout: str = 'overlay') -> List[str]:
-    """Anima la evolucion de la poblacion, con TODOS los rungs a la vez.
+    """Animate the population evolution, with ALL rungs at once.
 
-    [ANIM] Pensada para presentar. Un genetico se entiende mucho mejor viendo
-    la nube contraerse que leyendo la curva de chi2 ya terminada, y poner los
-    rungs uno al lado de otro en la MISMA animacion deja ver algo que ninguna
-    figura estatica muestra: que unos convergen antes que otros, y si alguno
-    se queda atascado en otro sitio.
+    [ANIM] Meant for presentations. A genetic algorithm is understood much
+    better by watching the cloud contract than by reading the finished chi2
+    curve, and putting the rungs side by side in the SAME animation reveals
+    something no static figure shows: that some converge before others, and
+    whether one gets stuck somewhere else.
 
-    Dos paneles:
+    Two panels:
 
-      Izquierda — espacio de fase de los dos primeros parametros. Cada rung es
-        un color; los puntos son la poblacion de esa generacion, con opacidad
-        proporcional a su fitness relativa, y el mejor individuo marcado con
-        una estrella. La nube contrayendose ES la convergencia.
+      Left — phase space of the first two parameters. Each rung is a color;
+        the dots are that generation's population, with opacity proportional
+        to their relative fitness, and the best individual marked with a
+        star. The contracting cloud IS the convergence.
 
-      Derecha — la curva de chi2 dibujandose en tiempo real, para poder decir
-        "aqui es donde se estanca" senalando el mismo instante en los dos
-        paneles.
+      Right — the chi2 curve drawn in real time, so one can say "this is where
+        it stalls" pointing at the same instant in both panels.
 
     Args:
-        results: iterable de `GAResult` CON `pop_history` (si esta vacio, el
-            rung se omite de la animacion en vez de romperla).
-        model: `CosmoModel` activo.
-        outdir: carpeta de salida.
-        tag: sufijo del nombre de archivo.
-        fps: cuadros por segundo.
-        max_frames: tope de cuadros; si hay mas generaciones se submuestrea de
-            forma uniforme, para que un run de 500 generaciones no produzca un
-            GIF de 60 MB.
-        formats: 'gif' y/o 'mp4'. El mp4 necesita ffmpeg; si falta, se avisa y
-            se sigue con el resto.
-        layout: 'overlay' (todos los rungs en un panel) o 'facets' (un panel
-            por rung). [B-OVERLAP] La superposicion es honesta —los rungs
-            convergen al MISMO sitio, y verlo es el resultado— pero por eso
-            mismo las nubes se tapan y solo se distingue la ultima dibujada.
-            'overlay' lo mitiga con un marcador distinto por rung y orden de
-            dibujo por quantumness; 'facets' lo elimina dando a cada rung su
-            propio panel, a costa de perder la comparacion directa.
+        results: iterable of `GAResult` WITH `pop_history` (if it is empty,
+            the rung is left out of the animation instead of breaking it).
+        model: active `CosmoModel`.
+        outdir: output folder.
+        tag: file-name suffix.
+        fps: frames per second.
+        max_frames: frame cap; if there are more generations they are
+            subsampled uniformly, so a 500-generation run does not produce a
+            60 MB GIF.
+        formats: 'gif' and/or 'mp4'. The mp4 needs ffmpeg; if it is missing, a
+            warning is printed and the rest continues.
+        layout: 'overlay' (all rungs in one panel) or 'facets' (one panel per
+            rung). [B-OVERLAP] The overlay is honest —the rungs converge to
+            the SAME place, and seeing it is the result— but for that very
+            reason the clouds hide each other and only the last one drawn is
+            visible. 'overlay' mitigates it with a different marker per rung
+            and drawing order by quantumness; 'facets' removes it by giving
+            each rung its own panel, at the cost of losing the direct
+            comparison.
 
     Returns:
-        Rutas generadas (vacia si no habia nada que animar).
+        Generated paths (empty if there was nothing to animate).
     """
     import matplotlib.animation as manim
 
@@ -1876,27 +1884,29 @@ def animate_genetic_evolution(results, model, outdir: str,
     palette = [C_GENETIC, C_GENETIC2, C_QUANTUM2, C_CLASSICAL2, C_QUANTUM]
     marks = ['o', 's', '^', 'D', 'v', 'P', 'X']
     style = {r.label: palette[i % len(palette)] for i, r in enumerate(usable)}
-    # [B-OVERLAP] Un MARCADOR distinto por rung ademas del color: cuando las
-    # nubes se solapan —y se solapan siempre, porque convergen al mismo sitio—
-    # el color por si solo no basta para saber cual es cual.
+    # [B-OVERLAP] A distinct MARKER per rung on top of the color: when the
+    # clouds overlap —and they always do, because they converge to the same
+    # place— color alone is not enough to tell which is which.
     mark = {r.label: marks[i % len(marks)] for i, r in enumerate(usable)}
-    # QGA(0%) reproduce al CGA bit a bit, asi que sus nubes se solapan y la de
-    # abajo desaparece. Se anota para que no parezca una serie perdida.
+    # QGA(0%) reproduces the CGA bit for bit, so their clouds overlap and the
+    # lower one disappears. It is annotated so it does not look like a missing
+    # series.
     lab = {r.label: _coincidence_label(r, usable) for r in usable}
 
-    # [B-OVERLAP] 'facets' da un panel por rung: la unica forma de garantizar
-    # que TODOS se vean cuando convergen al mismo punto. 'overlay' conserva la
-    # comparacion directa, que es lo que hace evidente que convergen juntos.
+    # [B-OVERLAP] 'facets' gives one panel per rung: the only way to
+    # guarantee that ALL are visible when they converge to the same point.
+    # 'overlay' keeps the direct comparison, which is what makes it evident
+    # that they converge together.
     facets = (layout == 'facets') and len(usable) > 1
     if facets:
         ncol = len(usable) + 1
-        # Sin sharex/sharey: el panel de chi2 tiene escalas propias, y
-        # desengancharlo despues depende de una API privada de matplotlib que
-        # cambia entre versiones (`GrouperView.remove` no existe en 3.10+).
-        # Los paneles de fase se igualan a mano mas abajo, que es explicito y
-        # no depende de la version.
-        # El panel de chi2 lleva doble ancho: es una serie temporal con varias
-        # curvas y a 1/6 del ancho no se distingue cual es cual.
+        # No sharex/sharey: the chi2 panel has its own scales, and unhooking
+        # it afterwards depends on a private matplotlib API that changes
+        # between versions (`GrouperView.remove` does not exist in 3.10+).
+        # The phase panels are equalized by hand further down, which is
+        # explicit and version-independent.
+        # The chi2 panel gets double width: it is a time series with several
+        # curves and at 1/6 of the width one cannot tell which is which.
         fig, axes = plt.subplots(
             1, ncol, figsize=(3.7 * len(usable) + 6.2, 4.8),
             gridspec_kw={'width_ratios': [1] * len(usable) + [1.9]})
@@ -1937,10 +1947,10 @@ def animate_genetic_evolution(results, model, outdir: str,
     all_chi = np.concatenate([[h['best_chi2'] for h in r.history]
                               for r in usable])
     all_chi = all_chi[np.isfinite(all_chi)]
-    axc.set_xlim(0, (n_gen - 1) * 1.14)      # hueco para las etiquetas
+    axc.set_xlim(0, (n_gen - 1) * 1.14)      # room for the labels
     if len(all_chi):
-        # Rango COMPLETO, no percentiles: recortar al 98% dejaba fuera el rung
-        # peor, que es justo el que hay que poder ver empeorar.
+        # FULL range, not percentiles: clipping at 98% left out the worst
+        # rung, which is exactly the one we need to be able to see get worse.
         c_lo, c_hi = float(np.min(all_chi)), float(np.max(all_chi))
         pad = 0.08 * (c_hi - c_lo + 1e-9)
         axc.set_ylim(c_lo - pad, c_hi + pad)
@@ -1961,19 +1971,19 @@ def animate_genetic_evolution(results, model, outdir: str,
         if facets:
             panel[r.label].set_title(lab[r.label], fontsize=10,
                                      color=col, fontweight='bold')
-        # [B-OVERLAP] Estilo de linea Y grosor decreciente por rung. Cuatro de
-        # las cinco curvas son GENUINAMENTE distintas (27.469 / 27.475 /
-        # 27.680 / 28.079 en la corrida de referencia) pero difieren en
-        # milesimas sobre un eje que abarca ~1.5, asi que a color solo se ven
-        # como una. El guionado deja ver la de abajo y el grosor da orden.
+        # [B-OVERLAP] Line style AND decreasing width per rung. Four of the
+        # five curves are GENUINELY different (27.469 / 27.475 / 27.680 /
+        # 28.079 in the reference run) but differ by thousandths on an axis
+        # spanning ~1.5, so with color alone they look like one. Dashing lets
+        # the lower one show through and the width gives the order.
         i = usable.index(r)
         lines[r.label] = axc.plot(
             [], [], color=col, lw=max(1.3, 3.4 - 0.55 * i),
             ls=_LS_CYCLE[i % len(_LS_CYCLE)],
             marker=mark[r.label], markevery=0.18, ms=5,
             label=r.label)[0]
-        # Etiqueta directa con el valor: cuando dos curvas se pisan de todos
-        # modos, el numero es lo unico que las separa sin ambiguedad.
+        # Direct label with the value: when two curves overlap anyway, the
+        # number is the only thing that separates them unambiguously.
         ends[r.label] = axc.annotate(
             '', xy=(0, 0), fontsize=8, color=col, fontweight='bold',
             xytext=(4, 0), textcoords='offset points',
@@ -1983,13 +1993,13 @@ def animate_genetic_evolution(results, model, outdir: str,
     title = fig.suptitle('', fontsize=13, fontweight='bold')
 
     def draw(k):
-        """Dibuja el cuadro k de la animacion (generacion frames[k]).
+        """Draw frame k of the animation (generation frames[k]).
 
         Args:
-            k: indice del cuadro o del elemento.
+            k: frame index.
 
         Returns:
-            Ver la descripcion de arriba.
+            The list of updated artists.
         """
         g = frames[k]
         finals = []
@@ -2026,7 +2036,7 @@ def animate_genetic_evolution(results, model, outdir: str,
                 continue
             made.append(path)
         except Exception as exc:                            # pragma: no cover
-            print(f"  (no pude guardar {fmt}: {type(exc).__name__}: {exc})")
+            print(f"  (could not save {fmt}: {type(exc).__name__}: {exc})")
     plt.close(fig)
     return made
 
@@ -2075,21 +2085,21 @@ def plot_overlay_with_samplers(result: GAResult, sampler_sets: dict,
 
 
 def _spread_labels(ax, items, min_gap_frac: float = 0.045):
-    """Separa verticalmente etiquetas que se pisan, sin mover los datos.
+    """Vertically separate overlapping labels, without moving the data.
 
-    [B-OVERLAP] Las etiquetas directas de valor final resuelven el solapamiento
-    de las CURVAS, pero cuando dos curvas acaban casi en el mismo sitio son las
-    ETIQUETAS las que se pisan y el numero queda ilegible — que es peor que no
-    ponerlo, porque parece un valor y no lo es.
+    [B-OVERLAP] Direct final-value labels solve the overlap of the CURVES, but
+    when two curves end at almost the same place it is the LABELS that
+    overlap and the number becomes unreadable — which is worse than not
+    showing it, because it looks like a value and is not.
 
-    Empuja cada etiqueta lo justo para dejar un hueco minimo, en orden de
-    valor. Solo mueve el texto: el punto al que apunta no cambia, asi que la
-    figura no miente sobre donde acaba cada curva.
+    Pushes each label just enough to leave a minimum gap, in order of value.
+    Only the text moves: the point it refers to does not change, so the
+    figure does not lie about where each curve ends.
 
     Args:
-        ax: eje que contiene las anotaciones.
-        items: lista de (valor_y, objeto_anotacion).
-        min_gap_frac: hueco minimo como fraccion del rango del eje.
+        ax: axis holding the annotations.
+        items: list of (y_value, annotation_object).
+        min_gap_frac: minimum gap as a fraction of the axis range.
     """
     if len(items) < 2:
         return
@@ -2107,23 +2117,25 @@ def _spread_labels(ax, items, min_gap_frac: float = 0.045):
 
 
 def _chi2_axis(ax, results, plt):
-    """Formatea un eje de chi2 para que NO mienta con notacion de offset.
+    """Format a chi2 axis so that it does NOT lie with offset notation.
 
-    [B-OFFSET] Los rungs convergen a chi2 casi identicos — con CC+BAO+Pantheon
-    (~1099 puntos) todos aterrizan cerca de 1100 — asi que el rango del eje es
-    de decimas sobre un valor de cuatro cifras. Ante eso matplotlib etiqueta el
-    eje 0.0, 0.1, 0.2... y pone un "+1.1e3" minusculo en una esquina, con lo
-    que la figura APARENTA un chi2 entre 0 y 1. Un lector razonable concluye
-    que esta viendo el chi2 reducido, o que el ajuste es absurdamente bueno.
+    [B-OFFSET] The rungs converge to almost identical chi2 — with
+    CC+BAO+Pantheon (~1099 points) they all land near 1100 — so the axis
+    range is tenths on top of a four-digit value. Faced with that, matplotlib
+    labels the axis 0.0, 0.1, 0.2... and puts a tiny "+1.1e3" in a corner, so
+    the figure APPEARS to show a chi2 between 0 and 1. A reasonable reader
+    concludes they are looking at the reduced chi2, or that the fit is
+    absurdly good.
 
-    Se desactiva el offset y se anade al eje el numero de datos y el chi2
-    reducido, que es lo que de verdad permite juzgar el ajuste de un vistazo:
-    chi2 ~ 1100 con 1099 puntos es chi2_red ~ 1.0, es decir, un buen ajuste.
+    The offset is disabled and the number of data points and the reduced
+    chi2 are added to the axis, which is what really lets one judge the fit
+    at a glance: chi2 ~ 1100 with 1099 points is chi2_red ~ 1.0, i.e. a good
+    fit.
 
     Args:
-        ax: eje de matplotlib.
-        results: `GAResult` de la figura (para sacar n_data y chi2_red).
-        plt: modulo pyplot.
+        ax: matplotlib axis.
+        results: the figure's `GAResult`s (to get n_data and chi2_red).
+        plt: the pyplot module.
     """
     ax.ticklabel_format(axis='y', style='plain', useOffset=False)
     ax.get_yaxis().get_major_formatter().set_useOffset(False)
@@ -2150,11 +2162,11 @@ def plot_fitness_curve(results: Sequence[GAResult], outdir: str,
     convergence speed and final χ² are directly comparable.
 
     Args:
-        results: resultados de todos los rungs.
-        outdir: carpeta donde escribir la salida.
-        model: modelo cosmologico (`cosmo_core.CosmoModel`).
-        tag: etiqueta corta que va al nombre de archivo y a los mensajes. Por
-            defecto None.
+        results: results of all rungs.
+        outdir: folder to write the output into.
+        model: cosmological model (`cosmo_core.CosmoModel`).
+        tag: short label used in the file name and in messages. Defaults to
+            None.
 
     Returns:
         str
@@ -2162,9 +2174,9 @@ def plot_fitness_curve(results: Sequence[GAResult], outdir: str,
     os.makedirs(outdir, exist_ok=True)
     tag = tag or f"{model.name}_fitness"
     fig, ax = plt.subplots(figsize=(9, 5))
-    # [B-OVERLAP] Un color, un estilo y un grosor por rung, mas la etiqueta
-    # directa del valor final: las curvas convergen a valores que difieren en
-    # milesimas y a color solo se leen como una sola.
+    # [B-OVERLAP] One color, one style and one width per rung, plus the direct
+    # final-value label: the curves converge to values that differ by
+    # thousandths and with color alone they read as a single one.
     pal = [C_GENETIC, C_GENETIC2, C_QUANTUM2, C_CLASSICAL2, C_QUANTUM]
     order = sorted(results, key=lambda x: x.quantumness)
     end_labels = []
@@ -2200,7 +2212,7 @@ def plot_fitness_curve(results: Sequence[GAResult], outdir: str,
     return f
 
 
-# ── CSV export matching the shared `resultados_config.csv` schema ────────────
+# ── CSV export matching the shared `results_config.csv` schema ───────────────
 #: Exact field order written by lcdm_quantum_samplers_personal.py so the
 #: genetic rows append cleanly to the same accumulating table.
 def _ga_side(result: GAResult, post: Posterior,
@@ -2221,7 +2233,7 @@ def _ga_side(result: GAResult, post: Posterior,
     st = result.stats
     return {
         'mu': mu, 'std': std, 'elapsed': result.elapsed,
-        # [B-REFINE] El chi2 de la rejilla es el unico que distingue rungs.
+        # [B-REFINE] The grid chi2 is the only one that tells rungs apart.
         'chi2_grid': float(getattr(result, 'chi2_grid', float('nan'))),
         'chi2': st['chi2'], 'n_data': st['n_data'],
         'chi2_red': st['chi2_red'], 'AIC': st['AIC'], 'BIC': st['BIC'],
@@ -2229,27 +2241,28 @@ def _ga_side(result: GAResult, post: Posterior,
         # genetic optimizers have neither MH acceptance nor a VI KL, so those
         # columns are left blank by the shared writer (is_mcmc=True, no keys).
         #
-        # [B-PROV-GEN] El peldano de ruido va EN el dict, no se deja que el
-        # escritor lo lea de un global. `csv_row_for_side` vive en
-        # cosmo_modular_quantum y `csv_provenance` leia el `NOISE` de ESE
-        # modulo; el CLI del genetico solo fija el de ESTE. Resultado medido en
-        # las tres campanas: toda fila genetica decia noise='none', incluidas
-        # las de las tareas `noise-readout`, `noise-full` y `noise-fakebrisbane`
-        # — el eje de ruido del genetico era irreconstruible desde el CSV, que
-        # es exactamente la falla que [B-PROV] arreglo para los samplers.
+        # [B-PROV-GEN] The noise rung goes IN the dict; the writer is not left
+        # to read it from a global. `csv_row_for_side` lives in
+        # cosmo_modular_quantum and `csv_provenance` read the `NOISE` of THAT
+        # module; the genetic CLI only sets the one in THIS module. Measured
+        # result in the three campaigns: every genetic row said noise='none',
+        # including those of the `noise-readout`, `noise-full` and
+        # `noise-fakebrisbane` tasks — the genetic noise axis could not be
+        # reconstructed from the CSV, which is exactly the failure [B-PROV]
+        # fixed for the samplers.
         'noise': getattr(NOISE, 'label', 'none'),
         'noise_params': getattr(NOISE, 'params', ''),   # [E-PROV]
-        # [B-PROV-GEN] Idem con la semilla: el genetico la lleva en GAConfig y
-        # nunca llegaba al CSV, asi que la columna `seed` salia vacia en toda
-        # corrida genetica y `comparar_semillas.py` no podia usarla.
+        # [B-PROV-GEN] Same for the seed: the genetic algorithm carries it in
+        # GAConfig and it never reached the CSV, so the `seed` column came out
+        # empty in every genetic run and `compare_seeds.py` could not use it.
         'seed': ('' if seed is None else str(int(seed))),
     }
 
 
 def append_results_csv(result: GAResult, post: Posterior,
                        dataset_label: str, prior_type: str,
-                       run_csv: str = "resultados_config.csv",
-                       cumulative_csv: str = "resultados_config.csv",
+                       run_csv: str = "results_config.csv",
+                       cumulative_csv: str = "results_config.csv",
                        n_bits: Optional[int] = None,
                        seed: Optional[int] = None) -> str:
     """Append the genetic MAP to the per-run AND cumulative results CSVs.
@@ -2267,18 +2280,18 @@ def append_results_csv(result: GAResult, post: Posterior,
     written in the nqpp column for a QGA, '—' for the classical CGA.
 
     Args:
-        result: `GAResult` de una corrida del genetico.
-        post: posterior cosmologico activo (`cosmo_core.Posterior`).
-        dataset_label: nombre del dataset, tal como va al CSV.
-        prior_type: 'flat' o 'gaussian'.
-        run_csv: CSV de esta corrida, dentro de su propia carpeta. Por defecto
-            'resultados_config.csv'.
-        cumulative_csv: CSV acumulado compartido entre corridas. Por defecto
-            'resultados_config.csv'.
-        n_bits: bits por parametro en la codificacion del genetico. Por
-            defecto None.
-        seed: [B-PROV-GEN] semilla de la corrida (`GAConfig.seed`), para que la
-            fila diga por si sola con que semilla se obtuvo.
+        result: `GAResult` of a genetic run.
+        post: active cosmological posterior (`cosmo_core.Posterior`).
+        dataset_label: dataset name, as it goes into the CSV.
+        prior_type: 'flat' or 'gaussian'.
+        run_csv: CSV of this run, inside its own folder. Defaults to
+            'results_config.csv'.
+        cumulative_csv: cumulative CSV shared across runs. Defaults to
+            'results_config.csv'.
+        n_bits: bits per parameter in the genetic encoding. Defaults to
+            None.
+        seed: [B-PROV-GEN] run seed (`GAConfig.seed`), so that the row says
+            on its own which seed produced it.
 
     Returns:
         str
@@ -2328,7 +2341,7 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
                 logger=None, log_every: int = 10, shots: int = 1,
                 make_plots: bool = True, write_csv: bool = True,
                 sampler_overlay: Optional[dict] = None,
-                cumulative_csv: str = "resultados_config.csv",
+                cumulative_csv: str = "results_config.csv",
                 save_state: bool = True
                 ) -> Dict[str, GAResult]:
     """Run the requested genetic optimizers and wire results into the pipeline.
@@ -2347,13 +2360,13 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
         log_every: generational cadence for logging / live updates.
         shots: Aer shots per circuit (QGA).
         make_plots: produce corner + fitness figures.
-        write_csv: append MAP rows to resultados_config.csv.
+        write_csv: append MAP rows to results_config.csv.
         sampler_overlay: optional dict for the all-in-one overlay (see
             `plot_overlay_with_samplers`). If provided, an overlay corner is
             also produced for each genetic result.
-        save_state: escribir `ga_state.npz` con la poblacion final y la
-            historia, para poder redibujar las figuras despues sin repetir la
-            optimizacion ([B-NOSTATE]).
+        save_state: write `ga_state.npz` with the final population and the
+            history, so the figures can be redrawn later without repeating the
+            optimization ([B-NOSTATE]).
 
     Returns:
         dict mapping method name -> GAResult.
@@ -2377,7 +2390,7 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
             #   1) a per-run copy inside this run's folder (NAMED columns),
             #   2) the cumulative global table in the CWD (GENERIC columns,
             #      so mixed models share one tidy file).
-            run_csv = os.path.join(outdir, "resultados_config.csv")
+            run_csv = os.path.join(outdir, "results_config.csv")
             append_results_csv(res, post, dataset_label, prior_type,
                                run_csv=run_csv,
                                cumulative_csv=cumulative_csv,
@@ -2386,34 +2399,34 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
                 f"(+ cumulative {cumulative_csv})")
 
         if make_plots:
-            # [PLOT-GA] El corner de la poblacion final ya NO se genera por
-            # defecto: un GA converge a un punto, asi que ese corner es un
-            # punto con unos pixeles alrededor y no distingue un rung de otro.
-            # Su sustituto (`plot_genetic_convergence`) se genera una sola vez
-            # con TODOS los rungs juntos, mas abajo, porque la comparacion
-            # entre rungs es justo lo que la figura debe mostrar.
+            # [PLOT-GA] The final-population corner is NO longer generated by
+            # default: a GA converges to a point, so that corner is a dot with
+            # a few pixels around it and does not tell one rung from another.
+            # Its replacement (`plot_genetic_convergence`) is generated only
+            # once with ALL rungs together, further down, because the
+            # comparison between rungs is exactly what the figure must show.
             if sampler_overlay:
-                # El overlay SI se conserva: ahi el punto del genetico sobre el
-                # posterior de los samplers es informativo — dice si el MAP cae
-                # dentro de la nube o fuera.
+                # The overlay IS kept: there the genetic point on top of the
+                # samplers' posterior is informative — it tells whether the MAP
+                # falls inside the cloud or outside.
                 f2 = plot_overlay_with_samplers(
                     res, sampler_overlay, model, outdir)
                 say(f"[{res.method}] all-in-one overlay: {f2}")
 
-    # [B-NOSTATE] El estado se guarda SIEMPRE, haya figuras o no, y antes de
-    # dibujarlas: si el proceso muere renderizando (matplotlib con poca RAM,
-    # un GIF grande), los datos ya estan en disco y las figuras se rehacen con
-    # --replot en segundos.
+    # [B-NOSTATE] The state is ALWAYS saved, with or without figures, and
+    # before drawing them: if the process dies while rendering (matplotlib low
+    # on RAM, a large GIF), the data are already on disk and the figures are
+    # redone with --replot in seconds.
     if save_state:
         state_path = save_ga_state(
             list(results.values()), model, outdir,
             extra={'dataset': dataset_label, 'prior': prior_type,
                    'n_bits': n_bits, 'noise': getattr(NOISE, 'label', 'none')})
-        say(f"Estado del genetico guardado: {state_path}")
+        say(f"Genetic state saved: {state_path}")
 
     if make_plots and len(results) > 1:
-        # Con un solo metodo no hay nada que comparar: en --sweep-all la figura
-        # conjunta la genera el llamador con todos los rungs acumulados.
+        # With a single method there is nothing to compare: in --sweep-all the
+        # joint figure is produced by the caller with all accumulated rungs.
         f3 = plot_fitness_curve(list(results.values()), outdir, model)
         say(f"Fitness convergence figure: {f3}")
         f4 = plot_genetic_convergence(list(results.values()), model, outdir)
@@ -2427,54 +2440,55 @@ def run_genetic(post: Posterior, methods: Sequence[str], ga: GAConfig,
 
 
 # =============================================================================
-# 6b.  PERSISTENCIA DEL ESTADO DEL GENETICO
+# 6b.  PERSISTENCE OF THE GENETIC STATE
 # =============================================================================
 #
-# [B-NOSTATE] Por que existe esto.
+# [B-NOSTATE] Why this exists.
 #
-# Las figuras del genetico (`plot_genetic_convergence`, `plot_fitness_curve`,
-# `animate_genetic_evolution`) se dibujan a partir de la POBLACION FINAL y de
-# la HISTORIA por generacion. Nada de eso se guardaba en disco: al terminar la
-# tarea, los arreglos morian con el proceso y solo sobrevivian el CSV y los
-# PNG ya renderizados.
+# The genetic figures (`plot_genetic_convergence`, `plot_fitness_curve`,
+# `animate_genetic_evolution`) are drawn from the FINAL POPULATION and the
+# per-generation HISTORY. None of that was saved to disk: when the task
+# finished, the arrays died with the process and only the CSV and the
+# already-rendered PNGs survived.
 #
-# La consecuencia se descubrio al corregir [B-GAPLOT]: una figura tenia mal la
-# barra de error, y para volver a dibujarla bien HABIA QUE REPETIR LA CAMPANA
-# ENTERA. En una corrida donde una celda ruidosa a 12 qubits tarda dos dias,
-# eso convierte "cambiame el color de esta curva" en una semana de computo.
+# The consequence was discovered while fixing [B-GAPLOT]: a figure had the
+# wrong error bar, and redrawing it correctly REQUIRED REPEATING THE WHOLE
+# CAMPAIGN. In a run where a noisy 12-qubit cell takes two days, that turns
+# "change the color of this curve" into a week of compute.
 #
-# El formato es deliberadamente aburrido y sin `pickle`: un `.npz` comprimido
-# con los arreglos y un bloque JSON con los escalares. `pickle` guardaria el
-# objeto entero en una linea, pero se rompe al cambiar de version de numpy o
-# al renombrar una clase, y estos archivos tienen que seguir abriendose dentro
-# de dos anos, cuando toque rehacer una figura para la defensa.
+# The format is deliberately boring and `pickle`-free: a compressed `.npz`
+# with the arrays and a JSON block with the scalars. `pickle` would store the
+# whole object in one line, but it breaks when the numpy version changes or a
+# class is renamed, and these files must still open two years from now, when
+# a figure has to be redone for the defense.
 #
-# Coste: ~1-3 MB por tarea comprimido. La poblacion por generacion se guarda
-# en float32 porque solo alimenta la animacion; la poblacion final, su fitness
-# y sus pesos se guardan en float64 porque de ellos salen los numeros del CSV.
+# Cost: ~1-3 MB per task, compressed. The per-generation population is stored
+# as float32 because it only feeds the animation; the final population, its
+# fitness and its weights are stored as float64 because the CSV numbers come
+# from them.
 
-#: Version del formato. Sube si cambia el esquema, para que el lector avise en
-#: vez de fallar de forma rara.
+#: Format version. Bump it if the schema changes, so the reader warns instead
+#: of failing in some odd way.
 GA_STATE_VERSION = 1
 
-#: Nombre por defecto del archivo de estado dentro de la carpeta de la tarea.
+#: Default name of the state file inside the task folder.
 GA_STATE_FILENAME = "ga_state.npz"
 
 
 def save_ga_state(results: Sequence['GAResult'], model, outdir: str,
                   filename: str = GA_STATE_FILENAME,
                   extra: Optional[dict] = None) -> str:
-    """Guarda todo lo necesario para redibujar las figuras del genetico.
+    """Save everything needed to redraw the genetic figures.
 
     Args:
-        results: los `GAResult` de todos los rungs de esta configuracion.
-        model: `CosmoModel` activo (se guarda solo su identidad, no el objeto).
-        outdir: carpeta de la tarea.
-        filename: nombre del archivo.
-        extra: metadatos libres (dataset, n_bits, nivel de ruido, semilla...).
+        results: the `GAResult`s of all rungs of this configuration.
+        model: active `CosmoModel` (only its identity is stored, not the object).
+        outdir: task folder.
+        filename: file name.
+        extra: free-form metadata (dataset, n_bits, noise level, seed...).
 
     Returns:
-        Ruta del archivo escrito.
+        Path of the written file.
     """
     os.makedirs(outdir, exist_ok=True)
     path = os.path.join(outdir, filename)
@@ -2503,7 +2517,7 @@ def save_ga_state(results: Sequence['GAResult'], model, outdir: str,
         arrays[p + 'final_fit'] = np.asarray(r.final_fit, dtype=np.float64)
         arrays[p + 'final_weights'] = np.asarray(r.final_weights,
                                                  dtype=np.float64)
-        # historia: se aplana a arreglos paralelos para no depender de dicts
+        # history: flattened into parallel arrays so as not to depend on dicts
         hist = list(r.history or [])
         arrays[p + 'hist_gen'] = np.array([h['gen'] for h in hist], dtype=int)
         arrays[p + 'hist_best_chi2'] = np.array(
@@ -2513,7 +2527,7 @@ def save_ga_state(results: Sequence['GAResult'], model, outdir: str,
         arrays[p + 'hist_theta_best'] = (
             np.array([h['theta_best'] for h in hist], dtype=np.float64)
             if hist else np.zeros((0, model.n_params)))
-        # [ANIM] float32: solo alimenta la animacion, y a la mitad de tamano
+        # [ANIM] float32: it only feeds the animation, at half the size
         if r.pop_history:
             arrays[p + 'pop_history'] = np.asarray(r.pop_history,
                                                    dtype=np.float32)
@@ -2540,28 +2554,28 @@ def save_ga_state(results: Sequence['GAResult'], model, outdir: str,
 
 
 def load_ga_state(path: str) -> Tuple[List['GAResult'], dict]:
-    """Reconstruye los `GAResult` guardados por `save_ga_state`.
+    """Rebuild the `GAResult`s saved by `save_ga_state`.
 
-    Los objetos devueltos bastan para volver a llamar a
-    `plot_genetic_convergence`, `plot_fitness_curve` y
-    `animate_genetic_evolution` sin repetir la optimizacion.
+    The returned objects are enough to call `plot_genetic_convergence`,
+    `plot_fitness_curve` and `animate_genetic_evolution` again without
+    repeating the optimization.
 
     Args:
-        path: ruta del `.npz`.
+        path: path of the `.npz`.
 
     Returns:
-        `(results, meta)` — la lista de resultados y el bloque de metadatos.
+        `(results, meta)` — the list of results and the metadata block.
 
     Raises:
-        ValueError: si el archivo viene de un esquema mas nuevo.
+        ValueError: if the file comes from a newer schema.
     """
     z = np.load(path, allow_pickle=False)
     meta = json.loads(str(z['meta_json']))
     ver = int(meta.get('version', 0))
     if ver > GA_STATE_VERSION:
         raise ValueError(
-            f"{path} usa el formato de estado v{ver}, y este codigo entiende "
-            f"hasta v{GA_STATE_VERSION}. Actualiza cosmo_genetic_optimizers.py")
+            f"{path} uses state format v{ver}, and this code understands up "
+            f"to v{GA_STATE_VERSION}. Update cosmo_genetic_optimizers.py")
 
     results: List[GAResult] = []
     for i, rm in enumerate(meta['results']):
@@ -2579,8 +2593,8 @@ def load_ga_state(path: str) -> Tuple[List['GAResult'], dict]:
             theta_map=z[p + 'theta_map'],
             chi2_map=rm['chi2_map'],
             stats=rm.get('stats', {}),
-            # [B-REFINE] Estados guardados antes de que existieran estos campos
-            # no los traen: se cae al MAP refinado, que es lo unico que hay.
+            # [B-REFINE] States saved before these fields existed do not carry
+            # them: fall back to the refined MAP, which is all there is.
             theta_grid=(z[p + 'theta_grid'] if (p + 'theta_grid') in z.files
                         else z[p + 'theta_map']),
             chi2_grid=float(rm.get('chi2_grid', rm['chi2_map'])),
@@ -2601,18 +2615,18 @@ def load_ga_state(path: str) -> Tuple[List['GAResult'], dict]:
 
 def replot_from_state(path: str, outdir: Optional[str] = None,
                       animate: bool = True) -> List[str]:
-    """Redibuja TODAS las figuras del genetico desde un estado guardado.
+    """Redraw ALL the genetic figures from a saved state.
 
-    Es el punto de la persistencia: cambiar una figura deja de costar una
-    campana entera.
+    That is the point of the persistence: changing a figure no longer costs a
+    whole campaign.
 
     Args:
-        path: ruta del `ga_state.npz`.
-        outdir: donde escribir; por defecto, junto al estado.
-        animate: si False, se salta el GIF (que es lo mas lento).
+        path: path of the `ga_state.npz`.
+        outdir: where to write; by default, next to the state.
+        animate: if False, the GIF (the slowest part) is skipped.
 
     Returns:
-        Rutas de las figuras generadas.
+        Paths of the generated figures.
     """
     results, meta = load_ga_state(path)
     model = MODELS[meta['model']]
@@ -2701,14 +2715,14 @@ def interactive_menu() -> dict:
         qcfg = dict(QGA_PRESETS.get(qi, QGA_PRESETS[100]))
 
     def ask_int(prompt, default):
-        """Lee un entero del menu interactivo; vuelve al default si no es valido.
+        """Read an integer in the interactive menu; fall back to the default if invalid.
 
         Args:
-            prompt: texto que se muestra al usuario.
-            default: valor que se usa si la entrada es vacia o invalida.
+            prompt: text shown to the user.
+            default: value used if the input is empty or invalid.
 
         Returns:
-            Ver la descripcion de arriba.
+            The integer read, or `default`.
         """
         raw = input(f"\n{prompt} [{default}]: ").strip()
         try:
@@ -2839,46 +2853,46 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--log-every', type=int, default=10,
                    help='Generational logging cadence (default: 10)')
     p.add_argument('--no-plot', action='store_true', help='Skip all figures')
-    # [B-NOSTATE] Redibujar sin repetir la optimizacion.
+    # [B-NOSTATE] Redraw without repeating the optimization.
     p.add_argument('--replot', type=str, default=None, metavar='GA_STATE.NPZ',
-                   help='NO optimiza: carga un ga_state.npz guardado por una '
-                        'corrida anterior y vuelve a generar TODAS sus '
-                        'figuras. Sirve para arreglar una figura sin repetir '
-                        'la campana — que antes era la unica via, porque la '
-                        'poblacion final no se guardaba en disco. Combinalo '
-                        'con --outdir para escribir en otro sitio y con '
-                        '--anim none para saltarte el GIF.')
+                   help='Does NOT optimize: loads a ga_state.npz saved by a '
+                        'previous run and regenerates ALL of its figures. '
+                        'Useful to fix a figure without repeating the '
+                        'campaign — which used to be the only way, because '
+                        'the final population was not saved to disk. Combine '
+                        'it with --outdir to write elsewhere and with '
+                        '--anim none to skip the GIF.')
     p.add_argument('--no-state', action='store_true',
-                   help='No escribir ga_state.npz (ahorra ~1-3 MB por tarea a '
-                        'cambio de que cualquier cambio futuro en una figura '
-                        'exija repetir la corrida).')
+                   help='Do not write ga_state.npz (saves ~1-3 MB per task, at '
+                        'the cost that any future change to a figure requires '
+                        'repeating the run).')
     p.add_argument('--no-csv', action='store_true',
-                   help='Do not append to resultados_config.csv')
+                   help='Do not append to results_config.csv')
     p.add_argument('--no-live', action='store_true',
                    help='Force-disable the live GUI even in interactive mode')
-    # [ANIM] La animacion se guarda SIEMPRE por defecto, tambien en modo batch:
-    # es material de presentacion y no cuesta casi nada (se submuestrea a 120
-    # cuadros como mucho). --anim none la desactiva.
+    # [ANIM] The animation is ALWAYS saved by default, also in batch mode: it
+    # is presentation material and costs almost nothing (it is subsampled to
+    # at most 120 frames). --anim none disables it.
     p.add_argument('--anim', type=str, default='gif',
                    choices=('gif', 'mp4', 'both', 'none'),
-                   help="animacion de la evolucion de la poblacion, con todos "
-                        "los rungs de quantumness superpuestos. Por defecto "
-                        "'gif' (no necesita ffmpeg y se inserta directo en "
-                        "diapositivas); 'mp4' pesa menos pero exige ffmpeg; "
-                        "'both' guarda los dos; 'none' no anima.")
+                   help="animation of the population evolution, with all "
+                        "quantumness rungs overlaid. Default 'gif' (needs no "
+                        "ffmpeg and drops straight into slides); 'mp4' is "
+                        "smaller but requires ffmpeg; 'both' saves both; "
+                        "'none' does not animate.")
     p.add_argument('--anim-layout', type=str, default='overlay',
                    choices=('overlay', 'facets'),
-                   help="'overlay' pone todos los rungs en un panel (se ve que "
-                        "convergen juntos, pero las nubes se tapan); 'facets' "
-                        "da un panel a cada uno (todos visibles, sin "
-                        "comparacion directa).")
+                   help="'overlay' puts all rungs in one panel (one sees "
+                        "that they converge together, but the clouds hide each "
+                        "other); 'facets' gives each one its own panel (all "
+                        "visible, no direct comparison).")
     p.add_argument('--anim-fps', type=int, default=8,
-                   help='cuadros por segundo de la animacion (por defecto 8)')
-    # [NOISE] Segundo eje de ablacion. `--noise none` (por defecto) reproduce
-    # bit a bit el comportamiento previo a este eje.
+                   help='animation frames per second (default 8)')
+    # [NOISE] Second ablation axis. `--noise none` (the default) reproduces
+    # bit for bit the behaviour from before this axis.
     cnoise.add_noise_cli(p)
     p.add_argument('--gpu-check', action='store_true',
-                   help='imprime por que la GPU esta o no disponible y sale, sin correr nada. Util en una HPC nueva: --gpu degrada a CPU cuando Aer no expone GPU, y sin este chequeo eso solo se nota por el tiempo de pared.')
+                   help='print why the GPU is or is not available and exit, without running anything. Useful on a new HPC: --gpu falls back to CPU when Aer exposes no GPU, and without this check that is only noticed through the wall time.')
     p.add_argument('--gpu', action='store_true',
                    help='Use the GPU for the QGA Aer simulation if available '
                         '(qiskit-aer-gpu + CUDA). Falls back to CPU otherwise. '
@@ -2988,7 +3002,7 @@ def run_genetic_sweep_all(models, qga_levels, methods, dataset, prior, ga,
     """
     say = logger.info if logger else print
     cumulative_master = os.path.join(master_dir,
-                                     "resultados_TODOS_los_modelos.csv")
+                                     "results_all_models.csv")
     status = {}
     t_start = time.time()
 
@@ -3009,10 +3023,10 @@ def run_genetic_sweep_all(models, qga_levels, methods, dataset, prior, ga,
         try:
             post = Posterior(MODELS[model_name], dataset, prior)
 
-            # [PLOT-GA] Los resultados de TODOS los rungs se acumulan para
-            # que la figura de convergencia los compare en una sola imagen.
-            # Generarla dentro de cada llamada produciria una figura por rung,
-            # cada una con una sola curva — que es justo lo que no sirve.
+            # [PLOT-GA] The results of ALL rungs are accumulated so that the
+            # convergence figure compares them in a single image. Generating
+            # it inside each call would produce one figure per rung, each
+            # with a single curve — which is exactly what is useless.
             all_res: List[GAResult] = []
 
             # CGA once (no quantumness).
@@ -3039,30 +3053,30 @@ def run_genetic_sweep_all(models, qga_levels, methods, dataset, prior, ga,
                         cumulative_csv=cumulative_master,
                         save_state=False).values())
 
-            # [B-NOSTATE] Un solo estado con TODOS los rungs de esta
-            # configuracion. En --sweep-all cada rung se corre con su propia
-            # llamada a run_genetic, asi que si cada una escribiera su estado
-            # se pisarian entre si y el ultimo ganaria; el estado util es el
-            # que permite redibujar la escalera completa.
+            # [B-NOSTATE] A single state with ALL rungs of this configuration.
+            # In --sweep-all each rung runs in its own call to run_genetic, so
+            # if each one wrote its state they would overwrite each other and
+            # the last would win; the useful state is the one that allows
+            # redrawing the whole ladder.
             if save_state and all_res:
                 sp = save_ga_state(
                     all_res, post.model, model_dir,
                     extra={'dataset': dataset, 'prior': prior,
                            'n_bits': n_bits,
                            'noise': getattr(NOISE, 'label', 'none')})
-                say(f"  estado del genetico: {sp}")
+                say(f"  genetic state: {sp}")
 
             if not no_plot and len(all_res) > 1:
                 f = plot_genetic_convergence(all_res, post.model, model_dir)
                 if f:
-                    say(f"  escalera completa en una figura: {f}")
+                    say(f"  whole ladder in one figure: {f}")
                 f = plot_fitness_curve(all_res, model_dir, post.model)
-                say(f"  fitness de todos los rungs: {f}")
-                # [ANIM] Todos los rungs en la MISMA animacion: es donde se ve
-                # cual converge antes y cual se queda atascado.
+                say(f"  fitness of all rungs: {f}")
+                # [ANIM] All rungs in the SAME animation: that is where one
+                # sees which converges first and which gets stuck.
                 for a in animate_genetic_evolution(
                         all_res, post.model, model_dir, formats=ANIM_FORMATS, layout=ANIM_LAYOUT):
-                    say(f"  animacion: {a}")
+                    say(f"  animation: {a}")
             status[model_name] = 'ok'
             say(f"[{i}/{len(models)}] {model_name}: DONE -> {model_dir}/")
         except Exception as exc:
@@ -3086,14 +3100,14 @@ def run_genetic_sweep_all(models, qga_levels, methods, dataset, prior, ga,
 def main(argv: Optional[List[str]] = None) -> int:
     """Entry point.
 
-    REGLA CRÍTICA (headless rule): if the script is launched with ANY CLI
+    CRITICAL RULE (headless rule): if the script is launched with ANY CLI
     argument we are in batch/HPC mode -> the live animation is DISABLED and the
     generational progress goes to the log file every --log-every generations.
     Without arguments we enter the interactive menu and the live GUI is shown.
 
     Args:
-        argv: argumentos de linea de comandos; None usa `sys.argv`. Por
-            defecto None.
+        argv: command-line arguments; None uses `sys.argv`. Defaults to
+            None.
 
     Returns:
         int
@@ -3109,9 +3123,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if getattr(args, 'self_test', False):
         return self_test()
 
-    # [B-NOSTATE] --replot no optimiza nada: rehace las figuras de una corrida
-    # ya hecha. Va antes que cualquier validacion de argumentos de la
-    # optimizacion, porque ninguno de esos aplica aqui.
+    # [B-NOSTATE] --replot does not optimize anything: it redoes the figures
+    # of a finished run. It goes before any validation of the optimization
+    # arguments, because none of them applies here.
     if getattr(args, 'replot', None):
         global ANIM_FORMATS, ANIM_LAYOUT
         ANIM_FORMATS = {'gif': ('gif',), 'mp4': ('mp4',),
@@ -3124,15 +3138,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 outdir=(args.outdir if args.outdir != 'results' else None),
                 animate=bool(ANIM_FORMATS))
         except FileNotFoundError:
-            sys.stderr.write(f"No existe el estado: {args.replot}\n")
+            sys.stderr.write(f"State file does not exist: {args.replot}\n")
             return 2
         except ValueError as e:
             sys.stderr.write(f"{e}\n")
             return 2
         for f in figs:
-            print(f"  regenerada: {f}")
+            print(f"  regenerated: {f}")
         if not figs:
-            print("  (el estado no contenia rungs suficientes para figuras)")
+            print("  (the state did not contain enough rungs for figures)")
         return 0
 
     # CLI mode = any argument present (other than the bare program name).
@@ -3189,14 +3203,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                     'none': ()}[getattr(args, 'anim', 'gif')]
     ANIM_LAYOUT = getattr(args, 'anim_layout', 'overlay')
 
-    # [NOISE] Publicar el peldano ANTES de construir ningun QGA: el simulador
-    # nace en __init__ y los circuitos se transpilan una sola vez contra el.
+    # [NOISE] Publish the rung BEFORE building any QGA: the simulator is born
+    # in __init__ and the circuits are transpiled against it only once.
     _spec = cnoise.spec_from_args(args)
     set_noise(_spec)
     if not _spec.is_ideal:
-        print(f"[NOISE] peldano='{_spec.label}' | metodo=density_matrix | "
-              f"techo={cnoise.MAX_NOISY_QUBITS}q | "
-              f"el QGA ya lee por medicion: sin conversion de lectura")
+        print(f"[NOISE] rung='{_spec.label}' | method=density_matrix | "
+              f"cap={cnoise.MAX_NOISY_QUBITS}q | "
+              f"the QGA already reads by measurement: no readout conversion")
 
     # ── SWEEP-ALL: CGA + QGA across all models in one master folder ──
     if getattr(args, 'sweep_all', False):

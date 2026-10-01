@@ -56,7 +56,7 @@ class _GPUMonitor:
     """
 
     def __init__(self):
-        """Detecta si hay GPU legible, primero por NVML y si no por nvidia-smi."""
+        """Detect whether a readable GPU exists, first via NVML, else via nvidia-smi."""
         self.available = False
         self._backend = None
         self._handle = None
@@ -64,7 +64,7 @@ class _GPUMonitor:
         self._init_nvml() or self._init_smi()
 
     def _init_nvml(self) -> bool:
-        """Intenta inicializar pynvml. True si hay al menos una GPU visible."""
+        """Try to initialize pynvml. True if at least one GPU is visible."""
         try:
             import pynvml
             pynvml.nvmlInit()
@@ -79,7 +79,7 @@ class _GPUMonitor:
             return False
 
     def _init_smi(self) -> bool:
-        """Respaldo por `nvidia-smi` cuando pynvml no esta disponible."""
+        """Fallback via `nvidia-smi` when pynvml is not available."""
         if shutil.which('nvidia-smi') is None:
             return False
         try:
@@ -146,7 +146,7 @@ class _GPUMonitor:
             return 0.0, 0.0
 
     def close(self):
-        """Cierra NVML si se llego a inicializar. Seguro de llamar varias veces."""
+        """Shut down NVML if it was initialized. Safe to call more than once."""
         if self._backend == 'nvml' and self._pynvml is not None:
             try:
                 self._pynvml.nvmlShutdown()
@@ -224,12 +224,12 @@ class ResourceProfiler:
 
     def __init__(self, tag: str = 'run', device: str = 'CPU',
                  interval: float = 0.25):
-        """Perfilador de recursos de un proceso y sus hijos.
+        """Resource profiler for a process and its children.
 
         Args:
-            tag: etiqueta que va al nombre de los archivos de salida.
-            device: 'CPU' o 'GPU', solo para etiquetar el informe.
-            interval: segundos entre muestras.
+            tag: label used in the output file names.
+            device: 'CPU' or 'GPU', only used to label the report.
+            interval: seconds between samples.
         """
         self.tag = tag
         self.device = device
@@ -244,7 +244,7 @@ class ResourceProfiler:
 
     def _loop(self):
         # Prime cpu_percent (first call returns 0.0 by design).
-        """Bucle del hilo de muestreo: RSS, CPU y memoria de GPU."""
+        """Sampling-thread loop: RSS, CPU and GPU memory."""
         if self._proc is not None:
             self._proc.cpu_percent(None)
         while not self._stop.is_set():
@@ -297,9 +297,9 @@ class ResourceProfiler:
         headless. Returns the PNG path, or None if there were no samples.
 
         Args:
-            result: `GAResult` de una corrida del genetico.
-            outdir: carpeta donde escribir la salida.
-            title_extra: texto extra para el titulo. Por defecto ''.
+            result: `ProfileResult` of a profiled run.
+            outdir: folder to write the output into.
+            title_extra: extra text for the title. Defaults to ''.
 
         Returns:
             Optional[str]
@@ -360,7 +360,7 @@ def summarize(result: ProfileResult) -> str:
     """One-line human summary for logs/console.
 
     Args:
-        result: `GAResult` de una corrida del genetico.
+        result: `ProfileResult` of a profiled run.
 
     Returns:
         str

@@ -5,9 +5,9 @@ real data (combined CC+BAO H(z) measurements, and Type Ia supernovae —
 Pantheon 2018 or Pantheon+ 2022) using **classical** and **quantum**
 sampling algorithms, and compares them head to head.
 
-**Status:** post-Fase-4 (62 tests, all green). Fase 4 added the **noise axis** — a second, orthogonal ablation dimension, so results are now a 2-D matrix (quantumness x noise) instead of a ladder; see [The noise axis](#the-noise-axis-second-ablation-dimension). `--noise none` is the default and reproduces every previous result bit for bit.
+**Status:** post-Phase-4 (62 tests, all green). Phase 4 added the **noise axis** — a second, orthogonal ablation dimension, so results are now a 2-D matrix (quantumness x noise) instead of a ladder; see [The noise axis](#the-noise-axis-second-ablation-dimension). `--noise none` is the default and reproduces every previous result bit for bit.
 
-**Status (Fase 3):** hardening (33 tests, all green). Convergence,
+**Status (Phase 3):** hardening (33 tests, all green). Convergence,
 divergence-tracking (KL), gradients, and reproducibility were audited and
 fixed this round — see [Diagnostics and correctness fixes](#diagnostics-and-correctness-fixes)
 for the full list, and re-run any figure generated before this round before
@@ -278,7 +278,7 @@ overwrite or mix.
 For an HPC job you usually want **all models in one launch**. The
 `--sweep-all` flag runs the full quantumness benchmark (the QMCMC + QVMC
 ladders) for every model, into a single master folder with one subfolder
-per model, plus one cumulative CSV (`resultados_TODOS_los_modelos.csv`)
+per model, plus one cumulative CSV (`results_all_models.csv`)
 collecting every model/method/quantumness row for easy comparison. If a
 model fails, the sweep logs it and continues with the rest.
 
@@ -327,7 +327,7 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
   compares posteriors to each other, and a half-cooked one invalidates the
   comparison.
 * **Training curve** (`ladder_kl_*`) — the shape-fitting getting better
-  over time. Lower is a better fit. Since the Fase-3 hardening, this number
+  over time. Lower is a better fit. Since the Phase-3 hardening, this number
   can no longer look artificially good by ignoring probability the model
   puts in the wrong place — a genuinely bad fit now genuinely shows a high
   KL.
@@ -393,10 +393,10 @@ runner — reads its noise level from that one module.
 All executable scripts share the SAME physics through `cosmo_core.py`, select
 CPU/GPU through its `make_simulator` factory, and write their outputs into a
 **timestamped run folder** `results/run_<YYYYMMDD_HHMMSS>_<model>/` (figures,
-log, per-run `resultados_config.csv`, and — with `--profile` — a
+log, per-run `results_config.csv`, and — with `--profile` — a
 `resource_usage_*.png` and `profile_*.json`), so results from different runs
 never mix. Pass an explicit `--outdir` to override. A cumulative
-`resultados_config.csv` is also kept in the working directory to compare
+`results_config.csv` is also kept in the working directory to compare
 methods across runs.
 
 ### `cosmo_core.py` — shared physics module
@@ -549,7 +549,7 @@ a model (VC, …) needs zero changes here.
   **bit-for-bit** — the mandatory classical baseline (a faithful cell),
   verified by `--self-test`.
 
-  > **Fase 3 note — the crossover operator was rewritten.** The original
+  > **Phase 3 note — the crossover operator was rewritten.** The original
   > `q_crossover` circuit (CX entanglement + controlled-RY interference)
   > had a verified bug: it computed child ≈ parent_A XOR parent_B, so when
   > both parents *agreed* on a bit the child lost it with ~85% probability
@@ -566,7 +566,7 @@ a model (VC, …) needs zero changes here.
   `__init__`; each individual's gene bits enter only through bound rotation
   angles, so the per-generation hot loop binds parameters on the cached
   transpiled template and never re-transpiles. Aer measurement seeds are
-  derived deterministically from the run's `--seed` (Fase 3): two QGA runs
+  derived deterministically from the run's `--seed` (Phase 3): two QGA runs
   with the same seed now reproduce bit-for-bit, including the quantum
   operators (previously only the classical parts were reproducible).
 
@@ -578,7 +578,7 @@ text. A snapshot is saved to the run folder.
 **Integration**: fitness-weighted corner of the final population, an
 all-in-one overlay of the genetic MAP + spread on the MCMC/VI corners (reuses
 `plot_corner_multi`), a fitness-convergence figure, and a MAP row appended to
-`resultados_config.csv` under Method = `CGA` / `QGA (q=NN%)`.
+`results_config.csv` under Method = `CGA` / `QGA (q=NN%)`.
 
 **Headless rule**: launched with arguments → batch/HPC mode, the live
 animation is disabled automatically and the generational metrics go to the
@@ -689,11 +689,11 @@ design differences:
 | Aspect | Simulator | Real QPU |
 |---|---|---|
 | Quantum information | exact statevector | measured counts (shots) |
-| Proposal displacement | Re(amplitudes), unit-std calibrated from a fixed constant | ⟨Z_q⟩ = 1 − 2·P(q=1), **now also unit-std calibrated** from the first hardware block (Fase 3 — see Diagnostics) |
+| Proposal displacement | Re(amplitudes), unit-std calibrated from a fixed constant | ⟨Z_q⟩ = 1 − 2·P(q=1), **now also unit-std calibrated** from the first hardware block (Phase 3 — see Diagnostics) |
 | QVMC gradient | exact parameter-shift (shift applied to the circuit probabilities + chain rule) | **SPSA (2 evals/iter, 1 job)** |
 | KL | over the full 2^n grid, ε-smoothed target — same definition as the simulator | estimated on the observed support, ε-smoothed (same definition; biased low by unobserved support, declared) |
 | Acceptance | Metropolis via abs(amp0)^2 | Metropolis on CPU (sequential) |
-| Error suppression | — | Dynamical Decoupling XY4 + Pauli twirling (**inert on a simulated backend** — see [DD-INERTE](#qpu_noisy_simulationpy--noisy-twin-of-the-qpu-pipeline)) |
+| Error suppression | — | Dynamical Decoupling XY4 + Pauli twirling (**inert on a simulated backend** — see [DD-INERT](#qpu_noisy_simulationpy--noisy-twin-of-the-qpu-pipeline)) |
 
 ```bash
 # Plan without spending QPU time (no IBM account needed):
@@ -747,7 +747,7 @@ Practical notes: QMCMC scales much better (proposal batching amortizes the
 queue across 64 proposals); for QVMC, **Session** (paid plans) removes the
 inter-iteration queue; keep `--iters ≤ 50` on the open plan.
 
-<!-- eje-de-ruido-nisq -->
+<!-- nisq-noise-axis -->
 
 ## The noise axis (second ablation dimension)
 
@@ -905,7 +905,7 @@ python qpu_noisy_simulation.py --model lcdm --method qmcmc --noise full
 python qpu_noisy_simulation.py --model wcdm --method qvmc --noise FakeBrisbane
 ```
 
-> **[DD-INERTE] The error suppression is inert on a simulated backend.**
+> **[DD-INERT] The error suppression is inert on a simulated backend.**
 > `QPUConnection` enables dynamical decoupling XY4 and Pauli twirling. On real
 > hardware those act. In qiskit-ibm-runtime's local testing mode they are
 > **discarded**, announced only by a `UserWarning` that is lost in a long run's
@@ -942,7 +942,7 @@ Three of them, all silent — they returned clean, plausible numbers.
 statistics, and a per-preset engine map (Qiskit/Aer vs NumPy/SciPy) with a
 live routing trace.
 
-### Fase 3 hardening (convergence, KL, gradients, reproducibility)
+### Phase 3 hardening (convergence, KL, gradients, reproducibility)
 
 The most recent audit round (adversarial code review, all fixes verified
 with executed numerical checks, not just read) closed six specific gaps.
@@ -1001,7 +1001,7 @@ directly comparable to a new one** — regenerate before citing.
 
 ### Orchestrator audit (`cosmo_hpc_runner.py`)
 
-Reviewed after the Fase 3 round. One real defect, fixed and verified:
+Reviewed after the Phase 3 round. One real defect, fixed and verified:
 
 * **The QGA memory estimate used the samplers' formula.** Both the
   orchestrator and `cosmo_genetic_optimizers.py`'s own `--max-qubits`
@@ -1029,7 +1029,7 @@ Reviewed after the Fase 3 round. One real defect, fixed and verified:
   applies. Verified sane on both ends (14 GB laptop -> 20/29 q; ~106 GB HPC
   node -> 22/~34 q — no runaway multi-day plan from leaving it on auto).
 
-### Fase 2 audit (original hardening — kept for the record)
+### Phase 2 audit (original hardening — kept for the record)
 
 * **Apparent "identical results across quantumness".** Not a routing bug:
   each sampler only reads its own components, the `sampling` toggle draws
@@ -1048,7 +1048,7 @@ Reviewed after the Fase 3 round. One real defect, fixed and verified:
 * **Proposal calibration.** The quantum displacement is zero-mean but had
   std ≈ 0.35 (~3× smaller than the classical N(0,1)), pushing acceptance
   to ≈ 0.80 (slow mixing). Each block is normalized to unit std →
-  acceptance ≈ 0.5. (Fase 3 replaced the per-block normalization with a
+  acceptance ≈ 0.5. (Phase 3 replaced the per-block normalization with a
   once-off calibration — see above.)
 
 * **QVMC optimizer & the high-quantumness divergence.** Two distinct
@@ -1066,7 +1066,7 @@ Reviewed after the Fase 3 round. One real defect, fixed and verified:
   ansätze cool faster), and **(c) best-so-far selection** (the returned φ is
   the lowest-KL iterate ever seen, not the last — so even a wobbly tail
   reports the true minimum). The creep-up is gone; re-verified after the
-  Fase 3 exact-gradient fix (which changes the effective step scale) with
+  Phase 3 exact-gradient fix (which changes the effective step scale) with
   zero KL upticks across 150 iterations on the reference model. Note that
   the absolute KL floor depends on grid resolution (see adaptive grid
   below): with a coarse grid both classical and quantum plateau at a higher
@@ -1290,10 +1290,15 @@ are documented in detail in the technical habilitation dossier.
 
 Every run writes to a timestamped folder
 `results/run_<YYYYMMDD_HHMMSS>_<model>/` containing the figures, the log, a
-per-run `resultados_config.csv`, and (with `--profile`) the resource figure
-and JSON. A cumulative `resultados_config.csv` in the working directory
+per-run `results_config.csv`, and (with `--profile`) the resource figure
+and JSON. A cumulative `results_config.csv` in the working directory
 collects all runs across models for cross-comparison. Pass an explicit
 `--outdir` to override the folder.
+
+Campaigns produced before the English translation of the code base use the
+legacy names `resultados_config.csv`, `resultados_TODOS_los_modelos.csv` and
+`resultados_<model>.csv`; the scripts that read campaign folders accept both
+the new and the legacy names.
 
 ## Adding a new model (e.g. Variable Curvature)
 
@@ -1326,7 +1331,7 @@ ladder + classical baseline; the QPU dispatches it quantum-only.
 * Gelman & Rubin (1992) — original R̂ diagnostic.
 * Vehtari, Gelman, Simpson, Carpenter & Bürkner (2021) — rank-normalized
   split-R̂ and the 1.01 convergence threshold (the active criterion since
-  the Fase 3 hardening).
+  the Phase 3 hardening).
 * Sokal (1996) — integrated autocorrelation time and automatic windowing.
 * Foreman-Mackey et al. (2013, 2016) — emcee autocorrelation, corner.py.
 
@@ -1338,10 +1343,10 @@ physics:
 * **Pinned environment.** `requirements.txt` is pinned to the verified
   working environment (Qiskit 2.4.2 / Aer 0.17.2 / numpy 1.26.4); CUDA extras
   live in `requirements-gpu.txt`.
-* **Tests + CI.** `tests/` holds 62 tests (33 through Fase 3, plus 29 added in Fase 4 for the noise axis — the analytic readout map against Aer counts, the `[N1]` guard, the ideal rung's bit-for-bit reproducibility, the proposal's readout invariance, and the runner's third memory model): a pure-NumPy correctness floor
+* **Tests + CI.** `tests/` holds 62 tests (33 through Phase 3, plus 29 added in Phase 4 for the noise axis — the analytic readout map against Aer counts, the `[N1]` guard, the ideal rung's bit-for-bit reproducibility, the proposal's readout invariance, and the runner's third memory model): a pure-NumPy correctness floor
   (physics, statistics, the ablation framework, the QPU helpers) that runs
   without Qiskit, plus dedicated Qiskit-Aer regression tests — added in the
-  Fase 3 round — that verify the QGA crossover truth table, the exact
+  Phase 3 round — that verify the QGA crossover truth table, the exact
   training gradient, the KL leakage penalty, and the calibration/
   reproducibility of both proposal engines on real circuits. The Qiskit-Aer
   tests skip automatically if Qiskit/Aer are absent, so make sure the CI
@@ -1358,7 +1363,7 @@ physics:
   and the archived DOI once you mint a release on Zenodo).
 * **Determinism.** Runs are seeded (`--seed`, default 42). QGA's quantum
   operators and comparison-vs-baseline runs are now re-seeded explicitly at
-  the point each stochastic component starts (Fase 3), so a fixed seed
+  the point each stochastic component starts (Phase 3), so a fixed seed
   reproduces the quantum parts too, not just the classical ones. Note that
   float-reduction order under multi-threaded BLAS can make bit-for-bit
   identity across machines fragile; the "QGA(0%) == CGA" claim is verified at

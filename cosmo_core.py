@@ -35,27 +35,28 @@ from scipy.optimize import minimize
 
 # ── Physical constants and Planck 2018 values ────────────────────────────────
 C_LIGHT  = 299792.458        # km/s
-# [P2] Densidad de radiacion hoy, FIJA.
+# [P2] Present-day radiation density, FIXED.
 #
-# CORRECCION: el comentario anterior decia que este valor era "solo el termino
-# de fotones" y que para extensiones a alto z habria que multiplicarlo por
-# ~1.68 para incluir los neutrinos relativistas. Es al reves — el valor YA los
-# incluye, y seguir esa instruccion habria metido un error del 73 %:
+# CORRECTION: the previous comment said this value was "only the photon
+# term" and that high-z extensions would need to multiply it by ~1.68 to
+# include relativistic neutrinos. It is the other way round — the value
+# ALREADY includes them, and following that instruction would have introduced
+# a 73 % error:
 #
-#     Omega_gamma (solo fotones, Omega_gamma h^2 = 2.4728e-5, h = 0.6766)
+#     Omega_gamma (photons only, Omega_gamma h^2 = 2.4728e-5, h = 0.6766)
 #                                        = 5.402e-05
-#     Omega_r (fotones + 3.046 neutrinos) = 9.138e-05
-#     este OMEGA_R0                       = 9.400e-05   <- 2.9 % por encima
-#                                                          del total, no 1.68x
-#                                                          por debajo
+#     Omega_r (photons + 3.046 neutrinos) = 9.138e-05
+#     this OMEGA_R0                       = 9.400e-05   <- 2.9 % above
+#                                                          the total, not 1.68x
+#                                                          below it
 #
-# O sea que ya es fotones + neutrinos, con un 3 % de holgura. Sobre el rango
-# de corrimiento al rojo que se usa aqui (z <~ 2.4) la radiacion aporta el
-# 0.096 % de E^2, asi que ese 3 % es irrelevante. Para extensiones a alto z
-# (distancias al CMB) hay que revisarlo, pero NO multiplicandolo por 1.68.
-OMEGA_R0 = 9.4e-5            # fotones + neutrinos relativistas, fijo
+# So it is already photons + neutrinos, with 3 % of slack. Over the redshift
+# range used here (z <~ 2.4) radiation contributes 0.096 % of E^2, so that
+# 3 % is irrelevant. For high-z extensions (distances to the CMB) it must be
+# revisited, but NOT by multiplying it by 1.68.
+OMEGA_R0 = 9.4e-5            # photons + relativistic neutrinos, fixed
 
-#: Tipos de prior aceptados por `Posterior`. Ver [B-PRIORTYPE].
+#: Prior types accepted by `Posterior`. See [B-PRIORTYPE].
 PRIOR_TYPES = frozenset({'flat', 'gaussian'})
 
 H0_MU, H0_SIG = 67.66, 0.42      # Gaussian prior on H0  (Planck 2018, TT,TE,EE+lowE+lensing)
@@ -118,43 +119,43 @@ class CosmoModel:
     def H(self, z: np.ndarray, theta: np.ndarray) -> np.ndarray:
         """H(z) in km/s/Mpc. θ[1] is always H0 by convention.
 
-        [B-CLIP] Antes hacia `np.clip(e2, 1e-12, None)`, o sea que para
-        E^2 <= 0 — una combinacion de parametros SIN SENTIDO FISICO — devolvia
-        H = 1e-6 * H0 en vez de avisar, y de ahi salia un chi2 finito y un
-        log-posterior finito. El contrato documentado de la clase dice lo
-        contrario: que los valores no fisicos "se penalizan automaticamente".
+        [B-CLIP] It used to do `np.clip(e2, 1e-12, None)`, i.e. for
+        E^2 <= 0 — a parameter combination with NO PHYSICAL MEANING — it
+        returned H = 1e-6 * H0 instead of flagging it, which produced a finite
+        chi2 and a finite log-posterior. The documented class contract says
+        the opposite: that unphysical values "are penalized automatically".
 
-        La incoherencia era observable: para el mismo theta, la rama de
-        supernovas SI rechazaba (devolvia -inf) y la de cronometros no, asi
-        que el mismo punto tenia posterior finito con CC+BAO e infinito
-        negativo con CC+BAO+Pantheon.
+        The inconsistency was observable: for the same theta, the supernova
+        branch DID reject (returned -inf) and the chronometer branch did not,
+        so the same point had a finite posterior with CC+BAO and minus
+        infinity with CC+BAO+Pantheon.
 
-        Con los cinco modelos actuales E^2 > 0 en toda su caja de prior, asi
-        que esto no ha corrompido ningun resultado. Pero deja de ser latente
-        en cuanto se anada curvatura (Omega_k < 0 hace E^2 negativo a z alto),
-        que es justo el siguiente modelo del proyecto. Ahora devuelve `nan`,
-        que se propaga a un chi2 no finito y el punto se rechaza.
+        With the five current models E^2 > 0 over their whole prior box, so
+        this has not corrupted any result. But it stops being latent as soon
+        as curvature is added (Omega_k < 0 makes E^2 negative at high z),
+        which is exactly the project's next model. It now returns `nan`,
+        which propagates to a non-finite chi2 and the point is rejected.
 
         Args:
-            z: corrimiento(s) al rojo.
-            theta: vector de parametros del modelo.
+            z: redshift(s).
+            theta: model parameter vector.
 
         Returns:
             np.ndarray
         Examples:
-            A z=0 todos los modelos dan H0 por construccion:
+            At z=0 every model gives H0 by construction:
 
             >>> import numpy as np
             >>> round(float(MODELS['lcdm'].H(np.array([0.0]),
             ...                              np.array([0.3, 70.0]))[0]), 10)
             70.0
 
-            (Sale 69.99999999999999 sin redondear: E^2(0) = Om + Or + OL vale
-            1 solo hasta el epsilon de la maquina. El doctest lo detecto.)
+            (Without rounding it gives 69.99999999999999: E^2(0) = Om + Or + OL
+            equals 1 only up to machine epsilon. The doctest caught it.)
 
-            Y los limites analiticos se cumplen EXACTAMENTE, que es la prueba
-            de que la fisica esta bien: wCDM con w=-1 es LCDM, y CPL con
-            w0=-1, wa=0 tambien.
+            And the analytic limits hold EXACTLY, which is the proof that the
+            physics is right: wCDM with w=-1 is LCDM, and so is CPL with
+            w0=-1, wa=0.
 
             >>> z = np.array([0.5, 1.0, 2.0])
             >>> l = MODELS['lcdm'].H(z, np.array([0.3, 70.0]))
@@ -163,8 +164,8 @@ class CosmoModel:
             >>> bool(np.array_equal(l, w) and np.array_equal(l, c))
             True
 
-            Un modelo no fisico (E^2 <= 0) devuelve nan, no un numero pequeno
-            — ver [B-CLIP] arriba.
+            An unphysical model (E^2 <= 0) returns nan, not a small number
+            — see [B-CLIP] above.
         """
         e2 = self.E2(np.asarray(z), theta)
         return theta[1] * np.sqrt(np.where(e2 > 0.0, e2, np.nan))
@@ -360,22 +361,23 @@ def load_cc(path: str = "cosmic_chronometers.txt") -> np.ndarray:
                     print(f"  ✓ CC+BAO H(z) loaded from file: {p}  "
                           f"({len(arr)} pts)")
                     return arr
-                # [B-SILENT] Un archivo con menos de 3 columnas caia hasta el
-                # `return` final SIN decir nada, y devolvia la tabla empotrada.
-                print(f"  ⚠  {p} tiene forma {arr.shape}, se esperaban >=3 "
-                      f"columnas (z, H, sigma) — se usa la tabla empotrada")
+                # [B-SILENT] A file with fewer than 3 columns fell through to
+                # the final `return` WITHOUT saying anything, and returned the
+                # embedded table.
+                print(f"  ⚠  {p} has shape {arr.shape}, expected >=3 "
+                      f"columns (z, H, sigma) — using the embedded table")
                 return _CC_EMBEDDED
             except Exception as e:
                 print(f"  ⚠  Error reading {p}: {e} — using embedded data")
                 return _CC_EMBEDDED
-    # [B-SILENT] Ningun candidato existia. Antes esto tambien era mudo: la
-    # UNICA senal de que se estaba usando la tabla empotrada en vez del archivo
-    # pedido era la AUSENCIA de la linea "✓ CC+BAO H(z) loaded" en un log de
-    # miles de lineas. Eso anula el proposito de data_manifest.py y de
-    # data_checksums.json, y sustituiria en silencio cualquier compilacion
-    # alternativa que un revisor pidiera probar.
-    print(f"  ⚠  No se encontro '{path}' junto al modulo ni en el directorio "
-          f"actual — se usa la tabla CC+BAO empotrada ({len(_CC_EMBEDDED)} pts)")
+    # [B-SILENT] No candidate existed. This used to be silent too: the ONLY
+    # sign that the embedded table was being used instead of the requested
+    # file was the ABSENCE of the line "✓ CC+BAO H(z) loaded" in a log of
+    # thousands of lines. That defeats the purpose of data_manifest.py and
+    # data_checksums.json, and would silently replace any alternative
+    # compilation a reviewer asked to test.
+    print(f"  ⚠  '{path}' not found next to the module or in the current "
+          f"directory — using the embedded CC+BAO table ({len(_CC_EMBEDDED)} pts)")
     return _CC_EMBEDDED
 
 
@@ -396,8 +398,8 @@ def load_pantheon(search_dirs: Optional[Sequence[str]] = None) -> Optional[dict]
         file is not found.
 
     Args:
-        search_dirs: carpetas donde buscar el archivo; None usa las de por
-            defecto. Por defecto None.
+        search_dirs: folders to search for the file; None uses the default
+            ones. Defaults to None.
 
     Returns:
         Optional[dict]
@@ -457,7 +459,7 @@ def _pantheon_plus_files_present(search_dirs: Optional[Sequence[str]] = None
     dirs = [script_dir, os.getcwd()] + list(search_dirs or [])
 
     def _find(cands):
-        """Primer nombre de `cands` que exista en alguno de `dirs`, o None."""
+        """First name in `cands` that exists in one of `dirs`, or None."""
         for d in dirs:
             for nm in cands:
                 p = os.path.join(d, nm)
@@ -502,12 +504,12 @@ def load_pantheon_plus(data_name: str = "Pantheon+SH0ES.dat",
         files are not found.
 
     Args:
-        data_name: nombre del archivo de datos. Por defecto
+        data_name: name of the data file. Defaults to
             'Pantheon+SH0ES.dat'.
-        cov_name: nombre del archivo de covarianza. Por defecto
+        cov_name: name of the covariance file. Defaults to
             'Pantheon+SH0ES_STAT+SYS.cov'.
-        search_dirs: carpetas donde buscar el archivo; None usa las de por
-            defecto. Por defecto None.
+        search_dirs: folders to search for the file; None uses the default
+            ones. Defaults to None.
 
     Returns:
         Optional[dict]
@@ -523,7 +525,7 @@ def load_pantheon_plus(data_name: str = "Pantheon+SH0ES.dat",
     dirs = [script_dir, os.getcwd()] + list(search_dirs or [])
 
     def _find(cands):
-        """Primer nombre de `cands` que exista en alguno de `dirs`, o None."""
+        """First name in `cands` that exists in one of `dirs`, or None."""
         for d in dirs:
             for nm in cands:
                 p = os.path.join(d, nm)
@@ -545,18 +547,18 @@ def load_pantheon_plus(data_name: str = "Pantheon+SH0ES.dat",
         cols = {n.lower(): n for n in tbl.dtype.names}
 
         def pick(options):
-            """Primera columna de `options` presente en la tabla, o None.
+            """First column of `options` present in the table, or None.
 
-            Los catalogos de supernovas renombran sus columnas entre versiones
-            (zHD/zCMB/zcmb, MU_SH0ES/mu), asi que se prueban alias en orden de
-            preferencia en vez de exigir un nombre fijo.
+            Supernova catalogs rename their columns between releases
+            (zHD/zCMB/zcmb, MU_SH0ES/mu), so aliases are tried in order of
+            preference instead of requiring a fixed name.
 
             Args:
-                options: nombres alternativos a probar, en orden de
-                    preferencia.
+                options: alternative names to try, in order of
+                    preference.
 
             Returns:
-                Ver la descripcion de arriba.
+                See the description above.
             """
             for o in options:
                 if o.lower() in cols:
@@ -631,7 +633,7 @@ def canonical_dataset(name: str) -> str:
     """Map a dataset name (possibly an old alias) to its canonical key.
 
     Args:
-        name: nombre a resolver.
+        name: name to resolve.
 
     Returns:
         str
@@ -671,19 +673,19 @@ class Posterior:
                  cc_data: Optional[np.ndarray] = None,
                  pantheon: Optional[dict] = None,
                  n_zgrid: int = 1200):
-        """Construye el posterior de un modelo sobre un dataset.
+        """Build the posterior of a model over a dataset.
 
         Args:
-            model: modelo cosmologico activo (de `MODELS`).
-            dataset: nombre o alias reconocido por `canonical_dataset`.
-            prior_type: 'flat' (caja) o 'gaussian' (Planck 2018 sobre Om y H0).
-                Cualquier otra cadena levanta ValueError; ver [B-PRIORTYPE].
-            cc_data: tabla H(z) ya cargada; None la carga con `load_cc`.
-            pantheon: catalogo de supernovas ya cargado; None lo carga solo.
-            n_zgrid: puntos de la rejilla en z para la distancia comovil.
+            model: active cosmological model (from `MODELS`).
+            dataset: name or alias recognized by `canonical_dataset`.
+            prior_type: 'flat' (box) or 'gaussian' (Planck 2018 on Om and H0).
+                Any other string raises ValueError; see [B-PRIORTYPE].
+            cc_data: already-loaded H(z) table; None loads it with `load_cc`.
+            pantheon: already-loaded supernova catalog; None loads it itself.
+            n_zgrid: points of the z grid for the comoving distance.
 
         Raises:
-            ValueError: dataset o prior_type desconocidos.
+            ValueError: unknown dataset or prior_type.
         """
         self.model = model
         self.dataset = canonical_dataset(dataset)
@@ -692,16 +694,16 @@ class Posterior:
                 f"Unknown dataset '{dataset}'. Valid: "
                 f"{list(DATASET_COMPONENTS)} (or aliases {list(DATASET_ALIASES)})")
         self.components = DATASET_COMPONENTS[self.dataset]
-        # [B-PRIORTYPE] Cualquier cadena no reconocida caia silenciosamente en
-        # el prior plano: 'Gaussian' con mayuscula, 'planck', un typo — todos
-        # daban log_prior = 0 sin avisar. Una corrida etiquetada "gaussian" en
-        # el CSV de resultados que en realidad uso prior plano es irrecuperable
-        # despues. Los CLI ya lo acotan con `choices`, pero las llamadas de
-        # biblioteca no.
+        # [B-PRIORTYPE] Any unrecognized string silently fell back to the
+        # flat prior: capitalized 'Gaussian', 'planck', a typo — all gave
+        # log_prior = 0 without warning. A run labelled "gaussian" in the
+        # results CSV that actually used a flat prior is unrecoverable
+        # afterwards. The CLIs already restrict it with `choices`, but library
+        # calls do not.
         if prior_type not in PRIOR_TYPES:
             raise ValueError(
-                f"prior_type desconocido: {prior_type!r}. "
-                f"Validos: {sorted(PRIOR_TYPES)}")
+                f"unknown prior_type: {prior_type!r}. "
+                f"Valid: {sorted(PRIOR_TYPES)}")
         self.prior_type = prior_type
 
         # CC+BAO H(z) table (always loaded; used only if 'cc' is active).
@@ -756,13 +758,13 @@ class Posterior:
     def chi2_cc(self, theta: np.ndarray) -> float:
         """CC+BAO H(z) χ² for the active model (diagonal errors).
 
-        [B-CLIP] Devuelve `inf` si el modelo no es fisico en algun z de la
-        muestra (E^2 <= 0 hace que `H` devuelva nan). Antes salia un chi2
-        grande pero finito, y el punto entraba en la cadena como si fuera un
-        mal ajuste en vez de una imposibilidad.
+        [B-CLIP] Returns `inf` if the model is unphysical at some z of the
+        sample (E^2 <= 0 makes `H` return nan). It used to give a large but
+        finite chi2, and the point entered the chain as if it were a bad fit
+        rather than an impossibility.
 
         Args:
-            theta: vector de parametros del modelo.
+            theta: model parameter vector.
 
         Returns:
             float
@@ -803,7 +805,7 @@ class Posterior:
             A = Σ Δ²/σ², B = Σ Δ/σ², C = Σ 1/σ², Δ = m_obs − μ_th.
 
         Args:
-            theta: vector de parametros del modelo.
+            theta: model parameter vector.
 
         Returns:
             float
@@ -827,7 +829,7 @@ class Posterior:
         correlated systematics encoded in C.
 
         Args:
-            theta: vector de parametros del modelo.
+            theta: model parameter vector.
 
         Returns:
             float
@@ -857,7 +859,7 @@ class Posterior:
         BIC use the full n_data across both blocks.
 
         Args:
-            theta: vector de parametros del modelo.
+            theta: model parameter vector.
 
         Returns:
             Tuple[float, int]
@@ -876,7 +878,7 @@ class Posterior:
         """Log-prior: hard box + optional Planck Gaussian on (Ωm, H0).
 
         Args:
-            theta: vector de parametros del modelo.
+            theta: model parameter vector.
 
         Returns:
             float
@@ -893,7 +895,7 @@ class Posterior:
         """(Unnormalized) log-posterior at θ.
 
         Args:
-            theta: vector de parametros del modelo.
+            theta: model parameter vector.
 
         Returns:
             float
@@ -907,7 +909,7 @@ class Posterior:
         return lp - 0.5 * c
 
     def __call__(self, theta: np.ndarray) -> float:
-        """Alias de `log_prob`, para pasar el posterior como funcion."""
+        """Alias of `log_prob`, so the posterior can be passed as a function."""
         return self.log_prob(theta)
 
     # ── batched (vectorized) evaluation ──────────────────────────────────────
@@ -924,7 +926,7 @@ class Posterior:
         shape (B,1) are passed against z with shape (Nz,).
 
         Args:
-            thetas: lote de parametros, de forma (B, d).
+            thetas: parameter batch, of shape (B, d).
 
         Returns:
             np.ndarray
@@ -950,16 +952,16 @@ class Posterior:
         # 2) vectorized CC+BAO: E2 with broadcasting (Bv, Ncc)
         if 'cc' in self.components:
             e2 = self.model.E2(self.z_cc[None, :], th_cols)
-            # [B-CLIP] Mismo criterio que CosmoModel.H: E^2 <= 0 no es un
-            # H(z) chiquito, es un punto no fisico. `nan` se propaga y el
-            # filtro de abajo lo rechaza.
+            # [B-CLIP] Same criterion as CosmoModel.H: E^2 <= 0 is not a
+            # tiny H(z), it is an unphysical point. `nan` propagates and the
+            # filter below rejects it.
             bad_cc = np.any(~np.isfinite(e2) | (e2 <= 0.0), axis=1)
             Hm = T[:, 1:2] * np.sqrt(np.where(e2 > 0.0, e2, 1.0))
             chi2c = np.sum(((self.H_cc[None, :] - Hm)
                             / self.sig_cc[None, :])**2, axis=1)
-            # [B-CLIP] Un punto no fisico se rechaza, no se le asigna un chi2
-            # grande: asi la ruta vectorizada devuelve -inf igual que la
-            # escalar, en vez de un nan.
+            # [B-CLIP] An unphysical point is rejected, not assigned a large
+            # chi2: this way the vectorized path returns -inf just like the
+            # scalar one, instead of a nan.
             chi2c[bad_cc] = np.inf
             lp += -0.5 * chi2c
 
@@ -967,11 +969,11 @@ class Posterior:
         #    row-wise cumulative trapezoid for the comoving distance (Bv, Nzg)
         if ('sn' in self.components or 'snp' in self.components) and self.pantheon:
             e2 = self.model.E2(self._zg[None, :], th_cols)
-            # [B-NANMASK] `nan <= 0` es False, asi que un E^2 = nan se colaba
-            # por esta mascara y salia un log-posterior nan donde la ruta
-            # escalar devolvia -inf. Metropolis rechaza un nan por
-            # comparacion, asi que nunca corrompio una cadena, pero las dos
-            # rutas deben coincidir.
+            # [B-NANMASK] `nan <= 0` is False, so an E^2 = nan slipped
+            # through this mask and produced a nan log-posterior where the
+            # scalar path returned -inf. Metropolis rejects a nan by
+            # comparison, so it never corrupted a chain, but the two paths
+            # must agree.
             bad = np.any(~np.isfinite(e2) | (e2 <= 0), axis=1)
             e2 = np.clip(e2, 1e-12, None)
             I = cumulative_trapezoid(1.0 / np.sqrt(e2), self._zg,
@@ -1081,7 +1083,7 @@ def autocorr_time_max(chains: np.ndarray) -> float:
     the d parameters (the conservative choice that drives ESS).
 
     Args:
-        chains: numero de cadenas en paralelo.
+        chains: array of MCMC chains.
 
     Returns:
         float
@@ -1110,7 +1112,7 @@ def ess_chains(chains: np.ndarray) -> float:
     separately by the diagnostics layer when needed.
 
     Args:
-        chains: numero de cadenas en paralelo.
+        chains: array of MCMC chains.
 
     Returns:
         float
@@ -1119,7 +1121,7 @@ def ess_chains(chains: np.ndarray) -> float:
     return float(M * N / autocorr_time_max(chains))
 
 
-#: Semilla por defecto del prefit que coloca la rejilla. Ver [B-GRIDSEED].
+#: Default seed of the pre-fit that places the grid. See [B-GRIDSEED].
 GRID_WINDOW_SEED = 20260904
 
 
@@ -1152,34 +1154,34 @@ def estimate_grid_window(post, sigma_mult: float = 4.0,
     The pre-fit only places/scales the grid (an adaptive-grid technique); it
     does not feed the downstream result itself.
 
-    [B-GRIDSEED] Este prefit tomaba sus numeros aleatorios del RNG global del
-    modulo, asi que **la ventana cambiaba en cada llamada**: medido sobre
-    lcdm/CC+BAO, el ancho en Om variaba un 54 % entre llamadas identicas
-    (0.1121 a 0.1721), y ademas dependia de cuantos numeros hubiera consumido
-    antes cualquier otra parte del programa.
+    [B-GRIDSEED] This pre-fit drew its random numbers from the module's
+    global RNG, so **the window changed on every call**: measured on
+    lcdm/CC+BAO, the Om width varied by 54 % between identical calls
+    (0.1121 to 0.1721), and it also depended on how many numbers any other
+    part of the program had consumed beforehand.
 
-    Eso rompia justo la promesa que hace [B3] arriba: que el simulador y la
-    QPU construyen la MISMA rejilla. Como cada uno llama a esta funcion por su
-    cuenta, en realidad cada uno se quedaba con una rejilla distinta, y el KL
-    de la QPU se comparaba contra el del simulador **medido sobre otra
-    discretizacion**. Esa comparacion es el resultado central del proyecto.
+    That broke exactly the promise [B3] makes above: that the simulator and
+    the QPU build the SAME grid. Since each one calls this function on its
+    own, each actually ended up with a different grid, and the QPU KL was
+    compared against the simulator's **measured on a different
+    discretization**. That comparison is the project's central result.
 
-    Ahora la ventana es una funcion PURA de (post, sigma_mult, n_steps,
-    n_chains, use_median, seed): mismo `seed`, misma ventana, sin importar el
-    orden de ejecucion ni quien llame antes. `seed=None` recupera el
-    comportamiento viejo (RNG global) por si alguien quiere muestrear la
-    variabilidad de la ventana a proposito.
+    The window is now a PURE function of (post, sigma_mult, n_steps,
+    n_chains, use_median, seed): same `seed`, same window, regardless of the
+    execution order or who calls first. `seed=None` restores the old
+    behaviour (global RNG) in case someone wants to sample the window's
+    variability on purpose.
 
     Args:
-        post: posterior activo.
-        sigma_mult: semiancho de la ventana en sigmas.
-        n_steps: pasos de la cadena corta del prefit.
-        n_chains: cadenas del prefit.
-        use_median: centrar en la mediana ([S1]) o en la media.
-        seed: semilla del prefit. `None` usa el RNG global (no reproducible).
+        post: active posterior.
+        sigma_mult: half-width of the window, in sigmas.
+        n_steps: steps of the short pre-fit chain.
+        n_chains: pre-fit chains.
+        use_median: centre on the median ([S1]) or on the mean.
+        seed: pre-fit seed. `None` uses the global RNG (not reproducible).
 
     Returns:
-        Lista de `(lo, hi)` por parametro, recortada a `model.bounds`.
+        List of `(lo, hi)` per parameter, clipped to `model.bounds`.
     """
     model = post.model
     d = model.n_params
@@ -1215,19 +1217,19 @@ def ess_weights(w: np.ndarray) -> float:
     """Kish ESS for weighted samples (QVMC/VI): (Σw)²/Σw².
 
     Args:
-        w: pesos de las muestras.
+        w: sample weights.
 
     Returns:
         float
     Examples:
-        Con pesos uniformes el ESS es el numero de muestras...
+        With uniform weights the ESS is the number of samples...
 
         >>> float(ess_weights(np.ones(100)))
         100.0
 
-        ...y si todo el peso cae en una sola muestra, es 1. Ese contraste es
-        justo lo que medía mal [B-ESSCOMP]: el ESS de Kish NO es invariante si
-        comprimes la muestra en (valor, conteo).
+        ...and if all the weight falls on a single sample, it is 1. That
+        contrast is exactly what [B-ESSCOMP] got wrong: the Kish ESS is NOT
+        invariant if you compress the sample into (value, count).
 
         >>> w = np.zeros(100); w[0] = 1.0
         >>> float(ess_weights(w))
@@ -1242,20 +1244,20 @@ def gelman_rubin(chains: np.ndarray) -> float:
     """Gelman-Rubin R̂ statistic for one parameter, shape (M, N).
 
     Args:
-        chains: numero de cadenas en paralelo.
+        chains: array of MCMC chains.
 
     Returns:
         float
     Examples:
-        Cadenas identicas dan R-hat = 1; cadenas desplazadas entre si dan
-        R-hat > 1, que es la senal de no convergencia.
+        Identical chains give R-hat = 1; chains shifted relative to each
+        other give R-hat > 1, which is the non-convergence signal.
 
         >>> rng = np.random.default_rng(0)
-        >>> iguales = rng.normal(size=(4, 500))
-        >>> round(gelman_rubin(iguales), 2)
+        >>> same = rng.normal(size=(4, 500))
+        >>> round(gelman_rubin(same), 2)
         1.0
-        >>> desplazadas = iguales + np.arange(4)[:, None]
-        >>> gelman_rubin(desplazadas) > 1.3
+        >>> shifted = same + np.arange(4)[:, None]
+        >>> gelman_rubin(shifted) > 1.3
         True
     """
     M, N = chains.shape
@@ -1270,7 +1272,7 @@ def gelman_rubin_max(chains: np.ndarray) -> float:
     """Maximum classical R̂ over all parameters, shape (M, N, d).
 
     Args:
-        chains: numero de cadenas en paralelo.
+        chains: array of MCMC chains.
 
     Returns:
         float
@@ -1364,8 +1366,8 @@ def mcmc_converged(chains: np.ndarray, threshold: float = RHAT_THRESHOLD
     """True if rank-normalized split-R̂ is below `threshold` (default 1.01).
 
     Args:
-        chains: cadenas, de forma (M, N) o (M, N, d).
-        threshold: umbral de R-hat - 1 para declarar convergencia. Por defecto
+        chains: chains, of shape (M, N) or (M, N, d).
+        threshold: R-hat - 1 threshold for declaring convergence. Defaults to
             RHAT_THRESHOLD.
 
     Returns:
@@ -1439,20 +1441,20 @@ def fit_statistics(post: Posterior, theta_mean: np.ndarray,
     Returns:
         dict with theta_best, chi2, chi2_red, AIC, BIC, k, n_data.
     Examples:
-        Las relaciones de informacion se cumplen por construccion:
+        The information-criterion relations hold by construction:
 
         >>> import contextlib, io
-        >>> with contextlib.redirect_stdout(io.StringIO()):   # el cargador
-        ...     post = Posterior(MODELS['lcdm'], 'CC+BAO')    # imprime la ruta
+        >>> with contextlib.redirect_stdout(io.StringIO()):   # the loader
+        ...     post = Posterior(MODELS['lcdm'], 'CC+BAO')    # prints the path
         >>> st = fit_statistics(post, MODELS['lcdm'].fiducial)
         >>> abs(st['AIC'] - (st['chi2'] + 2 * st['k'])) < 1e-9
         True
         >>> st['n_data']
         51
 
-        [B-BOUNDS] Y el punto devuelto cae SIEMPRE dentro del soporte del
-        prior. Antes no: el refinamiento sin cotas llegaba a reportar
-        H0 = 6.3e-5 km/s/Mpc como "mejor ajuste", con un chi2 que se veia sano.
+        [B-BOUNDS] And the returned point ALWAYS falls inside the prior's
+        support. It did not before: the unbounded refinement could report
+        H0 = 6.3e-5 km/s/Mpc as the "best fit", with a chi2 that looked sane.
 
         >>> import numpy as np
         >>> bool(np.isfinite(post.log_prior(st['theta_best'])))
@@ -1488,9 +1490,9 @@ def setup_logger(log_file: Optional[str] = None,
     receives WARNING+.
 
     Args:
-        log_file: ruta del archivo de log; None escribe solo por pantalla. Por
-            defecto None.
-        name: nombre a resolver. Por defecto 'qcosmo'.
+        log_file: path of the log file; None writes to the console only.
+            Defaults to None.
+        name: logger name. Defaults to 'qcosmo'.
 
     Returns:
         logging.Logger
@@ -1564,37 +1566,37 @@ def gpu_available() -> bool:
 def gpu_diagnosis() -> str:
     """Explain, in one readable block, WHY the GPU is or is not usable.
 
-    [B-GPU] `--gpu` degrada a CPU en silencio cuando Aer no expone un
-    dispositivo GPU. Pedir GPU y recibir CPU sin aviso es el mismo tipo de
-    fallo silencioso que este proyecto persigue en otros sitios: la corrida
-    termina, los numeros salen bien, y solo el tiempo de pared delata que no
-    se uso el acelerador — y en una corrida de horas eso no se nota.
+    [B-GPU] `--gpu` silently degrades to CPU when Aer exposes no GPU
+    device. Asking for a GPU and getting a CPU without warning is the same
+    kind of silent failure this project hunts down elsewhere: the run
+    finishes, the numbers come out right, and only the wall time betrays that
+    the accelerator was not used — and in a run of hours that goes unnoticed.
 
-    La causa mas frecuente NO es que falte CUDA ni cuQuantum, sino que la
-    rueda `qiskit-aer` de PyPI **se compila solo para CPU**. Instalar
-    `cuquantum-cu12` / `custatevec-cu12` al lado no la convierte en una
-    version con GPU: Aer tiene que estar CONSTRUIDA contra ellas, o hay que
-    instalar la rueda con soporte GPU que publica el propio proyecto Aer.
+    The most frequent cause is NOT missing CUDA or cuQuantum, but that the
+    PyPI `qiskit-aer` wheel **is built for CPU only**. Installing
+    `cuquantum-cu12` / `custatevec-cu12` alongside it does not turn it into a
+    GPU build: Aer has to be BUILT against them, or one has to install the
+    GPU-enabled wheel published by the Aer project itself.
 
-    Esta funcion no adivina: reporta lo que de verdad hay (paquetes
-    instalados, dispositivos que Aer declara, si nvidia-smi ve una tarjeta) y
-    deja que quien lea saque la conclusion.
+    This function does not guess: it reports what is really there (installed
+    packages, devices Aer declares, whether nvidia-smi sees a card) and lets
+    the reader draw the conclusion.
 
     Returns:
-        Texto multilinea con el diagnostico.
+        Multi-line text with the diagnosis.
     """
-    lines = ["[GPU] diagnostico:"]
+    lines = ["[GPU] diagnosis:"]
 
     try:
         from qiskit_aer import AerSimulator
         import qiskit_aer
         devices = tuple(AerSimulator().available_devices())
-        lines.append(f"  qiskit-aer {qiskit_aer.__version__} declara "
-                     f"dispositivos: {devices}")
+        lines.append(f"  qiskit-aer {qiskit_aer.__version__} declares "
+                     f"devices: {devices}")
         has_gpu = 'GPU' in devices
     except Exception as exc:
         devices, has_gpu = (), False
-        lines.append(f"  no pude consultar qiskit-aer: "
+        lines.append(f"  could not query qiskit-aer: "
                      f"{type(exc).__name__}: {exc}")
 
     try:
@@ -1608,10 +1610,10 @@ def gpu_diagnosis() -> str:
     cuq_pkgs = sorted(p for p in installed
                       if p.startswith(('cuquantum', 'custatevec', 'cutensor',
                                        'cuda-', 'nvidia-')))
-    lines.append(f"  paquetes Aer instalados: {aer_pkgs or 'ninguno'}")
-    lines.append(f"  paquetes CUDA/cuQuantum: "
-                 f"{cuq_pkgs[:6] or 'ninguno'}"
-                 + (f" (+{len(cuq_pkgs) - 6} mas)" if len(cuq_pkgs) > 6 else ""))
+    lines.append(f"  installed Aer packages: {aer_pkgs or 'none'}")
+    lines.append(f"  CUDA/cuQuantum packages: "
+                 f"{cuq_pkgs[:6] or 'none'}"
+                 + (f" (+{len(cuq_pkgs) - 6} more)" if len(cuq_pkgs) > 6 else ""))
 
     try:
         import subprocess
@@ -1619,25 +1621,25 @@ def gpu_diagnosis() -> str:
                               '--format=csv,noheader'],
                              capture_output=True, text=True, timeout=10)
         gpus = [l for l in out.stdout.strip().splitlines() if l.strip()]
-        lines.append(f"  nvidia-smi ve: {gpus or 'ninguna tarjeta'}")
+        lines.append(f"  nvidia-smi sees: {gpus or 'no card'}")
     except Exception:
         gpus = []
-        lines.append("  nvidia-smi: no disponible en este nodo")
+        lines.append("  nvidia-smi: not available on this node")
 
     if has_gpu:
-        lines.append("  -> Aer PUEDE usar GPU. --gpu funcionara.")
+        lines.append("  -> Aer CAN use the GPU. --gpu will work.")
     else:
-        lines.append("  -> Aer NO expone GPU, asi que --gpu correra en CPU.")
+        lines.append("  -> Aer does NOT expose a GPU, so --gpu will run on CPU.")
         if gpus and not any('gpu' in p for p in aer_pkgs):
             lines.append(
-                "     Hay tarjeta pero el qiskit-aer instalado es la rueda de "
-                "CPU. Instalar cuQuantum al lado NO la habilita: hace falta un "
-                "qiskit-aer construido con soporte GPU (la rueda con GPU del "
-                "propio proyecto Aer, o compilarlo con AER_THRUST_BACKEND=CUDA)."
-                " Comprueba en la documentacion de qiskit-aer cual corresponde "
-                "a la version 0.17.x antes de instalar nada.")
+                "     There is a card but the installed qiskit-aer is the CPU "
+                "wheel. Installing cuQuantum alongside does NOT enable it: you "
+                "need a qiskit-aer built with GPU support (the Aer project's "
+                "own GPU wheel, or build it with AER_THRUST_BACKEND=CUDA)."
+                " Check the qiskit-aer documentation for which one matches "
+                "version 0.17.x before installing anything.")
         elif not gpus:
-            lines.append("     Este nodo no parece tener GPU visible.")
+            lines.append("     This node does not seem to have a visible GPU.")
     return "\n".join(lines)
 
 
@@ -1645,18 +1647,18 @@ def resolve_device(prefer_gpu: bool, warn: bool = False) -> str:
     """Return the device string ('GPU' or 'CPU') actually usable.
 
     Args:
-        prefer_gpu: si True se intenta GPU.
-        warn: si True y hubo que degradar a CPU, imprime `gpu_diagnosis()`.
-            [B-GPU] Pedir GPU y recibir CPU sin decirlo convierte una corrida
-            de horas en CPU en algo que solo se detecta mirando el reloj.
+        prefer_gpu: if True, try the GPU.
+        warn: if True and it had to fall back to CPU, print `gpu_diagnosis()`.
+            [B-GPU] Asking for a GPU and getting a CPU without saying so turns
+            an hours-long CPU run into something only noticed by the clock.
 
     Returns:
-        'GPU' o 'CPU'.
+        'GPU' or 'CPU'.
     """
     if prefer_gpu and gpu_available():
         return 'GPU'
     if prefer_gpu and warn:
-        print("\n[GPU] AVISO: se pidio --gpu pero se correra en CPU.")
+        print("\n[GPU] WARNING: --gpu was requested but the run will use CPU.")
         print(gpu_diagnosis())
         print("")
     return 'CPU'
@@ -1724,8 +1726,8 @@ def fmt_theta(model: CosmoModel, theta: np.ndarray) -> str:
     """Format θ with parameter names for readable logs.
 
     Args:
-        model: modelo cosmologico (`cosmo_core.CosmoModel`).
-        theta: vector de parametros del modelo.
+        model: cosmological model (`cosmo_core.CosmoModel`).
+        theta: model parameter vector.
 
     Returns:
         str

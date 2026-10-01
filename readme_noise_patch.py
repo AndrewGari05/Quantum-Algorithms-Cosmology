@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-readme_noise_patch.py — Inserta la documentacion del eje de ruido en README.md.
+readme_noise_patch.py — Inserts the noise-axis documentation into README.md.
 
-Por que un parche y no un README reescrito
--------------------------------------------
-El README son ~53 kB y esta seccion solo anade contenido en siete puntos
-concretos. Reescribirlo entero significaria re-teclearlo desde una copia que
-podria estar desfasada respecto al archivo real del repo, y cualquier deriva
-entre ambas se perderia en silencio. Este script edita EL archivo real por
-anclas de texto y **aborta si un ancla no aparece exactamente una vez**, de
-modo que un README que haya cambiado desde que se escribio el parche produce
-un error visible en vez de una version corrupta.
+Why a patch and not a rewritten README
+--------------------------------------
+The README is ~53 kB and this section only adds content at seven specific
+points. Rewriting it whole would mean re-typing it from a copy that could be
+out of date relative to the real file in the repo, and any drift between the
+two would be lost silently. This script edits THE real file via text anchors
+and **aborts if an anchor does not appear exactly once**, so a README that
+has changed since the patch was written produces a visible error instead of
+a corrupted version.
 
-Es idempotente: si la marca del eje de ruido ya esta presente, no hace nada.
+It is idempotent: if the noise-axis marker is already present, it does nothing.
 
-Uso
----
-    python readme_noise_patch.py            # aplica sobre ./README.md
-    python readme_noise_patch.py --check    # solo verifica las anclas
-    python readme_noise_patch.py --path X   # otro archivo
+Usage
+-----
+    python readme_noise_patch.py            # applies to ./README.md
+    python readme_noise_patch.py --check    # only verifies the anchors
+    python readme_noise_patch.py --path X   # another file
 """
 
 from __future__ import annotations
@@ -28,11 +28,11 @@ import argparse
 import sys
 from typing import List, Tuple
 
-MARKER = "<!-- eje-de-ruido-nisq -->"
+MARKER = "<!-- nisq-noise-axis -->"
 
 
 # =============================================================================
-# Bloques nuevos
+# New blocks
 # =============================================================================
 
 PART1_NOISE = """
@@ -230,7 +230,7 @@ python qpu_noisy_simulation.py --model lcdm --method qmcmc --noise full
 python qpu_noisy_simulation.py --model wcdm --method qvmc --noise FakeBrisbane
 ```
 
-> **[DD-INERTE] The error suppression is inert on a simulated backend.**
+> **[DD-INERT] The error suppression is inert on a simulated backend.**
 > `QPUConnection` enables dynamical decoupling XY4 and Pauli twirling. On real
 > hardware those act. In qiskit-ibm-runtime's local testing mode they are
 > **discarded**, announced only by a `UserWarning` that is lost in a long run's
@@ -294,29 +294,29 @@ runner — reads its noise level from that one module."""
 
 
 # =============================================================================
-# Anclas
+# Anchors
 # =============================================================================
 
 def edits() -> List[Tuple[str, str, str]]:
-    """Lista de (etiqueta, ancla, texto de reemplazo).
+    """List of (label, anchor, replacement text).
 
-    Cada ancla debe aparecer EXACTAMENTE una vez en el README; si no, el
-    parche aborta sin escribir nada.
+    Each anchor must appear EXACTLY once in the README; otherwise the
+    patch aborts without writing anything.
     """
     return [
         (
-            "estado",
-            "**Status:** post-Fase-3 hardening (33 tests, all green).",
-            "**Status:** post-Fase-4 (62 tests, all green). Fase 4 added the "
+            "status",
+            "**Status:** post-Phase-3 hardening (33 tests, all green).",
+            "**Status:** post-Phase-4 (62 tests, all green). Phase 4 added the "
             "**noise axis** — a second, orthogonal ablation dimension, so "
             "results are now a 2-D matrix (quantumness x noise) instead of a "
             "ladder; see [The noise axis](#the-noise-axis-second-ablation-"
             "dimension). `--noise none` is the default and reproduces every "
             "previous result bit for bit.\n\n"
-            "**Status (Fase 3):** hardening (33 tests, all green).",
+            "**Status (Phase 3):** hardening (33 tests, all green).",
         ),
         (
-            "parte1",
+            "part1",
             "The genetic optimizer (`cosmo_genetic_optimizers.py`) has its own "
             "**third\ndial**, also in thirds — see the technical section for "
             "details.\n",
@@ -325,26 +325,26 @@ def edits() -> List[Tuple[str, str, str]]:
             "details.\n" + PART1_NOISE,
         ),
         (
-            "arquitectura",
+            "architecture",
             ARCH_OLD,
             ARCH_NEW,
         ),
         (
-            "parte2",
+            "part2",
             "## Diagnostics and correctness fixes\n",
             MARKER + "\n" + PART2_NOISE + "\n## Diagnostics and correctness "
             "fixes\n",
         ),
         (
-            "tabla-qpu",
+            "qpu-table",
             "| Error suppression | — | Dynamical Decoupling XY4 + Pauli "
             "twirling |",
             "| Error suppression | — | Dynamical Decoupling XY4 + Pauli "
-            "twirling (**inert on a simulated backend** — see [DD-INERTE]"
+            "twirling (**inert on a simulated backend** — see [DD-INERT]"
             "(#qpu_noisy_simulationpy--noisy-twin-of-the-qpu-pipeline)) |",
         ),
         (
-            "memoria",
+            "memory",
             "To go above the default cap on a bigger machine, raise it "
             "explicitly:",
             "> **A noisy run has a third, much lower ceiling.** With `--noise` "
@@ -363,8 +363,8 @@ def edits() -> List[Tuple[str, str, str]]:
         (
             "tests",
             "* **Tests + CI.** `tests/` holds 33 tests:",
-            "* **Tests + CI.** `tests/` holds 62 tests (33 through Fase 3, "
-            "plus 29 added in Fase 4 for the noise axis — the analytic "
+            "* **Tests + CI.** `tests/` holds 62 tests (33 through Phase 3, "
+            "plus 29 added in Phase 4 for the noise axis — the analytic "
             "readout map against Aer counts, the `[N1]` guard, the ideal "
             "rung's bit-for-bit reproducibility, the proposal's readout "
             "invariance, and the runner's third memory model):",
@@ -375,48 +375,48 @@ def edits() -> List[Tuple[str, str, str]]:
 # =============================================================================
 
 def apply(text: str, check_only: bool = False) -> str:
-    """Aplica todas las ediciones, o aborta si alguna ancla no encaja.
+    """Apply all the edits, or abort if any anchor does not match.
 
     Args:
-        text: contenido actual del README.
-        check_only: si True, solo verifica las anclas.
+        text: current README content.
+        check_only: if True, only verify the anchors.
 
     Returns:
-        El texto resultante (igual al de entrada si `check_only`).
+        The resulting text (equal to the input if `check_only`).
 
     Raises:
-        SystemExit: si un ancla falta o aparece mas de una vez.
+        SystemExit: if an anchor is missing or appears more than once.
     """
     problems: List[str] = []
     for label, anchor, _ in edits():
         n = text.count(anchor)
         if n != 1:
-            problems.append(f"  [{label}] el ancla aparece {n} veces, se "
-                            f"esperaba 1")
+            problems.append(f"  [{label}] the anchor appears {n} times, "
+                            f"expected 1")
     if problems:
-        print("El README no coincide con lo que este parche espera:")
+        print("The README does not match what this patch expects:")
         print("\n".join(problems))
-        print("\nNo se escribio nada. Revisa si el README cambio desde que se "
-              "escribio el parche.")
+        print("\nNothing was written. Check whether the README changed since "
+              "the patch was written.")
         raise SystemExit(2)
 
-    print("Todas las anclas verificadas (%d)." % len(edits()))
+    print("All anchors verified (%d)." % len(edits()))
     if check_only:
         return text
 
     out = text
     for label, anchor, replacement in edits():
         out = out.replace(anchor, replacement, 1)
-        print(f"  aplicado: {label}")
+        print(f"  applied: {label}")
     return out
 
 
 def main(argv=None) -> int:
-    """Punto de entrada.
+    """Entry point.
 
     Args:
-        argv: argumentos de linea de comandos; None usa `sys.argv`. Por
-            defecto None.
+        argv: command-line arguments; None uses `sys.argv`. Defaults to
+            None.
 
     Returns:
         int
@@ -424,15 +424,15 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--path', default='README.md')
     ap.add_argument('--check', action='store_true',
-                    help='solo verificar las anclas, sin escribir')
+                    help='only verify the anchors, without writing')
     args = ap.parse_args(argv)
 
     with open(args.path, encoding='utf-8') as fh:
         text = fh.read()
 
     if MARKER in text:
-        print("El README ya contiene la seccion del eje de ruido; nada que "
-              "hacer.")
+        print("The README already contains the noise-axis section; nothing "
+              "to do.")
         return 0
 
     out = apply(text, check_only=args.check)
@@ -441,8 +441,8 @@ def main(argv=None) -> int:
 
     with open(args.path, 'w', encoding='utf-8') as fh:
         fh.write(out)
-    print(f"\n{args.path} actualizado "
-          f"({len(text)} -> {len(out)} caracteres).")
+    print(f"\n{args.path} updated "
+          f"({len(text)} -> {len(out)} characters).")
     return 0
 
 
