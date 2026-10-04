@@ -132,6 +132,16 @@ campaign); branch `thesis-errata` holds one commit per correction, and
 [ERRATA.md](ERRATA.md) lists each one, whether it changed results, and the
 measured before/after.
 
+## How this code was developed
+
+The research questions, models, experiments and campaigns are the author's.
+Development used an AI coding assistant (Claude, by Anthropic) for code review
+and bug hunting, the refactoring of the thesis scripts into the qablate
+library, tests and documentation. Every change was reviewed and approved by
+the author, who is responsible for the code and its results; the defects the
+review found are documented, with their measured effect, in
+[ERRATA.md](ERRATA.md).
+
 ## Development
 
 ```bash
