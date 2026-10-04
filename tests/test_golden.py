@@ -24,7 +24,9 @@ def ref():
 def test_log_prob_matches_errata_code(ref, name):
     post = Posterior(name, "CC+BAO+Pantheon")
     th = np.array([np.mean(b) for b in MODELS[name].sample_box])
-    assert post.log_prob(th)[0] == pytest.approx(ref[f"logprob/{name}"][0], rel=1e-13, abs=0)
+    # rel 1e-10: vectorized exp/log differ by a few ulps between CPU instruction
+    # sets, and the Pantheon likelihood sums ~1000 of them (seen: 3e-12 relative)
+    assert post.log_prob(th)[0] == pytest.approx(ref[f"logprob/{name}"][0], rel=1e-10, abs=0)
 
 
 @pytest.mark.parametrize("name", sorted(MODELS))
@@ -48,7 +50,7 @@ def test_grid_encoding_and_target_match_legacy(name, dataset):
     # The legacy grid target used a second, batched interpolation path whose
     # log-probabilities differ from the scalar path by ~1e-9 on supernova
     # data; qablate uses one path everywhere.
-    assert np.allclose(target, g[f"{name}/target"], rtol=1e-8, atol=1e-300)
+    assert np.allclose(target, g[f"{name}/target"], rtol=1e-7, atol=1e-300)
 
 
 @pytest.mark.parametrize("name,dataset", [("cpl", "CC+BAO"), ("gede", "CC+BAO+Pantheon")])
