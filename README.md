@@ -1320,6 +1320,16 @@ MODELS['vc'] = CosmoModel(
 Both samplers recognize it via `--model vc`. The simulator runs the full
 ladder + classical baseline; the QPU dispatches it quantum-only.
 
+## How this code was developed
+
+The research questions, models, experiments and campaigns are the author's.
+Development used an AI coding assistant (Claude, by Anthropic) for code review
+and bug hunting, the refactoring of the thesis scripts into the qablate
+library, tests and documentation. Every change was reviewed and approved by
+the author, who is responsible for the code and its results; the defects the
+review found are documented, with their measured effect, in
+[ERRATA.md](ERRATA.md).
+
 ## References
 
 * Sarracino et al. (2025) — QMCMC proposal circuit.
