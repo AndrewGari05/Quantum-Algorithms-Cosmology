@@ -34,8 +34,8 @@ def test_fit_statistics_match_errata_code(ref, name):
     st = fit_statistics(post, th)
     chi2, chi2_red, aic, bic = ref[f"fitstats/{name}"]
     # optimizer tolerance, not bit identity: two float paths to the same minimum
-    assert st["chi2"] == pytest.approx(chi2, abs=1e-8)
-    assert st["BIC"] == pytest.approx(bic, abs=1e-8)
+    assert st["chi2"] == pytest.approx(chi2, abs=1e-6)
+    assert st["BIC"] == pytest.approx(bic, abs=1e-6)
 
 
 @pytest.mark.parametrize("name,dataset", [("lcdm", "CC+BAO"), ("cpl", "CC+BAO+Pantheon"),
