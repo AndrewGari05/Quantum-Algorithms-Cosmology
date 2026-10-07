@@ -8,7 +8,7 @@ full module (which pulls qiskit) is unnecessary.
 
 The hardware-driven paths (QPUConnection.run_pub on a real backend, SPSA
 training on hardware) cannot be unit-tested without a QPU and are validated
-manually on a real run; see PHASE2_NOTES.
+manually on a real run; see docs/notes/PHASE2_NOTES.md.
 """
 import os
 import sys

@@ -114,7 +114,7 @@ python cosmo_modular_quantum.py --replot-ladder \
        CAMPAIGN/samplers_*/model_*/results_config.csv   # ladder_* (legacy campaigns: resultados_config.csv)
 python noise_plots.py CAMPAIGN --out OUTDIR
 python compare_algorithms.py CAMPAIGN --out OUTDIR
-bash rebuild_all.sh CAMPAIGN                            # all of the above
+bash scripts/rebuild_all.sh CAMPAIGN                          # all of the above
 ```
 
 **Two traps that cost time:**
@@ -137,7 +137,7 @@ bash rebuild_all.sh CAMPAIGN                            # all of the above
 | `compare_seeds.py` | what survives a change of seed |
 | `noise_plots.py` | the noise axis |
 | `triage_campaign.py` | is the campaign healthy? |
-| `rebuild_all.sh` | redoes every figure without recomputing |
+| `scripts/rebuild_all.sh` | redoes every figure without recomputing |
 | `tests/test_cost_figure.py` | regression for `[B-NBITS2]` and `[B-PDF]` |
 | `tests/test_genetic_noise.py` | regression for `[B-PROV-GEN]` and `[B-RZZ]` |
 | `tests/test_seeds.py`, `tests/test_triage.py` | the two new scripts |
