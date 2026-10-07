@@ -1,0 +1,19 @@
+name: tests
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          # numpy==1.26.4 (pinned for Qiskit-Aer 0.17) has no wheels for 3.13.
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      # The slow seed-42 reference test (bit-for-bit reproduction) runs only
+      # with RUN_SLOW=1; run it locally before tagging a release.
+      - run: pytest

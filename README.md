@@ -1353,17 +1353,18 @@ physics:
 * **Pinned environment.** `requirements.txt` is pinned to the verified
   working environment (Qiskit 2.4.2 / Aer 0.17.2 / numpy 1.26.4); CUDA extras
   live in `requirements-gpu.txt`.
-* **Tests + CI.** `tests/` holds 62 tests (33 through Phase 3, plus 29 added in Phase 4 for the noise axis — the analytic readout map against Aer counts, the `[N1]` guard, the ideal rung's bit-for-bit reproducibility, the proposal's readout invariance, and the runner's third memory model): a pure-NumPy correctness floor
-  (physics, statistics, the ablation framework, the QPU helpers) that runs
-  without Qiskit, plus dedicated Qiskit-Aer regression tests — added in the
-  Phase 3 round — that verify the QGA crossover truth table, the exact
-  training gradient, the KL leakage penalty, and the calibration/
-  reproducibility of both proposal engines on real circuits. The Qiskit-Aer
-  tests skip automatically if Qiskit/Aer are absent, so make sure the CI
-  environment installs them if you want CI to catch a regression on that
-  side too. `pytest` runs the full suite; `.github/workflows/tests.yml` runs
-  it on every push. Faithful (null) ablation cells are encoded as falsifiable
-  tests.
+* **Tests + CI.** `pytest` runs the full suite (210 tests at the time of
+  writing, plus one slow reference test that runs only with `RUN_SLOW=1` and
+  checks that a seed-42 reference set is reproduced bit for bit). The suite
+  covers a pure-NumPy correctness floor (physics, statistics, the ablation
+  framework, the QPU helpers) and Qiskit-Aer regression tests (the QGA
+  crossover truth table, the exact training gradient, the KL leakage
+  penalty, the calibration and reproducibility of both proposal engines, the
+  noise axis); the Qiskit-Aer tests skip automatically if Qiskit/Aer are
+  absent. `.github/workflows/tests.yml` installs the pinned
+  `requirements.txt` (Qiskit and Aer included) on Python 3.11 and runs
+  `pytest` on every push and pull request. Faithful (null) ablation cells are
+  encoded as falsifiable tests.
 * **Data provenance.** `data_manifest.py` records SHA256 checksums and the
   source of every dataset; run `python data_manifest.py --generate` after
   placing the data files, and `--verify` to check integrity. The data files
