@@ -13,8 +13,9 @@ authors:
   - given-names: "Andrés"
     family-names: "García Rivera"
     affiliation: "Universidad Iberoamericana (IBERO), Mexico City"
-# TODO(author): add ORCID once available.
-# - orcid: "https://orcid.org/0000-0000-0000-0000"
+    orcid: "https://orcid.org/0009-0004-4170-5856"
+# PENDING: no archival DOI yet. Add `doi:` here once a release is archived
+# on Zenodo.
 repository-code: "https://github.com/AndrewGari05/Quantum-Algorithms-Cosmology"
 license: MIT
 version: "2.0.0"
@@ -31,9 +32,62 @@ references:
   - type: article
     authors:
       - family-names: "Sarracino"
-    title: "Quantum-enhanced Markov chain Monte Carlo proposal"
+        given-names: "Giuseppe"
+      - name: "et al."
+    title: "Quantum Markov Chain Monte Carlo for Cosmological Functions"
     year: 2025
+    identifiers:
+      - type: other
+        value: "arXiv:2509.09395"
+    url: "https://arxiv.org/abs/2509.09395"
     notes: "QMCMC proposal circuit."
+  - type: article
+    authors:
+      - family-names: "Layden"
+        given-names: "David"
+      - family-names: "Mazzola"
+        given-names: "Guglielmo"
+      - family-names: "Mishmash"
+        given-names: "Ryan V."
+      - family-names: "Motta"
+        given-names: "Mario"
+      - family-names: "Wocjan"
+        given-names: "Pawel"
+      - family-names: "Kim"
+        given-names: "Jin-Sung"
+      - family-names: "Sheldon"
+        given-names: "Sarah"
+    title: "Quantum-enhanced Markov chain Monte Carlo"
+    journal: "Nature"
+    volume: 619
+    start: 282
+    end: 287
+    year: 2023
+    doi: "10.1038/s41586-023-06095-4"
+    notes: "Quantum proposals for MCMC (arXiv:2203.12497); cited by Sarracino et al. as related work."
+  - type: conference-paper
+    authors:
+      - family-names: "Harrow"
+        given-names: "Aram W."
+      - family-names: "Wei"
+        given-names: "Annie Y."
+    title: >-
+      Adaptive quantum simulated annealing for Bayesian inference and
+      estimating partition functions
+    collection-title: "Proceedings of the 2020 ACM-SIAM Symposium on Discrete Algorithms (SODA)"
+    year: 2020
+    doi: "10.1137/1.9781611975994.12"
+    notes: "arXiv:1907.09965."
+  - type: article
+    authors:
+      - family-names: "Harrow"
+        given-names: "Aram W."
+    title: "Small quantum computers and large classical data sets"
+    year: 2020
+    identifiers:
+      - type: other
+        value: "arXiv:2004.00026"
+    url: "https://arxiv.org/abs/2004.00026"
   - type: article
     authors:
       - family-names: "Goliath"
