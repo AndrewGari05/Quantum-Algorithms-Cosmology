@@ -17,3 +17,9 @@ bridge.toc
 data_checksums.json
 results_quick/
 resultados_quick/
+# Cumulative CSVs the runners append to in the working directory. A sample
+# of the schema is kept in docs/examples/results_config_example.csv.
+/results_config.csv
+/resultados_config.csv
+/results_all_models.csv
+/resultados_TODOS_los_modelos.csv
