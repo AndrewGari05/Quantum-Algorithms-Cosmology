@@ -76,7 +76,9 @@ To compare locations fairly, compile once and run the same ISA circuit on the
 ideal simulator, the device's noisy twin and the device, with per-job timing
 (`qablate.hardware.DeviceCompiler` / `DeviceBackend`). The thesis protocol
 `python -m thesis hardware` does this for QMCMC, QVMC (SPSA) and QGA; see
-[docs/hardware.md](docs/hardware.md).
+[docs/hardware.md](docs/hardware.md). **No run on a real IBM device has been
+executed yet**: every number in this repository comes from the ideal or noisy
+simulators.
 
 ## Cosmology
 
