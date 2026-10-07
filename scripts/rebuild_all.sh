@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# rebuild_all.sh — rebuilds ALL the figures and ALL the analyses of a
+# scripts/rebuild_all.sh — rebuilds ALL the figures and ALL the analyses of a
 # campaign that has already run, without repeating a single second of compute.
 #
-#   bash rebuild_all.sh PATH/TO/hpc_20260907_130425 [more campaigns...]
+#   bash scripts/rebuild_all.sh PATH/TO/hpc_20260907_130425 [more campaigns...]
 #
 # What it does, in order:
 #   1. triage      — is the campaign healthy?
@@ -19,7 +19,7 @@
 
 set -u
 PY="${PYTHON:-python3}"
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [ "$#" -lt 1 ]; then
     sed -n '2,20p' "$0"

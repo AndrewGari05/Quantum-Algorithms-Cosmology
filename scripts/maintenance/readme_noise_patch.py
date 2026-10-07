@@ -17,9 +17,9 @@ It is idempotent: if the noise-axis marker is already present, it does nothing.
 
 Usage
 -----
-    python readme_noise_patch.py            # applies to ./README.md
-    python readme_noise_patch.py --check    # only verifies the anchors
-    python readme_noise_patch.py --path X   # another file
+    python scripts/maintenance/readme_noise_patch.py            # applies to ./README.md
+    python scripts/maintenance/readme_noise_patch.py --check    # only verifies the anchors
+    python scripts/maintenance/readme_noise_patch.py --path X   # another file
 """
 
 from __future__ import annotations

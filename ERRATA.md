@@ -19,7 +19,7 @@ changes numbers that were already computed.
   scripts: `comparar_algoritmos.py` → `compare_algorithms.py`,
   `comparar_semillas.py` → `compare_seeds.py`, `graficas_ruido.py` →
   `noise_plots.py`, `triage_campana.py` → `triage_campaign.py`,
-  `rehacer_todo.sh` → `rebuild_all.sh`; flags `--salida` → `--out`,
+  `rehacer_todo.sh` → `scripts/rebuild_all.sh`; flags `--salida` → `--out`,
   `--peldano` → `--rung`. New runs write `results_config.csv` and
   `results_all_models.csv`; every reader also accepts the legacy names
   (`resultados_config.csv`, `resultados_TODOS_los_modelos.csv`) of campaigns
