@@ -5,9 +5,16 @@ real data (combined CC+BAO H(z) measurements, and Type Ia supernovae —
 Pantheon 2018 or Pantheon+ 2022) using **classical** and **quantum**
 sampling algorithms, and compares them head to head.
 
-**Status:** post-Phase-4 (62 tests, all green). Phase 4 added the **noise axis** — a second, orthogonal ablation dimension, so results are now a 2-D matrix (quantumness x noise) instead of a ladder; see [The noise axis](#the-noise-axis-second-ablation-dimension). `--noise none` is the default and reproduces every previous result bit for bit.
+**Hardware status: no run on real IBM quantum hardware has been executed
+yet.** Every quantum number in this repository comes from Qiskit-Aer
+simulations (ideal, or with noise models built from device calibrations).
+The hardware path has been checked only offline and in `--dry-run`; see
+[Real IBM hardware: status and how to run it](#real-ibm-hardware-status-and-how-to-run-it).
 
-**Status (Phase 3):** hardening (33 tests, all green). Convergence,
+**Status:** post-Phase-4 (62 tests at the time; 210 today, see
+[Reproducibility](#reproducibility)). Phase 4 added the **noise axis** — a second, orthogonal ablation dimension, so results are now a 2-D matrix (quantumness x noise) instead of a ladder; see [The noise axis](#the-noise-axis-second-ablation-dimension). `--noise none` is the default and reproduces every previous result bit for bit.
+
+**Status (Phase 3):** hardening (33 tests at the time). Convergence,
 divergence-tracking (KL), gradients, and reproducibility were audited and
 fixed this round — see [Diagnostics and correctness fixes](#diagnostics-and-correctness-fixes)
 for the full list, and re-run any figure generated before this round before
@@ -712,6 +719,37 @@ proposal displacement lands in the healthy 0.2–0.5 acceptance band and (b)
 the calibration is stable across blocks (readout drift would show up as
 acceptance drifting over the run).
 
+## Real IBM hardware: status and how to run it
+
+**No run on real IBM hardware has been executed yet.** `qpu_cosmo_samplers.py`
+has been checked against the installed `qiskit-ibm-runtime` API, transpiled
+against a stored device coupling map (FakeBrisbane) and run end to end with
+`--dry-run` (synthetic counts). What cannot be checked without an account is
+marked **NOT VERIFIED** in [`HOW_TO_RUN_QPU.md`](HOW_TO_RUN_QPU.md), which has
+the full procedure. The first three steps:
+
+```bash
+# 1. plan only, no account needed: must print "Estimated QPU jobs for this run: 1"
+python qpu_cosmo_samplers.py --dry-run --model lcdm --dataset CC \
+    --method qmcmc --steps 64 --block 64 --chains 1 --shots 1024 --samples 200
+
+# 2. smoke test on a device: 1 job, 1024 shots
+python qpu_cosmo_samplers.py --model lcdm --dataset CC --method qmcmc \
+    --steps 64 --block 64 --chains 1 --shots 1024 --samples 200 \
+    --least-busy --max-jobs 2 --outdir results_qpu_smoke --seed 42
+
+# 3. the real run, only after the smoke test passes
+python qpu_cosmo_samplers.py --model lcdm --dataset CC --method qmcmc \
+    --steps 1000 --block 64 --chains 4 --shots 4096 --samples 4000 \
+    --least-busy --max-jobs 40 --outdir results_qpu_lcdm --seed 42
+```
+
+For a comparison of cost and fidelity between the ideal simulator, the
+noisy twin and the device, use the protocol on the `main` branch
+(`python -m thesis hardware`, documented in `docs/hardware.md` there). It
+runs one compiled circuit per algorithm at all three locations with the same
+seeds and shots, which this branch's scripts do not (ERRATA QPU-12).
+
 ## QPU time estimation
 
 Wall time on hardware is **queue-dominated**, not execution-dominated.
@@ -1141,6 +1179,38 @@ independent terms. The covariance code is ready and waiting for the
 `.dat` + `.cov` files; if they are not present, the `Pantheon+` options
 simply do not appear in the menu.
 
+**Getting the Pantheon+ files.** They are not in this repository. Download
+both from the official release, folder
+[`Pantheon+_Data/4_DISTANCES_AND_COVAR`](https://github.com/PantheonPlusSH0ES/DataRelease/tree/main/Pantheon%2B_Data/4_DISTANCES_AND_COVAR)
+of [PantheonPlusSH0ES/DataRelease](https://github.com/PantheonPlusSH0ES/DataRelease)
+(Brout et al. 2022), and place them in the repository root (or the working
+directory):
+
+```bash
+B=https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/main/Pantheon%2B_Data/4_DISTANCES_AND_COVAR
+curl -L -o "Pantheon+SH0ES.dat"          "$B/Pantheon%2BSH0ES.dat"           # ~0.6 MB, 1701 rows
+curl -L -o "Pantheon+SH0ES_STAT+SYS.cov" "$B/Pantheon%2BSH0ES_STAT%2BSYS.cov"   # ~33 MB, first line 1701
+```
+
+The loader keeps 1590 supernovae after its redshift cut (z > 0.01) and
+prints `Pantheon+ (2022) loaded: 1590 SNe Ia with FULL covariance`
+(checked against the release files on 2026-10-06).
+
+**Checking the data files.** `data_manifest.py` hashes whichever of the four
+data files are present (SHA-256) and stores the hashes with their source in
+`data_checksums.json`:
+
+```bash
+python data_manifest.py --generate   # hash the files you have now
+python data_manifest.py --verify     # later: check they have not changed
+```
+
+No reference hashes are committed (`data_checksums.json` is git-ignored), so
+`--verify` checks your files against your own earlier `--generate`, not
+against the release; without a manifest it exits with code 2. The CC+BAO
+table and the Pantheon 2018 file are committed, so `git` already tracks
+their content.
+
 * **IBM Quantum**: save your account once with
   `QiskitRuntimeService.save_account(channel="ibm_quantum_platform",
   token="...")` or pass `--token`.
@@ -1320,6 +1390,7 @@ MODELS['vc'] = CosmoModel(
 Both samplers recognize it via `--model vc`. The simulator runs the full
 ladder + classical baseline; the QPU dispatches it quantum-only.
 
+
 ## How this code was developed
 
 The research questions, models, experiments and campaigns are the author's.
@@ -1330,9 +1401,43 @@ the author, who is responsible for the code and its results; the defects the
 review found are documented, with their measured effect, in
 [ERRATA.md](ERRATA.md).
 
+
+
+## What the fidelity claim rests on
+
+The claim this code supports is that the quantum components **reproduce**
+the classical results, not that they are faster or better. Each component
+supports it in a different way, and only some of them are tested by
+construction:
+
+| Component | Kind | What the evidence is | Limits |
+|---|---|---|---|
+| QMCMC acceptance | faithful | Amplitude-encoded Metropolis: A = min(1, e^Δ) is computed classically, loaded into one RY angle and read back. A test checks that the read-back equals min(1, e^Δ) without noise (`test_rho00_reproduces_metropolis_acceptance`); QMCMC 50 % and 100 % rows are bit-identical in the ideal simulator, and `triage_campaign.py` / `compare_seeds.py` flag any campaign where they are not. | Plumbing check, true by construction. Under readout/gate noise the read-back is (1 − 2p)·A + p, which breaks detailed balance (ERRATA QM-2): the noisy chain targets a different distribution. |
+| QVMC sampling | faithful | Samples are drawn from the trained circuit's output distribution; 0 % → 33 % differs only by shot noise. | Ideal simulator only. |
+| QVMC normalization | faithful | The circuit is run but the exact classical normalization is returned (ERRATA §5). | Not a quantum computation of the norm. |
+| QMCMC proposal | algorithmic | Random-circuit proposal: displacements come from measuring a randomly parameterized circuit, rescaled to unit size with a random sign, so q(δ) = q(−δ) on any backend (ERRATA QM-1). The chain targets the exact posterior; agreement with MCMC is checked within Monte Carlo error. | Displacements do not depend on θ. σ differences are meaningful only when both chains converged (QM-3). |
+| QVMC training | algorithmic | Born-machine ansatz trained on the reverse KL with exact parameter-shift gradients. | Under-dispersed: σ(QVMC)/σ(MCMC) ≈ 0.66, from the reverse KL and a near-product final state (QV-1). |
+| QGA operators | circuit-sampled operators | Init, mutation and crossover circuits start in a basis state and are measured in that basis, so their output bits have the distribution of classical biased coins (ERRATA §5). CGA == QGA(0 %) bit for bit on the grid (`test_b_refine_faithful_cell_also_holds_on_the_grid`). | Not a quantum effect. ΔQGA vs CGA is a grid-resolution floor (GA-1). |
+
+"Faithful" cells are null tests of the implementation; the "algorithmic"
+cells are where a quantum component could change a result, and their
+agreement is statistical. A shift between noise rungs is attributable to
+noise only if it is larger than the run-to-run scatter of the classical
+rows of the same campaign, which noise cannot touch.
+
+
 ## References
 
-* Sarracino et al. (2025) — QMCMC proposal circuit.
+* Sarracino et al. (2025), "Quantum Markov Chain Monte Carlo for
+  Cosmological Functions", arXiv:2509.09395 — QMCMC proposal circuit.
+* Layden et al. (2023), "Quantum-enhanced Markov chain Monte Carlo",
+  Nature 619, 282–287, doi:10.1038/s41586-023-06095-4, arXiv:2203.12497 —
+  quantum proposals for MCMC (cited by Sarracino et al. as related work).
+* Harrow & Wei (2020), "Adaptive quantum simulated annealing for Bayesian
+  inference and estimating partition functions", Proc. ACM-SIAM SODA 2020,
+  doi:10.1137/1.9781611975994.12, arXiv:1907.09965.
+* Harrow (2020), "Small quantum computers and large classical data sets",
+  arXiv:2004.00026.
 * Goliath et al. (2001) — analytic M_abs marginalization.
 * Brout et al. (2022) — Pantheon+ data and covariance.
 * Li & Shafieloo (2019, 2020) — PEDE / GEDE dark-energy models.
@@ -1367,11 +1472,14 @@ physics:
   encoded as falsifiable tests.
 * **Data provenance.** `data_manifest.py` records SHA256 checksums and the
   source of every dataset; run `python data_manifest.py --generate` after
-  placing the data files, and `--verify` to check integrity. The data files
-  themselves are not redistributed — download them from the official releases
-  listed in the manifest.
-* **License & citation.** `LICENSE` (MIT) and `CITATION.cff` (add your ORCID
-  and the archived DOI once you mint a release on Zenodo).
+  placing the data files, and `--verify` to check integrity. No reference
+  hashes are committed, so `--verify` compares against your own earlier
+  `--generate`. The CC+BAO table and Pantheon 2018 are committed; Pantheon+
+  is not redistributed — see *Getting the Pantheon+ files* under
+  [Datasets](#datasets).
+* **License & citation.** `LICENSE` (MIT) and `CITATION.cff` (with the
+  author's ORCID). **Pending:** no archival DOI has been minted yet; one will
+  be added to `CITATION.cff` when a release is archived on Zenodo.
 * **Determinism.** Runs are seeded (`--seed`, default 42). QGA's quantum
   operators and comparison-vs-baseline runs are now re-seeded explicitly at
   the point each stochastic component starts (Phase 3), so a fixed seed
