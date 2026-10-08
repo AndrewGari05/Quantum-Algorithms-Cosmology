@@ -104,6 +104,9 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--channel", default=None, help="IBM channel (default: saved account)")
     h.add_argument("--instance", default=None, help="IBM instance/CRN (default: saved account)")
     h.add_argument("--optimization-level", type=int, default=3)
+    h.add_argument("--mode", choices=["job", "batch"], default="job",
+                   help="IBM execution mode for the device location (default job; a Batch "
+                        "closes after its maximum TTL, 10 min on the Open plan)")
     h.add_argument("--dry-run", action="store_true",
                    help="compile and print jobs, shots and a rough time estimate; run nothing")
     for flag, typ in (("vi-grid", int), ("vi-iters", int), ("vi-shots", int), ("vi-samples", int),
@@ -208,7 +211,7 @@ def _hardware(args) -> int:
         return 0
     rows = hw.run(cfg, device, locations=args.locations, algorithms=args.algorithms,
                   out=args.out, max_quantum_seconds=args.max_quantum_seconds,
-                  optimization_level=args.optimization_level)
+                  optimization_level=args.optimization_level, mode=args.mode)
     print(hw.summary_table(rows))
     print(f"  written to {args.out}/ (results.csv, jobs.csv, vi_trace.csv, circuits.json, "
           "summary.md)")

@@ -324,7 +324,8 @@ class GeneticAlgorithm:
             fit = self.fitness(pop)
             fin = fit[np.isfinite(fit)]
             history.append({"generation": gen, "best_log_prob": float(np.max(fit)),
-                            "mean_log_prob": float(np.mean(fin)) if len(fin) else float("nan")})
+                            "mean_log_prob": float(np.mean(fin)) if len(fin) else float("nan"),
+                            "population": pop.copy(), "log_prob": fit.copy()})
         best = int(np.argmax(fit))
         w = np.exp(fit - np.max(fit)) if np.isfinite(np.max(fit)) else np.zeros_like(fit)
         w = np.where(np.isfinite(w), w, 0.0)

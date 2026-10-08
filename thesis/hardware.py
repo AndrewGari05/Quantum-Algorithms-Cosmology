@@ -184,6 +184,14 @@ def estimate_quantum_seconds(p: dict) -> float:
 
 
 # --------------------------------------------------------------------------- #
+def _save_samples(path: str | None, **arrays) -> None:
+    """Write the draws behind a row (for posterior plots); no-op without a path."""
+    if path is None:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    np.savez_compressed(path, **{k: np.asarray(v) for k, v in arrays.items()})
+
+
 def _seed(cfg: HardwareConfig, algorithm: str) -> np.random.SeedSequence:
     return np.random.SeedSequence([cfg.seed, ALGORITHMS.index(algorithm)])
 
@@ -212,7 +220,7 @@ def _summary(post: Posterior, samples: np.ndarray, ref: dict) -> dict:
     return row
 
 
-def reference(post: Posterior, cfg: HardwareConfig) -> dict:
+def reference(post: Posterior, cfg: HardwareConfig, samples_path: str | None = None) -> dict:
     """Long classical MCMC used as the posterior reference."""
     rng = np.random.default_rng(cfg.seed)
     scale = STEP_FRACTION * np.array([hi - lo for lo, hi in post.model.sample_box])
@@ -222,6 +230,7 @@ def reference(post: Posterior, cfg: HardwareConfig) -> dict:
     mh.run_mcmc(_init_positions(post, cfg.reference_chains, rng), burn + cfg.reference_steps)
     ch = mh.get_chain(discard=burn)
     flat = ch.reshape(-1, post.ndim)
+    _save_samples(samples_path, chain=ch, param_names=post.model.param_names)
     return {"mean": flat.mean(axis=0), "std": flat.std(axis=0),
             "rhat_max": float(np.max(diagnostics.rhat(np.swapaxes(ch, 0, 1))))}
 
@@ -258,7 +267,8 @@ class VIProtocol:
         return reverse_kl(q, self.p)
 
 
-def run_vi(proto: VIProtocol, backend: DeviceBackend, ref: dict) -> tuple[dict, list[dict]]:
+def run_vi(proto: VIProtocol, backend: DeviceBackend, ref: dict,
+           samples_path: str | None = None) -> tuple[dict, list[dict]]:
     cfg, post = proto.cfg, proto.post
     rng = np.random.default_rng(np.random.SeedSequence([cfg.seed, ALGORITHMS.index("vi"), 1]))
     vi = BornMachineVI(proto.grid, n_layers=cfg.vi_layers, optimizer="spsa", backend=backend,
@@ -279,6 +289,10 @@ def run_vi(proto: VIProtocol, backend: DeviceBackend, ref: dict) -> tuple[dict, 
     samples = vi.sample(res, cfg.vi_samples, rng, shots_backend=backend)
     wall = time.perf_counter() - t0
     kl_exact = proto.exact_kl(res.phi_history)
+    _save_samples(samples_path, start_samples=start, samples=samples, phi0=proto.phi0,
+                  phi_history=res.phi_history, kl_exact=kl_exact, target=proto.p,
+                  kl_shots_history=np.asarray(res.history), q_final=res.q,
+                  window=np.array(proto.grid.window), param_names=post.model.param_names)
     row = {"algorithm": "vi", "kl_start_exact": float(proto.kl0),
            "kl_final_exact": float(kl_exact[-1]), "kl_min_exact": float(kl_exact.min()),
            "kl_final_shots": float(res.kl), "spsa_a": vi.spsa_gains[0], "spsa_c": vi.spsa_gains[1],
@@ -301,7 +315,8 @@ def run_vi(proto: VIProtocol, backend: DeviceBackend, ref: dict) -> tuple[dict, 
 
 
 # --------------------------------------------------------------------------- #
-def run_mcmc(post: Posterior, cfg: HardwareConfig, backend, ref: dict) -> dict:
+def run_mcmc(post: Posterior, cfg: HardwareConfig, backend, ref: dict,
+             samples_path: str | None = None) -> dict:
     rng = np.random.default_rng(_seed(cfg, "mcmc"))
     scale = STEP_FRACTION * np.array([hi - lo for lo, hi in post.model.sample_box])
     if backend is None:                     # classical baseline, same recipe
@@ -318,6 +333,9 @@ def run_mcmc(post: Posterior, cfg: HardwareConfig, backend, ref: dict) -> dict:
     mh.run_mcmc(_init_positions(post, cfg.mcmc_chains, rng), burn + cfg.mcmc_steps)
     wall = time.perf_counter() - t0
     ch = mh.get_chain(discard=burn)
+    _save_samples(samples_path, chain=ch, log_prob=mh.get_log_prob(discard=burn),
+                  acceptance=mh.acceptance_fraction, burn=burn,
+                  param_names=post.model.param_names)
     per_chain = np.swapaxes(ch, 0, 1)
     row = {"algorithm": "mcmc", "acceptance": float(np.mean(mh.acceptance_fraction)),
            "rhat_max": float(np.max(diagnostics.rhat(per_chain))),
@@ -335,7 +353,8 @@ def run_mcmc(post: Posterior, cfg: HardwareConfig, backend, ref: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-def run_genetic(post: Posterior, cfg: HardwareConfig, backend, floor) -> dict:
+def run_genetic(post: Posterior, cfg: HardwareConfig, backend, floor,
+                samples_path: str | None = None) -> dict:
     from qablate.cosmology import fit_statistics
     rng = np.random.default_rng(_seed(cfg, "genetic"))
     quantum = list(cfg.ga_operators) if backend is not None else []
@@ -347,6 +366,13 @@ def run_genetic(post: Posterior, cfg: HardwareConfig, backend, floor) -> dict:
     wall = time.perf_counter() - t0
     fs = fit_statistics(post, r.theta_best)
     best = np.array([-2.0 * h["best_log_prob"] for h in r.history])     # chi2 (flat prior)
+    _save_samples(samples_path, theta_best=r.theta_best, population=r.population,
+                  log_prob=r.log_prob, population_spread=r.population_spread,
+                  best_log_prob=[h["best_log_prob"] for h in r.history],
+                  mean_log_prob=[h["mean_log_prob"] for h in r.history],
+                  populations=np.array([h["population"] for h in r.history]),
+                  log_probs=np.array([h["log_prob"] for h in r.history]),
+                  param_names=post.model.param_names)
     reached = np.flatnonzero(best <= floor + 1e-6) if floor is not None else []
     row = {"algorithm": "genetic", "operators": "+".join(quantum) or "classical",
            "chi2_estimate": float(post.chi2(r.theta_best)), "chi2_map": fs["chi2"],
@@ -401,7 +427,7 @@ def _write_csv(path: str, rows: list[dict]) -> None:
 
 def run(cfg: HardwareConfig, device, *, locations=LOCATIONS, algorithms=ALGORITHMS,
         out: str = "hardware", max_quantum_seconds: float | None = None,
-        optimization_level: int = 3, log=print) -> list[dict]:
+        optimization_level: int = 3, mode: str = "job", log=print) -> list[dict]:
     """Run the protocol and write ``results.csv``, ``jobs.csv``, ``vi_trace.csv``,
     ``circuits.json`` and ``summary.md`` into ``out``."""
     os.makedirs(out, exist_ok=True)
@@ -410,7 +436,8 @@ def run(cfg: HardwareConfig, device, *, locations=LOCATIONS, algorithms=ALGORITH
                               seed_transpiler=cfg.seed)
     log(f"  device {compiler.name} | locations {', '.join(locations)} | "
         f"algorithms {', '.join(algorithms)}")
-    ref = reference(post, cfg)
+    sdir = os.path.join(out, "samples")
+    ref = reference(post, cfg, samples_path=os.path.join(sdir, "reference_mcmc.npz"))
     log(f"  reference posterior (classical MCMC {cfg.reference_steps} x {cfg.reference_chains}): "
         + ", ".join(f"{n}={m:.4f}+-{s:.4f}" for n, m, s in
                     zip(post.model.param_names, ref["mean"], ref["std"], strict=True)))
@@ -427,19 +454,21 @@ def run(cfg: HardwareConfig, device, *, locations=LOCATIONS, algorithms=ALGORITH
 
     # classical baselines (same recipe, no circuits)
     if "mcmc" in algorithms:
-        rows.append({**base, "location": "classical", **run_mcmc(post, cfg, None, ref)})
+        rows.append({**base, "location": "classical", **run_mcmc(post, cfg, None, ref,
+                                               os.path.join(sdir, "classical_mcmc.npz"))})
     if "genetic" in algorithms:
-        rows.append({**base, "location": "classical", **run_genetic(post, cfg, None, floor)})
+        rows.append({**base, "location": "classical", **run_genetic(post, cfg, None, floor,
+                                               os.path.join(sdir, "classical_genetic.npz"))})
 
     for loc in locations:
         mode_ctx = None
-        mode = None
         if loc == "device":
             from qiskit_ibm_runtime import Batch
-            if not getattr(device, "name", "").startswith("fake"):
+            # Job mode by default: a Batch closes after its maximum TTL (10 min on
+            # the Open plan), and SPSA and the GA submit one job at a time.
+            if mode == "batch" and not getattr(device, "name", "").startswith("fake"):
                 mode_ctx = Batch(backend=device)
-                mode = mode_ctx
-        backend = DeviceBackend(compiler, loc, mode=mode, seed=cfg.seed,
+        backend = DeviceBackend(compiler, loc, mode=mode_ctx, seed=cfg.seed,
                                 max_quantum_seconds=max_quantum_seconds if loc == "device" else None)
         try:
             for alg in algorithms:
@@ -448,12 +477,15 @@ def run(cfg: HardwareConfig, device, *, locations=LOCATIONS, algorithms=ALGORITH
                 t0 = time.perf_counter()
                 try:
                     if alg == "vi":
-                        row, trace = run_vi(proto, backend, ref)
+                        row, trace = run_vi(proto, backend, ref,
+                                            os.path.join(sdir, f"{loc}_vi.npz"))
                         traces += [{**base, "location": loc, **t} for t in trace]
                     elif alg == "mcmc":
-                        row = run_mcmc(post, cfg, backend, ref)
+                        row = run_mcmc(post, cfg, backend, ref,
+                                       os.path.join(sdir, f"{loc}_mcmc.npz"))
                     else:
-                        row = run_genetic(post, cfg, backend, floor)
+                        row = run_genetic(post, cfg, backend, floor,
+                                          os.path.join(sdir, f"{loc}_genetic.npz"))
                 except QuantumBudgetExceeded as exc:
                     log(f"  [{loc}] {alg} stopped: {exc}")
                     row = {"algorithm": alg, "error": str(exc)}
