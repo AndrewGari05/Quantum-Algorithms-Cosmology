@@ -11,3 +11,8 @@ dist/
 results*/
 analysis/
 site/
+
+# secrets
+.env
+.env.*
+!.env.example
