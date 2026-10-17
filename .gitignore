@@ -23,3 +23,8 @@ resultados_quick/
 /resultados_config.csv
 /results_all_models.csv
 /resultados_TODOS_los_modelos.csv
+
+# secrets
+.env
+.env.*
+!.env.example
