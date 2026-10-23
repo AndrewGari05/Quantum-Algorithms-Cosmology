@@ -121,11 +121,15 @@ def _sigma_fill_colors(color, n_levels=3):
 def corner_multi(F, datasets, colors, labels, names, title, fname):
     import corner
     from matplotlib.lines import Line2D
-    allcat = np.vstack(datasets)
+    # The range is the union of every set's support (0.05-99.95 percentile of
+    # each), not the 0.5-99.5 percentile of the pooled samples: pooling let the
+    # long reference chain dominate, so the wider noisy/device posteriors and
+    # the QVMC grid window were cut at the frame.
     rng_ = []
     for p in range(len(names)):
-        lo, hi = np.percentile(allcat[:, p], [0.5, 99.5])
-        pad = 0.08 * (hi - lo + 1e-12)
+        lo = min(np.percentile(d[:, p], 0.05) for d in datasets)
+        hi = max(np.percentile(d[:, p], 99.95) for d in datasets)
+        pad = 0.04 * (hi - lo + 1e-12)
         rng_.append((lo - pad, hi + pad))
     latex = [LATEX.get(n, n) for n in names]
 
@@ -152,7 +156,12 @@ def corner_multi(F, datasets, colors, labels, names, title, fname):
         vec = [(ref.get(n) or (None,))[0] if n in ('Om', 'H0') else None for n in names]
         if any(v is not None for v in vec):
             corner.overplot_lines(fig, vec, color=col, ls=ls, lw=1.8)
-            handles.append(Line2D([0], [0], color=col, ls=ls, lw=1.8, label=ref['label']))
+            # A reference outside the plotted range draws nothing; say so in
+            # the legend instead of listing a line nobody can see.
+            off = [f"{LATEX.get(n, n)} = {v:g}" for n, v, (lo, hi) in zip(names, vec, rng_)
+                   if v is not None and not lo <= v <= hi]
+            lab = ref['label'] + (f" (off scale: {', '.join(off)})" if off else '')
+            handles.append(Line2D([0], [0], color=col, ls=ls, lw=1.8, label=lab))
     fig.legend(handles=handles, loc='upper right', fontsize=9, bbox_to_anchor=(0.99, 0.94))
     fig.suptitle(title, fontsize=13, fontweight='bold', y=1.02)
     F.save(fig, fname)
@@ -550,12 +559,12 @@ def main(run, out):
                         ha='center', va='bottom', fontsize=8)
             ax.set_xticks(xs, names_)
             ax.set_yscale('symlog', linthresh=1)
+            tops = [_f(row.get((alg, l), {}).get('wall_s')) or 0.0 for l in names_]
+            ax.set_ylim(0, max(tops + [1.0]) * 4)       # room for the value labels on top
             ax.set_ylabel('wall-clock time [s]')
-            ax.set_title(ALG_NAME[alg], fontsize=12, fontweight='bold')
             ws = _f(row.get((alg, 'ideal'), {}).get('warm_start_s')) if alg == 'vi' else None
-            if ws:
-                ax.text(0.02, 0.98, f'+ warm start on the PC (once, shared): {ws:.0f} s',
-                        transform=ax.transAxes, fontsize=8, va='top')
+            ax.set_title(ALG_NAME[alg] + (f'\n(+ warm start on the PC, once, shared: {ws:.0f} s)'
+                                          if ws else ''), fontsize=12, fontweight='bold')
             _style_ax(ax)
         fig.legend(handles=[Patch(facecolor=c, edgecolor='k', lw=0.5, label=l) for l, c in seg.items()],
                    loc='lower center', ncol=3, fontsize=9, bbox_to_anchor=(0.5, -0.02))
