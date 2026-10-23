@@ -3266,31 +3266,43 @@ def _ladder_diagnostics(qmcmc_runs, qvmc_runs, model, outdir, meta,
     _save_fig(fig, f)
 
     # ── KL overlay along the QVMC ladder ─────────────────────────────────────
+    # [B-KLXLIM] Linear x axis limited to the iterations where EVERY rung has
+    # data. The rungs do not spend the same number of iterations: the budget
+    # is equalized by CIRCUITS, and the classical optimizer (scipy) counts
+    # function evaluations, so the 0 % and 33 % rungs record up to ~7e5
+    # while the 67 % and 100 % ones stop at their max_iter (1.5e4). On the
+    # full axis the quantum curves were squashed against the left edge. A
+    # rung that runs past the window is cut at the edge and its final KL and
+    # length are written there, so nothing is hidden. (Earlier versions:
+    # [B-KLLOGX] used a log x axis.)
     fig, ax = plt.subplots(figsize=(8, 5.2))
+    curves = []
     for r, col in zip(qvmc_runs, v_cols):
         h = r['history']
-        if not h:
-            continue
+        if h:
+            curves.append((r, col, [max(d['it'], 1) for d in h],
+                           [max(d['kl'], 1e-12) for d in h]))
+    ends = [c[2][-1] for c in curves]
+    x_hi = 1.08 * min(ends) if len(ends) >= 2 and max(ends) > 1.5 * min(ends) else None
+    notes = []
+    for r, col, xs, ys in curves:
         lw = 2.8 if r['pct'] == 0 else 1.9
-        ax.semilogy([max(d['it'], 1) for d in h],
-                    [max(d['kl'], 1e-12) for d in h],
-                    color=col, lw=lw,
-                    label=qvmc_rung_label(r['pct'], short=True))
-    # [B-KLLOGX] Logarithmic x axis. The rungs do NOT spend the same number
-    # of iterations: the budget is equalized by CIRCUITS, not by iterations,
-    # and the classical optimizer (scipy) counts function evaluations, so the
-    # 33% rung can record ~1.2e5 while the 67% and 100% ones stop at 1.5e4.
-    # With a linear axis the longest rung eats the whole scale and the other
-    # three are squashed against the left margin —which is exactly where the
-    # interesting drop happens—. In log scale all four are fully visible and
-    # the budget difference is in plain sight instead of hidden. Not a single
-    # point is clipped.
-    ax.set_xscale('log')
-    ax.set_xlabel('Training iteration (log scale)')
+        lab = qvmc_rung_label(r['pct'], short=True)
+        if x_hi is not None and xs[-1] > x_hi:
+            lab += f"  (continues to {xs[-1]:,.0f}; final KL {ys[-1]:.4f})"
+            notes.append((col, ys[-1]))
+        ax.semilogy(xs, ys, color=col, lw=lw, label=lab)
+    if x_hi is not None:
+        ax.set_xlim(0, x_hi)
+        for col, y_end in notes:                # where the cut rungs end up
+            ax.annotate('', xy=(x_hi, y_end), xytext=(0.985 * x_hi, y_end),
+                        arrowprops=dict(arrowstyle='->', color=col, lw=1.4),
+                        annotation_clip=False)
+    ax.set_xlabel('Training iteration')
     ax.set_ylabel(r'KL$(Q_\varphi\,\|\,P_{\rm target})$')
     ax.set_title(f'QVMC training along the quantumness ladder\n'
                  f'(iterations = {iters}, nqpp = {nqpp})')
-    ax.legend(title='QVMC %', fontsize=9); ax.grid(True, alpha=0.3)
+    ax.legend(title='QVMC %', fontsize=8); ax.grid(True, alpha=0.3)
     f = os.path.join(outdir, f'ladder_kl_qvmc_{name}.png')
     _save_fig(fig, f)
 
