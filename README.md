@@ -503,7 +503,7 @@ classical neighbour — by design:
 | QMCMC 50→100 % | acceptance C→Q | faithful | **identical** — quantum Metropolis reproduces classical |
 | QVMC 0→33 % | sampling C→Q | faithful | ~identical (same trained state, only shot noise) |
 | QVMC 33→67 % | training C→Q | algorithmic | **changes strongly** (exact parameter-shift reaches a lower KL) |
-| QVMC 67→100 % | normalization C→Q | faithful | ~identical (faithful renormalization — the circuit is illustrative; the norm applied is the classical sum) |
+| QVMC 67→100 % | normalization switch | faithful (classical value) | **identical by construction** — the circuit runs but its output is discarded; the norm applied is the classical sum. Figures label this rung `QVMC 100% (classical norm., = 67%)`: the most quantum QVMC rung is 67 % |
 
 ```bash
 # Interactive (menu)
@@ -1480,6 +1480,13 @@ physics:
 * **License & citation.** `LICENSE` (MIT) and `CITATION.cff` (with the
   author's ORCID). **Pending:** no archival DOI has been minted yet; one will
   be added to `CITATION.cff` when a release is archived on Zenodo.
+* **Redrawing figures without re-running.** `bash scripts/rebuild_all.sh CAMPAIGN`
+  redoes every figure that comes from the CSVs and logs (ladder trends and
+  summary, R̂ and KL traces, method/seed/noise comparisons). Corner and 1-to-1
+  figures need the chains, which the CSV does not store: run with
+  `--save-samples` (`cosmo_modular_quantum.py` or `cosmo_hpc_runner.py`) to
+  write `samples_ladder_<model>.npz`, and `--replot-ladder` redraws those too.
+  Campaigns run without the flag keep their original corner figures.
 * **Determinism.** Runs are seeded (`--seed`, default 42). QGA's quantum
   operators and comparison-vs-baseline runs are now re-seeded explicitly at
   the point each stochastic component starts (Phase 3), so a fixed seed
