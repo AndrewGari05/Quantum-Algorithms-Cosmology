@@ -234,20 +234,32 @@ def cell_key_without_noise(row: dict) -> Tuple:
 #: CSV value of the QVMC rung that only adds the normalization switch.
 QVMC_NORMALIZATION_RUNG = 'QVMC 100%'
 
+#: Display names on the honest two-component QVMC scale (sampling, training).
+_QVMC_DISPLAY = {'QVMC 33%': 'QVMC 50% (quantum sampling)',
+                 'QVMC 67%': 'QVMC 100% (+ quantum training)'}
+
+
+def is_hidden_method(name: str) -> bool:
+    """True for rows figures leave out: the QVMC normalization rung.
+
+    It runs a circuit and discards its output, so it equals `QVMC 67%` by
+    construction (ERRATA section 5); showing it would suggest a third
+    quantum step. The triage and seed checks still read it.
+    """
+    return name == QVMC_NORMALIZATION_RUNG
+
 
 def display_method(name: str) -> str:
     """Label of a `Method` CSV value for figures and printed tables.
 
-    `QVMC 100%` adds only the normalization switch, whose circuit output is
-    discarded: it equals `QVMC 67%` by construction (ERRATA section 5).
-    The CSV value itself is never rewritten.
+    QVMC rungs are shown on a two-component scale: `QVMC 33%` (quantum
+    sampling) as 50 % and `QVMC 67%` (+ quantum training) as 100 %. The CSV
+    value itself is never rewritten.
 
     Examples:
-        >>> display_method('QVMC 100%')
-        'QVMC 100% (classical norm., = 67%)'
+        >>> display_method('QVMC 67%')
+        'QVMC 100% (+ quantum training)'
         >>> display_method('QMCMC 100%')
         'QMCMC 100%'
     """
-    if name == QVMC_NORMALIZATION_RUNG:
-        return 'QVMC 100% (classical norm., = 67%)'
-    return name
+    return _QVMC_DISPLAY.get(name, name)

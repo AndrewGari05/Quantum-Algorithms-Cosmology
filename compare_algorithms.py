@@ -297,8 +297,10 @@ def sigma_ratios(rows, rung='none') -> dict:
     return rel
 
 
+# 'QVMC 100%' (normalization switch, = 67 % by construction) is not listed:
+# see campaign_io.is_hidden_method.
 METHOD_ORDER = ['QMCMC 50%', 'QMCMC 100%', 'Classical VI',
-                'QVMC 33%', 'QVMC 67%', 'QVMC 100%']
+                'QVMC 33%', 'QVMC 67%']
 PARAM_ORDER = ['Om', 'H0', 'w', 'w0', 'wa', 'Delta']
 
 
@@ -309,11 +311,11 @@ def sigma_table(rel) -> None:
     print("  BELOW 1 = reports less uncertainty than there is.")
     print("  That is NOT better: it is bias.\n")
     pars = [p for p in PARAM_ORDER if any(p in rel[m] for m in rel)]
-    print(f"  {'Method':16s}" + ''.join(f"{p:>9s}" for p in pars))
+    print(f"  {'Method':32s}" + ''.join(f"{p:>9s}" for p in pars))
     for meth in METHOD_ORDER:
         if meth not in rel:
             continue
-        line = f"  {meth:16s}"
+        line = f"  {campaign_io.display_method(meth):32s}"
         for p in pars:
             v = rel[meth].get(p)
             line += f"{_med(v):9.3f}" if v else f"{'-':>9s}"
@@ -790,7 +792,7 @@ def sigma_vs_grid_table(series, method='QVMC 67%') -> None:
         return
     print(f"\n{'='*72}\n  DOES THE UNDER-DISPERSION GO AWAY WITH MORE QUBITS?"
           f"\n{'='*72}")
-    print(f"  ratio sigma({method}) / sigma({REFERENCE}) in Om,")
+    print(f"  ratio sigma({campaign_io.display_method(method)}) / sigma({REFERENCE}) in Om,")
     print("  along the nqpp sweep.\n")
     for mod in sorted(series):
         pts = series[mod]
@@ -837,7 +839,7 @@ def sigma_vs_grid_figure(series, out_dir, method='QVMC 67%') -> str | None:
     ax.annotate('agrees with the MCMC', (min(x), 1.0), fontsize=8,
                 color=C_REF, va='bottom', ha='left')
     ax.set_xlabel('nqpp  (qubits per grid parameter)', fontsize=9)
-    ax.set_ylabel(f'sigma({method}) / sigma({REFERENCE})', fontsize=9)
+    ax.set_ylabel(f'sigma({campaign_io.display_method(method)}) / sigma({REFERENCE})', fontsize=9)
     ax.set_title('The variational under-dispersion is NOT fixed by more '
                  'qubits', fontsize=10, loc='left')
     ax.set_xticks(sorted({g for v in series.values() for g, _ in v}))

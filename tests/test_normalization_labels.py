@@ -23,19 +23,27 @@ sys.path.insert(0, os.path.join(ROOT, 'tests'))
 import campaign_io  # noqa: E402
 
 
-def test_display_method_only_relabels_the_normalization_rung():
-    assert campaign_io.display_method('QVMC 100%') == \
-        'QVMC 100% (classical norm., = 67%)'
-    for name in ('QVMC 67%', 'QVMC 33%', 'QMCMC 100%', 'Classical VI', 'CGA'):
+def test_display_scale_has_two_qvmc_components_and_hides_normalization():
+    assert campaign_io.display_method('QVMC 33%') == 'QVMC 50% (quantum sampling)'
+    assert campaign_io.display_method('QVMC 67%') == 'QVMC 100% (+ quantum training)'
+    assert campaign_io.is_hidden_method('QVMC 100%')
+    for name in ('QMCMC 100%', 'QMCMC 50%', 'Classical VI', 'CGA', 'QGA (q=100%)'):
         assert campaign_io.display_method(name) == name
+        assert not campaign_io.is_hidden_method(name)
 
 
 def test_qvmc_rung_label():
     pytest.importorskip('qiskit')
     import cosmo_modular_quantum as cmq
-    assert cmq.qvmc_rung_label(67) == 'QVMC 67%'
-    assert cmq.qvmc_rung_label(100) == 'QVMC 100% (classical norm., = 67%)'
-    assert cmq.qvmc_rung_label(100, short=True) == '100% (classical norm., = 67%)'
+    assert [cmq.qvmc_display_pct(p) for p in (0, 33.0, 66.7, 67, 100)] == \
+        [0.0, 50.0, 100.0, 100.0, None]
+    runs = [{'pct': p} for p in (0.0, 33.0, 67.0, 100.0)]
+    shown = cmq.qvmc_display_runs(runs)
+    assert [r['pct'] for r in shown] == [0.0, 50.0, 100.0]
+    assert cmq.qvmc_display_runs(shown) is shown          # idempotent
+    assert [r['pct'] for r in runs] == [0.0, 33.0, 67.0, 100.0]   # inputs untouched
+    assert cmq.qvmc_rung_label(100) == 'QVMC 100% (+ quantum training)'
+    assert cmq.qvmc_rung_label(50, short=True) == '50% (quantum sampling)'
     assert 'Fully Quantum' not in cmq.quantumness_label(100)
     assert 'Fully Quantum' not in cmq.PRESETS[100]['label']
 
@@ -101,5 +109,6 @@ def test_replot_draws_corners_only_with_saved_samples(tmp_path):
 
     cmq.replot_ladder_from_csv(csv_path)
     for f in ('corner_ladder_qvmc_lcdm.png', 'corner_ladder_qmcmc_lcdm.png',
+              'corner_ladder_1to1_qvmc_lcdm_q050.png',
               'corner_ladder_1to1_qvmc_lcdm_q100.png', 'ladder_trends_lcdm.png'):
         assert os.path.exists(os.path.join(out, f)), f

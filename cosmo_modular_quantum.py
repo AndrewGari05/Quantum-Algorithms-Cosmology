@@ -580,33 +580,59 @@ _QMCMC_ORDER = ['proposal', 'acceptance']
 _QVMC_ORDER = ['sampling', 'training', 'normalization']
 
 
-def qvmc_rung_label(pct: float, short: bool = False) -> str:
-    """Display label of a QVMC rung for figures and printed tables.
+def qvmc_display_pct(pct: float):
+    """Display position of a QVMC rung on an honest two-component scale.
 
-    The 100 % rung only adds the normalization switch, which runs a circuit
-    and discards its output (`quantum_amplitude_normalization`): it is
-    identical to the 67 % rung by construction. Figures say so instead of
-    presenting it as a further quantum step. CSV cells keep the
-    `QVMC 100%` value so existing campaigns and readers are unchanged.
+    QVMC has two quantum components that change something: sampling and
+    training. The third switch, normalization, runs a circuit and discards
+    its output (`quantum_amplitude_normalization`), so its rung equals the
+    one before it by construction. Figures and printed tables therefore show
+    0 % (classical VI), 50 % (quantum sampling) and 100 % (+ quantum
+    training), and do not show the normalization rung. CSV cells keep the
+    stored 0/33/67/100 values, so campaigns and readers are unchanged.
 
     Args:
-        pct: per-method QVMC quantumness (0, 33, 67 or 100).
-        short: legend form without the "QVMC" prefix.
+        pct: stored per-method QVMC quantumness (0, 33, 67 or 100).
 
     Returns:
-        str
+        float or None: 0, 50 or 100; None for the normalization rung.
 
     Examples:
-        >>> qvmc_rung_label(67)
-        'QVMC 67%'
-        >>> qvmc_rung_label(100)
-        'QVMC 100% (classical norm., = 67%)'
-        >>> qvmc_rung_label(100, short=True)
-        '100% (classical norm., = 67%)'
+        >>> [qvmc_display_pct(p) for p in (0, 33.0, 66.7, 100)]
+        [0.0, 50.0, 100.0, None]
     """
-    body = f"{pct:.0f}%"
-    if round(pct) >= 100:
-        body += " (classical norm., = 67%)"
+    if pct < 1:
+        return 0.0
+    if pct < 50:
+        return 50.0
+    if pct < 99:
+        return 100.0
+    return None
+
+
+def qvmc_display_runs(runs):
+    """Runs relabelled for display (see `qvmc_display_pct`); idempotent."""
+    if all(r.get('_display') for r in runs):
+        return runs
+    out = []
+    for r in runs:
+        d = qvmc_display_pct(r['pct'])
+        if d is not None:
+            out.append({**r, 'pct': d, 'stored_pct': r['pct'], '_display': True})
+    return out
+
+
+def qvmc_rung_label(pct: float, short: bool = False) -> str:
+    """Display label of a QVMC rung, on the display scale of `qvmc_display_pct`.
+
+    Examples:
+        >>> qvmc_rung_label(50)
+        'QVMC 50% (quantum sampling)'
+        >>> qvmc_rung_label(100, short=True)
+        '100% (+ quantum training)'
+    """
+    what = {0: '', 50: ' (quantum sampling)', 100: ' (+ quantum training)'}
+    body = f"{pct:.0f}%" + what.get(int(round(pct)), '')
     return body if short else f"QVMC {body}"
 
 
@@ -3087,6 +3113,7 @@ def _ladder_trends_and_table(qmcmc_runs, qvmc_runs, model, outdir, meta,
     Returns:
         None. Writes ladder_trends_<model> and ladder_summary_<model>.
     """
+    qvmc_runs = qvmc_display_runs(qvmc_runs)
     name = model.name
     steps, iters, nqpp = meta['n_steps'], meta['n_iter'], meta['nqpp']
 
@@ -3173,8 +3200,8 @@ def _ladder_trends_and_table(qmcmc_runs, qvmc_runs, model, outdir, meta,
     fig.suptitle(f'{model.label} — trends along the per-method quantumness '
                  f'ladders\nsteps={steps} | iters={iters} | nqpp={nqpp}  '
                  '(QMCMC red, QVMC orange)\n'
-                 'QVMC 100% = 67% + classical normalization '
-                 '(identical by construction)',
+                 'QVMC: 50% = quantum sampling, 100% = + quantum training '
+                 '(the normalization switch is classical and not shown)',
                  fontsize=14, fontweight='bold', y=1.0)
     fig.tight_layout()
     f = os.path.join(outdir, f'ladder_trends_{name}.png')
@@ -3215,6 +3242,13 @@ def _ladder_trends_and_table(qmcmc_runs, qvmc_runs, model, outdir, meta,
     tbl = ax.table(cellText=rows, colLabels=cols, loc='center',
                    cellLoc='center')
     tbl.auto_set_font_size(False); tbl.set_fontsize(9); tbl.scale(1, 1.6)
+    # the first column holds the longest labels ("QVMC 100% (+ quantum
+    # training)"): give it the width it needs instead of an equal share
+    w0, wp = 0.21, 0.115                        # label column, parameter columns
+    n_rest = len(cols) - 1 - len(pnames)
+    for (i, j), cell in tbl.get_celld().items():
+        cell.set_width(w0 if j == 0 else wp if j <= len(pnames)
+                       else (1 - w0 - wp * len(pnames)) / max(n_rest, 1))
     fig.suptitle(f'{model.label} — per-method quantumness ladders\n'
                  f'steps={steps} | iters={iters} | nqpp={nqpp}',
                  fontsize=13, fontweight='bold')
@@ -3225,6 +3259,8 @@ def _ladder_trends_and_table(qmcmc_runs, qvmc_runs, model, outdir, meta,
 def _ladder_diagnostics(qmcmc_runs, qvmc_runs, model, outdir, meta,
                         q_cols, v_cols):
     """The R-hat and KL figures along each ladder.
+
+    QVMC rungs are shown on the two-component scale (`qvmc_display_runs`).
 
     Split out of `plot_method_ladders` so they can be redone without
     recomputing ([B-REPLOT]). They draw traces, not scalars, so they do not
@@ -3244,6 +3280,8 @@ def _ladder_diagnostics(qmcmc_runs, qvmc_runs, model, outdir, meta,
         None. Writes ladder_rhat_qmcmc_<model> and
         ladder_kl_qvmc_<model>.
     """
+    qvmc_runs = qvmc_display_runs(qvmc_runs)
+    v_cols = _q_colors([r['pct'] for r in qvmc_runs])
     name = model.name
     steps, iters, nqpp = meta['n_steps'], meta['n_iter'], meta['nqpp']
 
@@ -3327,6 +3365,7 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta,
     Returns:
         See the description above.
     """
+    qvmc_runs = qvmc_display_runs(qvmc_runs)
     name = model.name
     steps, iters, nqpp = meta['n_steps'], meta['n_iter'], meta['nqpp']
 

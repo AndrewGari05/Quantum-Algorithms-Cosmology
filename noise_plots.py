@@ -304,7 +304,8 @@ def figure_vs_grid(rows, family, model, metric, ideal_index,
     if not sub:
         return None
 
-    methods = sorted({r['Method'] for r in sub})
+    methods = sorted({r['Method'] for r in sub
+                      if not campaign_io.is_hidden_method(r['Method'])})
     data = defaultdict(lambda: defaultdict(list))     # method → rung → pts
     for r in sub:
         v = metric_value(r, metric, ideal_index)
@@ -391,7 +392,8 @@ def figure_at_fixed_grid(rows, family, model, grid, metrics,
                 table[(r['Method'], r['_noise'])] = v
         if table:
             methods = [m for m in sorted({r['Method'] for r in sub})
-                       if any((m, p) in table for p in rungs)]
+                       if any((m, p) in table for p in rungs)
+                       and not campaign_io.is_hidden_method(m)]
             panels.append((metric, table, methods))
     if not panels:
         return None
