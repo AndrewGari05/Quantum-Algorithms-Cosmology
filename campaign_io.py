@@ -229,3 +229,25 @@ def cell_key(row: dict) -> Tuple:
 def cell_key_without_noise(row: dict) -> Tuple:
     """``cell_key`` with the noise level removed (for noisy-vs-ideal pairs)."""
     return cell_key(row)[:-1]
+
+
+#: CSV value of the QVMC rung that only adds the normalization switch.
+QVMC_NORMALIZATION_RUNG = 'QVMC 100%'
+
+
+def display_method(name: str) -> str:
+    """Label of a `Method` CSV value for figures and printed tables.
+
+    `QVMC 100%` adds only the normalization switch, whose circuit output is
+    discarded: it equals `QVMC 67%` by construction (ERRATA section 5).
+    The CSV value itself is never rewritten.
+
+    Examples:
+        >>> display_method('QVMC 100%')
+        'QVMC 100% (classical norm., = 67%)'
+        >>> display_method('QMCMC 100%')
+        'QMCMC 100%'
+    """
+    if name == QVMC_NORMALIZATION_RUNG:
+        return 'QVMC 100% (classical norm., = 67%)'
+    return name

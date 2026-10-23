@@ -786,7 +786,9 @@ def build_tasks(args, master_dir: str, q_ceiling: int,
                             '--outdir', outdir] + common_data + noise_argv \
                         + route_argv \
                         + (['--rungs'] + list(args.rungs)
-                           if getattr(args, 'rungs', None) else [])
+                           if getattr(args, 'rungs', None) else []) \
+                        + (['--save-samples']
+                           if getattr(args, 'save_samples', False) else [])
                     tasks.append(Task(
                         name=name, script='cosmo_modular_quantum.py',
                         argv=argv, model=m, total_qubits=total_q,
@@ -1916,6 +1918,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help='cosmo_genetic_optimizers.py only')
     p.add_argument('--models', nargs='+', choices=ALL_MODELS, default=None,
                    help='Models to sweep (default: all)')
+    p.add_argument('--save-samples', action='store_true',
+                   help='samplers: pass --save-samples to every ladder task '
+                        '(writes the chains so corner figures can be redrawn '
+                        'with --replot-ladder). Changes no number.')
     p.add_argument('--rungs', nargs='+', default=None, metavar='TAG',
                    help='[E-RUNGS] samplers: run only these ladder rungs '
                         '(C-MCMC QMCMC50 QMCMC100 C-VI QVMC33 QVMC67 QVMC100). '

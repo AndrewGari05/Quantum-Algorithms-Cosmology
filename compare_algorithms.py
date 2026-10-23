@@ -349,7 +349,8 @@ def sigma_figure(rel, out_dir) -> str | None:
     ax.axvline(1.0, color=C_REF, lw=1.2)
     ax.axvspan(0.0, 0.95, color=C_CLASSICAL_WINS, alpha=.06)
     ax.set_yticks(range(len(methods)))
-    ax.set_yticklabels(methods, fontsize=9)
+    ax.set_yticklabels([campaign_io.display_method(m) for m in methods],
+                       fontsize=9)
     ax.set_xlabel(f'sigma of the method / sigma of {REFERENCE}', fontsize=9)
     ax.set_xlim(0.45, 1.12)
     ax.set_ylim(-0.6, len(methods) - 0.4)
@@ -743,7 +744,7 @@ def models_figure(mods, out_dir) -> str | None:
 # parameter in the same units, and the classical reference does not depend
 # on nqpp.
 
-def sigma_vs_grid(rows, method='QVMC 100%', param='Om',
+def sigma_vs_grid(rows, method='QVMC 67%', param='Om',
                   rung='none') -> dict:
     """Ratio sigma(method)/sigma(MCMC) as a function of nqpp, per model.
 
@@ -770,6 +771,10 @@ def sigma_vs_grid(rows, method='QVMC 100%', param='Om',
         if len(series) > 1:
             mod = f"{mod} [{key[0]}|{key[1]}|seed {key[3] or '?'}]"
         ref, q = v.get(REFERENCE), v.get(method)
+        if q is None and method == 'QVMC 67%':
+            # A task run with `--rungs ... QVMC100` only: the 100 % rung
+            # equals the 67 % one by construction (classical normalization).
+            q = v.get(campaign_io.QVMC_NORMALIZATION_RUNG)
         if not ref or not q:
             continue
         a, b = _num(q.get(param + '_std')), _num(ref.get(param + '_std'))
@@ -779,7 +784,7 @@ def sigma_vs_grid(rows, method='QVMC 100%', param='Om',
     return {m: sorted(v) for m, v in out.items() if len(v) >= 2}
 
 
-def sigma_vs_grid_table(series, method='QVMC 100%') -> None:
+def sigma_vs_grid_table(series, method='QVMC 67%') -> None:
     """Print the sigma ratio along the nqpp sweep."""
     if not series:
         return
@@ -801,7 +806,7 @@ def sigma_vs_grid_table(series, method='QVMC 100%') -> None:
     print("  qubits do not fix it.")
 
 
-def sigma_vs_grid_figure(series, out_dir, method='QVMC 100%') -> str | None:
+def sigma_vs_grid_figure(series, out_dir, method='QVMC 67%') -> str | None:
     """One curve per model: sigma ratio against nqpp.
 
     There are FIVE models and the validated palette has three colours, so

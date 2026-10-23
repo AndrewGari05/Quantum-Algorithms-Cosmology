@@ -448,7 +448,8 @@ QUANTUM_COMPONENTS = {
     'sampling':      {'kind': FAITHFUL,
                       'name': 'QVMC sampling (shots from the trained state)'},
     'normalization': {'kind': FAITHFUL,
-                      'name': 'Normalization (exact renormalization)'},
+                      'name': 'Normalization (classical exact sum; the circuit runs '
+                              'but its output is not used)'},
 }
 
 #: Legacy hand-picked weights (NO measurable definition). Retained ONLY so
@@ -468,7 +469,8 @@ PRESETS = {
     90:  dict(proposal=True, acceptance=True, training=True, sampling=True,
               normalization=False, label='4/5 quantum — + Quantum training (no QAE)'),
     100: dict(proposal=True, acceptance=True, training=True, sampling=True,
-              normalization=True, label='5/5 quantum — Fully Quantum'),
+              normalization=True, label='5/5 switches on — normalization stays '
+              'classical (= 4/5 by construction)'),
 }
 
 #: [BASE] The exact classical counterpart used as the mandatory baseline:
@@ -551,7 +553,10 @@ def quantumness_label(pct: float) -> str:
     if n == 0:
         return "Fully Classical (0/5 quantum)"
     if n >= len(QUANTUM_COMPONENTS):
-        return "Fully Quantum (5/5 quantum)"
+        # The normalization switch runs a circuit whose output is discarded
+        # (quantum_amplitude_normalization), so "5/5" is not more quantum
+        # than 4/5. The label says so instead of "Fully Quantum".
+        return "All 5 switches on (normalization classical)"
     return f"Hybrid ({n}/{len(QUANTUM_COMPONENTS)} quantum)"
 
 
@@ -573,6 +578,36 @@ def quantumness_label(pct: float) -> str:
 # change from weighted percentages to honest equal-spaced fractions.
 _QMCMC_ORDER = ['proposal', 'acceptance']
 _QVMC_ORDER = ['sampling', 'training', 'normalization']
+
+
+def qvmc_rung_label(pct: float, short: bool = False) -> str:
+    """Display label of a QVMC rung for figures and printed tables.
+
+    The 100 % rung only adds the normalization switch, which runs a circuit
+    and discards its output (`quantum_amplitude_normalization`): it is
+    identical to the 67 % rung by construction. Figures say so instead of
+    presenting it as a further quantum step. CSV cells keep the
+    `QVMC 100%` value so existing campaigns and readers are unchanged.
+
+    Args:
+        pct: per-method QVMC quantumness (0, 33, 67 or 100).
+        short: legend form without the "QVMC" prefix.
+
+    Returns:
+        str
+
+    Examples:
+        >>> qvmc_rung_label(67)
+        'QVMC 67%'
+        >>> qvmc_rung_label(100)
+        'QVMC 100% (classical norm., = 67%)'
+        >>> qvmc_rung_label(100, short=True)
+        '100% (classical norm., = 67%)'
+    """
+    body = f"{pct:.0f}%"
+    if round(pct) >= 100:
+        body += " (classical norm., = 67%)"
+    return body if short else f"QVMC {body}"
 
 
 def quantumness_qmcmc(config: dict) -> float:
@@ -2616,8 +2651,14 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
                            dataset_label: str = "", prior_type: str = "",
                            budget_mode: str = 'circuits',
                            no_plot: bool = False,
-                           rungs: Optional[Sequence[str]] = None) -> dict:
+                           rungs: Optional[Sequence[str]] = None,
+                           save_samples: bool = False) -> dict:
     """Run TWO independent, monotonic per-method quantumness ladders.
+
+    `save_samples=True` also writes `samples_ladder_<model>.npz` (the MCMC
+    chains and the weighted QVMC samples of every rung) next to the CSV, so
+    `--replot-ladder` can later redraw the corner and 1-to-1 figures. It
+    only writes a file; no number changes.
 
     [E-RUNGS] `rungs` restricts the run to a subset of rung tags (keys of
     `_TAGS_LOG`: 'C-MCMC', 'QMCMC50', 'QMCMC100', 'C-VI', 'QVMC33', 'QVMC67',
@@ -2746,6 +2787,8 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
     # test that is wasted time, and in a long campaign it is hundreds of
     # PDFs nobody asked for.
     meta = dict(n_steps=n_steps_mcmc, n_iter=max_iter_qvmc, nqpp=nqpp)
+    if save_samples:
+        say(f"Samples written to {save_ladder_samples(qmcmc_runs, qvmc_runs, model, outdir)}")
     if no_plot:
         say("Figures skipped (--no-plot).")
     else:
@@ -2777,6 +2820,57 @@ def run_quantumness_ladder(post: Posterior, n_steps_mcmc: int,
             f"(+ cumulative results_config.csv)")
 
     return {'qmcmc': qmcmc_runs, 'qvmc': qvmc_runs}
+
+
+def save_ladder_samples(qmcmc_runs, qvmc_runs, model, outdir: str) -> str:
+    """Write the samples behind the corner figures to a compressed `.npz`.
+
+    Keys: `qmcmc_<pct>_flat` (MCMC chains, flattened) and `qvmc_<pct>_S` /
+    `qvmc_<pct>_W` (QVMC grid samples and weights), `<pct>` rounded to an
+    integer. No pickle, so the file loads with `allow_pickle=False`.
+
+    Args:
+        qmcmc_runs: runs of the QMCMC family.
+        qvmc_runs: runs of the QVMC family.
+        model: cosmological model.
+        outdir: output folder.
+
+    Returns:
+        str: path of the file.
+    """
+    arrays = {}
+    for r in qmcmc_runs:
+        arrays[f"qmcmc_{r['pct']:.0f}_flat"] = np.asarray(r['flat'])
+    for r in qvmc_runs:
+        arrays[f"qvmc_{r['pct']:.0f}_S"] = np.asarray(r['S'])
+        arrays[f"qvmc_{r['pct']:.0f}_W"] = np.asarray(r['W'])
+    path = os.path.join(outdir, f"samples_ladder_{model.name}.npz")
+    np.savez_compressed(path, **arrays)
+    return path
+
+
+def _attach_ladder_samples(path: str, qmcmc_runs, qvmc_runs) -> bool:
+    """Attach the arrays of `save_ladder_samples` to runs rebuilt from a CSV.
+
+    Returns:
+        bool: True if every run got its samples (the full figure set can
+        then be redrawn), False otherwise.
+    """
+    z = np.load(path, allow_pickle=False)
+    ok = True
+    for r in qmcmc_runs:
+        k = f"qmcmc_{r['pct']:.0f}_flat"
+        if k in z:
+            r['flat'] = z[k]
+        else:
+            ok = False
+    for r in qvmc_runs:
+        ks, kw = f"qvmc_{r['pct']:.0f}_S", f"qvmc_{r['pct']:.0f}_W"
+        if ks in z and kw in z:
+            r['S'], r['W'] = z[ks], z[kw]
+        else:
+            ok = False
+    return ok
 
 
 #: Tags with which the log marks each rung, and the percentage that
@@ -2956,6 +3050,14 @@ def replot_ladder_from_csv(csv_path: str, outdir: Optional[str] = None,
     # everything was already redone and only the diagnostics drawing changed:
     # it costs ~2s per task instead of ~7s, and in a 90-task campaign that is
     # the difference between ten minutes and three.
+    # Runs started with --save-samples left the chains next to the CSV: then
+    # the corner and 1-to-1 figures can be redrawn too.
+    npz = os.path.join(os.path.dirname(os.path.abspath(csv_path)),
+                       f"samples_ladder_{model.name}.npz")
+    if (not diagnostics_only and os.path.exists(npz)
+            and _attach_ladder_samples(npz, qmcmc, qvmc)):
+        plot_method_ladders(qmcmc, qvmc, model, outdir, meta)
+        return outdir
     if not diagnostics_only:
         _ladder_trends_and_table(qmcmc, qvmc, model, outdir, meta, q_cols)
     # R-hat and KL only come out if the log was at hand; otherwise they are
@@ -3070,7 +3172,9 @@ def _ladder_trends_and_table(qmcmc_runs, qvmc_runs, model, outdir, meta,
 
     fig.suptitle(f'{model.label} — trends along the per-method quantumness '
                  f'ladders\nsteps={steps} | iters={iters} | nqpp={nqpp}  '
-                 '(QMCMC red, QVMC orange)',
+                 '(QMCMC red, QVMC orange)\n'
+                 'QVMC 100% = 67% + classical normalization '
+                 '(identical by construction)',
                  fontsize=14, fontweight='bold', y=1.0)
     fig.tight_layout()
     f = os.path.join(outdir, f'ladder_trends_{name}.png')
@@ -3102,7 +3206,7 @@ def _ladder_trends_and_table(qmcmc_runs, qvmc_runs, model, outdir, meta,
                      f"{r['elapsed']:.1f}s",
                      f"{r['acceptance']:.3f}", f"{r['ess']:.0f}", "—"])
     for r in qvmc_runs:
-        rows.append([f"QVMC {r['pct']:.0f}%", *_param_cells(r),
+        rows.append([qvmc_rung_label(r['pct']), *_param_cells(r),
                      f"{r['chi2_red']:.3f}", f"{r['AIC']:.1f}",
                      f"{r['elapsed']:.1f}s",
                      "—", f"{r['ess']:.0f}", f"{r['kl_final']:.4f}"])
@@ -3170,7 +3274,8 @@ def _ladder_diagnostics(qmcmc_runs, qvmc_runs, model, outdir, meta,
         lw = 2.8 if r['pct'] == 0 else 1.9
         ax.semilogy([max(d['it'], 1) for d in h],
                     [max(d['kl'], 1e-12) for d in h],
-                    color=col, lw=lw, label=f"{r['pct']:.0f}%")
+                    color=col, lw=lw,
+                    label=qvmc_rung_label(r['pct'], short=True))
     # [B-KLLOGX] Logarithmic x axis. The rungs do NOT spend the same number
     # of iterations: the budget is equalized by CIRCUITS, not by iterations,
     # and the classical optimizer (scipy) counts function evaluations, so the
@@ -3255,7 +3360,7 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta,
     v_cols = _q_colors([r['pct'] for r in qvmc_runs])
     plot_corner_multi(
         [_jitter(r['S']) for r in qvmc_runs], v_cols,
-        [f"QVMC {r['pct']:.0f}%" + (" (classical)" if r['pct'] == 0 else "")
+        [qvmc_rung_label(r['pct']) + (" (classical)" if r['pct'] == 0 else "")
          for r in qvmc_runs],
         model, outdir, f'ladder_qvmc_{name}',
         title=f"{model.label} — QVMC quantumness ladder  "
@@ -3280,9 +3385,9 @@ def plot_method_ladders(qmcmc_runs, qvmc_runs, model, outdir, meta,
         plot_corner_overlay(
             _jitter(base_v['S']), _jitter(r['S']), model, outdir,
             f"ladder_1to1_qvmc_{name}_q{int(r['pct']):03d}",
-            title=f"{model.label} — QVMC {r['pct']:.0f}% vs classical  "
+            title=f"{model.label} — {qvmc_rung_label(r['pct'])} vs classical  "
                   f"[iters={iters}, nqpp={nqpp}]  (cell-jittered)",
-            labels=('Classical VI (0%)', f"QVMC {r['pct']:.0f}%"),
+            labels=('Classical VI (0%)', qvmc_rung_label(r['pct'])),
             q_color=C_QUANTUM2,
             weights_c=base_v['W'], weights_q=r['W'])
 
@@ -3997,6 +4102,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Output directory (default: results/)')
     p.add_argument('--seed', type=int, default=42, help='RNG seed')
     p.add_argument('--no-plot', action='store_true', help='Skip figures')
+    p.add_argument('--save-samples', action='store_true',
+                   help='Ladder runs: also write samples_ladder_<model>.npz '
+                        '(chains and QVMC samples) so --replot-ladder can '
+                        'redraw the corner figures later. Changes no number.')
     p.add_argument('--no-csv', action='store_true',
                    help='Skip writing results_config.csv')
     p.add_argument('--gpu-check', action='store_true',
@@ -4070,7 +4179,7 @@ def _print_summary_block(title: str, model, st: dict, extra: str,
 def run_sweep_all(models, dataset, prior, steps, qvmc_iter, nqpp, chains,
                   shots, seed, master_dir, logger, log_every,
                   no_csv=False, no_plot=False, budget_mode='circuits',
-                  rungs=None):
+                  rungs=None, save_samples=False):
     """Run the full quantumness benchmark for EVERY requested model in one go.
 
     This is the HPC "launch once, get everything" mode. For each model it runs
@@ -4130,7 +4239,8 @@ def run_sweep_all(models, dataset, prior, steps, qvmc_iter, nqpp, chains,
                 outdir=model_dir, seed=seed, logger=logger,
                 log_every=log_every, n_chains_mcmc=chains, n_shots=shots,
                 csv_paths=csv_paths, dataset_label=dataset, prior_type=prior,
-                budget_mode=budget_mode, no_plot=no_plot, rungs=rungs)
+                budget_mode=budget_mode, no_plot=no_plot, rungs=rungs,
+                save_samples=save_samples)
             status[model_name] = 'ok'
             say(f"[{i}/{len(models)}] {model_name}: DONE -> {model_dir}/")
         except Exception as exc:                      # keep the batch alive
@@ -4304,7 +4414,8 @@ def main():
             args.nqpp, args.chains, args.shots, args.seed, master_dir, logger,
             args.log_every, no_csv=args.no_csv, no_plot=args.no_plot,
             budget_mode=getattr(args, 'budget_mode', 'circuits'),
-            rungs=getattr(args, 'rungs', None))
+            rungs=getattr(args, 'rungs', None),
+            save_samples=args.save_samples)
         _finish_profile(profiler, master_dir, logger.info,
                         f"sweep-all | {len(sweep_models)} models | "
                         f"steps={args.steps} iters={args.qvmc_iter}")
@@ -4409,7 +4520,8 @@ def main():
                                no_plot=args.no_plot,
                                # [E-QV4] these flags were parsed and dropped
                                n_chains_mcmc=args.chains, n_shots=args.shots,
-                               rungs=getattr(args, 'rungs', None))
+                               rungs=getattr(args, 'rungs', None),
+                               save_samples=args.save_samples)
         _finish_profile(profiler, args.outdir, say,
                         f"{model.label} benchmark | steps={steps} "
                         f"iters={qvmc_iter} nqpp={nqpp}")

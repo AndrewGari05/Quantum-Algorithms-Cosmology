@@ -334,7 +334,7 @@ def figure_vs_grid(rows, family, model, metric, ideal_index,
                 spare += 1
             xs, ys = zip(*pts)
             ax.plot(xs, ys, marker='o', ms=4, lw=1.6, color=c, ls=ls, label=p)
-        ax.set_title(met, fontsize=10)
+        ax.set_title(campaign_io.display_method(met), fontsize=10)
         ax.set_xlabel(x_label, fontsize=8)
         ax.set_ylabel(METRICS[metric][0], fontsize=8)
         ax.tick_params(labelsize=8)
@@ -420,7 +420,8 @@ def figure_at_fixed_grid(rows, family, model, grid, metrics,
                    edgecolor='white' if p == 'none-counts' else 'none',
                    alpha=.9)
         ax.set_xticks(range(len(methods)))
-        ax.set_xticklabels(methods, rotation=15, ha='right', fontsize=8)
+        ax.set_xticklabels([campaign_io.display_method(m) for m in methods],
+                           rotation=15, ha='right', fontsize=8)
         ax.set_ylabel(METRICS[metric][0], fontsize=8)
         ax.tick_params(labelsize=8)
         ax.grid(axis='y', alpha=.25, lw=.5)
