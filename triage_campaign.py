@@ -429,9 +429,15 @@ def review(master_dir):
     summary = defaultdict(lambda: [0, 0])       # ideal: how many coincide
     noisy = defaultdict(lambda: [0, 0])         # noise: how many separate
     immune = defaultdict(lambda: [0, 0])        # noise: how many stay equal
+    # Pairs whose second rung was not run (campaigns launched without
+    # QVMC100, which equals QVMC67 by construction): said explicitly instead
+    # of disappearing from the report.
+    not_run = defaultdict(int)
     for (_file, _mod, _ds, noise), g in groups.items():
         ideal = (noise or 'none') in ('none', 'none-counts', '')
         for a, b, sensitive in pairs:
+            if a in g and b not in g:
+                not_run[(a, b)] += 1
             if a not in g or b not in g:
                 continue
             equal = _rows_equal(g[a], g[b], fields)
@@ -464,6 +470,10 @@ def review(master_dir):
         for (a, b), (ok, tot) in sorted(immune.items()):
             mark = 'OK' if ok == tot else '*** CHECK ***'
             print(f"     {a:14s} == {b:14s}  {ok}/{tot}  {mark}")
+    for (a, b), n in sorted(not_run.items()):
+        if not any((a, b) in d for d in (summary, noisy, immune)):
+            print(f"\n   {a} == {b}: not evaluated, {b} was not run "
+                  f"({n} cell(s) have only {a})")
 
 
 def main(argv=None):

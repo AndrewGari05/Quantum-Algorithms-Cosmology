@@ -54,12 +54,19 @@ FAITHFUL_PAIRS = [
 
 #: Comparisons whose whole point is that the difference is NOT zero, and
 #: that can only be defended if they exceed the seed-to-seed spread.
+#: The quantum QVMC reference is QVMC 67% (quantum sampling + training): the
+#: 100% rung only adds the classical normalization and is identical to it by
+#: construction (ERRATA QV-6), and campaigns run without it have no such row.
+#: `QVMC 100%` is used only as a fallback when a cell has no 67% row.
 COMPARISONS = [
-    ('Classical VI', 'QVMC 100%', 'final_KL',
+    ('Classical VI', 'QVMC 67%', 'final_KL',
      'classical vs quantum at matched budget'),
     ('Classical MCMC', 'QMCMC 100%', 'acceptance',
      'classical vs quantum acceptance'),
 ]
+
+#: Rung to fall back on when the primary one of a comparison is missing.
+FALLBACK_RUNG = {'QVMC 67%': 'QVMC 100%'}
 
 
 def param_columns(cols):
@@ -167,27 +174,92 @@ def load_rows(folders):
         root = os.path.abspath(folder)
         # [E-QPU6] Only the per-model CSV: the per-task cumulative file
         # repeats the same rows and used to double every cell.
-        for p in campaign_io.result_csvs_any_layout(folder):
+        sources = [(p, False) for p in campaign_io.result_csvs_any_layout(folder)]
+        # A task whose per-model CSV is missing is read from its cumulative
+        # file instead, with a warning; tasks that have the per-model file are
+        # never read twice.
+        have = {os.path.dirname(os.path.dirname(os.path.abspath(p)))
+                for p, _ in sources}
+        fallback = [p for p in cumulative_csvs(folder)
+                    if os.path.dirname(os.path.abspath(p)) not in have]
+        if fallback:
+            print(f'WARNING: {len(fallback)} task(s) in {folder} have no '
+                  f'per-model CSV; reading their cumulative '
+                  f'{campaign_io.CUMULATIVE_CSV} instead (same values, no '
+                  f'rhat/mc_converged/code_version columns).', file=sys.stderr)
+        sources += [(p, True) for p in fallback]
+        for p, cumulative in sources:
             try:
                 rows = list(csv.DictReader(open(p, newline='')))
             except OSError:
                 continue
             if not rows:
                 continue
+            if cumulative:
+                rows = [named_param_columns(r) for r in rows]
             columns |= set(rows[0].keys())
             path_model = model_from_path(p)
-            task = campaign_io.canonical_csv_name(
-                os.path.relpath(os.path.abspath(p), root).replace('\\', '/'))
             for r in rows:
+                model = r.get('model') or path_model
+                rel = os.path.relpath(os.path.abspath(p), root).replace('\\', '/')
+                if cumulative:
+                    # same cell identity as the per-model file it replaces
+                    rel = f'{os.path.dirname(rel)}/model_{model}/{campaign_io.RESULT_CSV}'
+                task = campaign_io.canonical_csv_name(rel)
                 s = r.get('seed')
                 if s in (None, ''):
                     continue
                 seeds.add(s)
-                key = (task, r.get('model') or path_model,
+                key = (task, model,
                        r.get('dataset', ''), noise_level_of(r, p),
                        (r.get('Method') or '').strip())
                 cells[key][s] = r
     return cells, seeds, columns
+
+
+def cumulative_csvs(root):
+    """Per-task cumulative result files under ``root`` (current or legacy name)."""
+    return sorted(p for name in campaign_io.CUMULATIVE_CSV_NAMES
+                  for p in glob.glob(os.path.join(root, '**', name), recursive=True))
+
+
+def named_param_columns(row):
+    """A cumulative-file row with ``p1_mean``... renamed after its ``params``.
+
+    The cumulative file stores parameters generically (``params = Om|H0``,
+    ``p1_mean``, ``p1_std``, ...); the per-model file names them
+    (``Om_mean``...). Renaming makes both layouts comparable.
+
+    Examples:
+        >>> r = named_param_columns({'params': 'Om|H0', 'p1_mean': '0.3',
+        ...                          'p2_std': '0.8', 'p3_mean': ''})
+        >>> sorted(k for k in r if k.endswith(('_mean', '_std')))
+        ['H0_std', 'Om_mean']
+    """
+    names = [n for n in (row.get('params') or '').split('|') if n]
+    out = {}
+    for k, v in row.items():
+        m = re.match(r'p(\d+)_(mean|std)$', k or '')
+        if m:
+            i = int(m.group(1)) - 1
+            if i < len(names):
+                out[f'{names[i]}_{m.group(2)}'] = v
+            continue
+        out[k] = v
+    return out
+
+
+def grid_of(task):
+    """Grid tag of a cell identity, e.g. ``nqpp5`` (or '' if none).
+
+    Examples:
+        >>> grid_of('samplers_lcdm_nqpp5/model_lcdm/results_config.csv')
+        'nqpp5'
+        >>> grid_of('model_lcdm/results_config.csv')
+        ''
+    """
+    m = re.search(r'_(nqpp|nb)(\d+)', task)
+    return f'{m.group(1)}{m.group(2)}' if m else ''
 
 
 def dispersion(values):
@@ -319,6 +391,8 @@ def review(folders):
             print(f'      ({reason})')
             for c in culprits[:5]:
                 print(f'      differs in: {c}')
+        elif any(k[4] == a for k in cells) and not any(k[4] == b for k in cells):
+            print(f'\n   {a} == {b}   not evaluated: no {b} rows in these runs')
     if not any_pair:
         print('\n   (no comparable faithful pairs in these data)')
 
@@ -345,7 +419,7 @@ def review(folders):
         print(f'   {"cell":34s}{"metric":12s}{"mean":>12s}'
               f'{"sigma":>11s}{"%":>7s}')
         for rel, key, met, m, s, n in spread_rows[:12]:
-            lab = f'{key[1]}/{key[3]}/{key[4]}'[:33]
+            lab = f'{key[1]}/{grid_of(key[0]) or "-"}/{key[3]}/{key[4]}'[:33]
             print(f'   {lab:34s}{met:12s}{m:12.5g}{s:11.4g}{rel:7.2f}')
         stable = sum(1 for f in spread_rows if f[0] < 1.0)
         print(f'\n   {stable} of {len(spread_rows)} combinations move '
@@ -358,25 +432,37 @@ def review(folders):
     print('   Paired t-test over seeds (both methods share every seed).')
     print('   A difference with p >= 0.05 cannot be defended.')
     anything = False
-    for a, b, met, reason in COMPARISONS:
+    for a, b0, met, reason in COMPARISONS:
         if met not in columns:
             continue
+        # Cells whose per-seed values are identical (e.g. MCMC and QMCMC rows,
+        # which do not depend on nqpp within a seed) are reported once, with
+        # every grid they cover.
+        groups = {}
         for key, per_seed in sorted(cells.items()):
             if key[4] != a:
                 continue
+            b = b0
             key_b = key[:4] + (b,)
+            if key_b not in cells and b0 in FALLBACK_RUNG:
+                b = FALLBACK_RUNG[b0]
+                key_b = key[:4] + (b,)
             if key_b not in cells:
                 continue
-            sa = set(per_seed) & set(cells[key_b])
+            sa = sorted(set(per_seed) & set(cells[key_b]))
             if len(sa) < 2:
                 continue
-            va = [_num(per_seed[s].get(met)) for s in sorted(sa)]
-            vb = [_num(cells[key_b][s].get(met)) for s in sorted(sa)]
-            diff, se, tstat = in_sigmas(va, vb)
+            va = [_num(per_seed[s].get(met)) for s in sa]
+            vb = [_num(cells[key_b][s].get(met)) for s in sa]
+            sig = (key[1], key[2], key[3], b, tuple(sa), tuple(va), tuple(vb))
+            groups.setdefault(sig, []).append(grid_of(key[0]) or key[0])
+        for (model, _ds, noise, b, sa, va, vb), grids in groups.items():
+            diff, se, tstat = in_sigmas(list(va), list(vb))
             if diff is None:
                 continue
             anything = True
-            lab = f'{key[1]}/{key[3]}  [{key[0]}]'
+            where = ', '.join(sorted(grids))
+            same = ' (identical rows on every grid listed)' if len(grids) > 1 else ''
             # [E-QPU7] Verdict from the paired t-test p-value.
             if tstat is None:
                 verdict = ('identical difference on every seed: systematic'
@@ -390,7 +476,7 @@ def review(folders):
                 else:
                     verdict = f'p = {pv:.3g}: solid'
             print(f'\n   {a} vs {b}  [{met}]  — {reason}')
-            print(f'      {lab}   ({len(sa)} seeds, paired)')
+            print(f'      {model} {where} / {noise}{same}   ({len(sa)} seeds, paired)')
             print(f'      mean difference = {diff:+.6g}   SE = {se:.3g}'
                   + (f'   ->  t = {tstat:+.2f}' if tstat is not None else ''))
             print(f'      {verdict}')
