@@ -96,6 +96,24 @@ def parse_seeds(spec):
     return out
 
 
+def tex(model, p, units=False):
+    r"""LaTeX label of parameter ``p`` of ``model`` (from ``param_latex``).
+
+    Examples:
+        >>> tex(core.MODELS['lcdm'], 'Om'), tex(core.MODELS['lcdm'], 'H0')
+        ('$\\Omega_m$', '$H_0$')
+        >>> tex(core.MODELS['lcdm'], 'H0', units=True)
+        '$H_0$ [km/s/Mpc]'
+    """
+    lab = model.param_latex[model.param_names.index(p)]
+    return lab if units else lab.split(' [')[0]
+
+
+def tex_sigma(model, p):
+    """'$\\sigma(\\Omega_m)$'-style label of the posterior sd of ``p``."""
+    return '$\\sigma(' + tex(model, p).strip('$') + ')$'
+
+
 def display_pct(method):
     """Position of a rung on its per-method axis (QVMC on the display scale).
 
@@ -307,9 +325,9 @@ def fig_trends(data, model_name, n, seeds, outdir):
     model = core.MODELS[model_name]
     cell = data[(model_name, n)]
     pn = model.param_names
-    panels = [(p, f'{p}_mean', f'{p} (posterior mean)', model.fiducial[i])
+    panels = [(p, f'{p}_mean', f'{tex(model, p, units=True)} (posterior mean)', model.fiducial[i])
               for i, p in enumerate(pn)]
-    panels += [('sigma', f'{pn[0]}_std', f'σ({pn[0]}) (posterior sd)', None),
+    panels += [('sigma', f'{pn[0]}_std', f'{tex_sigma(model, pn[0])} (posterior sd)', None),
                ('time', 'Time_s', 'runtime [s]', None),
                ('chi2_red', 'chi2_red', r'$\chi^2_\nu$', None),
                ('AIC', 'AIC', 'AIC', None), ('BIC', 'BIC', 'BIC', None),
@@ -330,13 +348,15 @@ def fig_trends(data, model_name, n, seeds, outdir):
         if tag != 'acc':
             series(ax, vx, [per_seed(cell, m, getter, seeds) for m in QVMC_RUNGS],
                    cmq.C_QUANTUM2, 's', 'QVMC')
+        # keep the seed scatter readable: the fiducial and the references are
+        # drawn, but the y range stays on the data (a wide Planck band or a
+        # distant fiducial would flatten it)
+        lim = ax.get_ylim()
         if fid is not None:
             ax.axhline(fid, color='k', ls='--', lw=0.9, label='fiducial')
         if tag in pn:
-            # keep the seed scatter readable: references are drawn, but the
-            # y range stays on the data (a wide Planck band would flatten it)
-            lim = ax.get_ylim()
             cmq._draw_ref_lines(ax, tag, axis='y', band=True)
+        if fid is not None or tag in pn:
             ax.set_ylim(*lim)
         ax.set_xticks([0, 50, 100])
         ax.set_xlabel('quantumness %  (per method)')
@@ -425,7 +445,8 @@ def fig_summary(data, model_name, seeds, outdir):
                            cellstr(cell, meth, 'acceptance', 4),
                            cellstr(cell, meth, 'ESS', 0),
                            cellstr(cell, meth, 'final_KL', 4)])
-    cols = ['nqpp', 'method'] + pn + [f'σ({pn[0]})', 'σ/σ_MCMC', 'acc', 'ESS', 'final KL']
+    cols = (['nqpp', 'method'] + [tex(model, p) for p in pn]
+            + [tex_sigma(model, pn[0]), r'$\sigma/\sigma_{\rm MCMC}$', 'acc', 'ESS', 'final KL'])
     fig = plt.figure(figsize=(16 + 2.2 * max(0, len(pn) - 2), 0.3 * len(rows) + 0.6))
     ax = fig.add_subplot(111)
     ax.axis('off')
@@ -479,7 +500,8 @@ def fig_sigma_vs_grid(data, seeds, outdir, report):
                  label='Classical VI (control, same grid and budget)')]
     ax.legend(handles=h, fontsize=8, loc='upper left', bbox_to_anchor=(1.01, 1.0))
     ax.grid(alpha=0.3)
-    ax.set_title('Width of the Ωm posterior relative to classical MCMC\n'
+    ax.set_title(r'Width of the $\Omega_m$ posterior'
+                 ' relative to classical MCMC\n'
                  + seed_caption(seeds), fontsize=10)
     return save(fig, os.path.join(outdir, 'sigma_vs_grid'))
 
@@ -723,7 +745,8 @@ def fig_bias(data, seeds, outdir, report):
     axes[0].set_ylabel(r'$(\bar\Omega_m - \bar\Omega_m^{\rm MCMC})\,/\,\sigma_{\rm MCMC}$')
     h, l = axes[0].get_legend_handles_labels()
     fig.legend(h, l, loc='lower center', ncol=len(rungs), fontsize=8, bbox_to_anchor=(0.5, -0.04))
-    fig.suptitle('Shift of the Ωm posterior mean relative to classical MCMC (same seed)\n'
+    fig.suptitle(r'Shift of the $\Omega_m$ posterior mean'
+                 ' relative to classical MCMC (same seed)\n'
                  + seed_caption(seeds) + '. QMCMC rungs repeat on every grid (they do not use it).',
                  fontsize=10)
     fig.tight_layout(rect=(0, 0.05, 1, 1))

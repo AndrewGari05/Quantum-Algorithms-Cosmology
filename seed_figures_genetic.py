@@ -285,8 +285,8 @@ def fig_convergence(data, traces, model, seeds, out):
     axes[0].set_title(r'$\chi^2_{\rm grid}$ vs n_bits' + ('\nsd = 0 across seeds for every method at '
                       + ', '.join(zeros) if zeros else ''), fontsize=9)
     for k, p in enumerate(pn):
-        axes[1 + k].set_ylabel(f'{p} of the best grid point')
-        axes[1 + k].set_title(f'{p} (best individual, not refined)', fontsize=9)
+        axes[1 + k].set_ylabel(f'{sf.tex(core.MODELS[model], p, units=True)} of the best grid point')
+        axes[1 + k].set_title(f'{sf.tex(core.MODELS[model], p)} (best individual, not refined)', fontsize=9)
         lim = axes[1 + k].get_ylim()            # keep the range on the data
         axes[1 + k].axhline(core.MODELS[model].fiducial[k], color='k', ls='--', lw=0.8)
         axes[1 + k].set_ylim(*lim)
@@ -412,7 +412,7 @@ def fig_genetic_convergence(data, traces, model, nb, seeds, out):
             ax.fill_between(g, lo, hi, color=COLORS[meth], alpha=0.15, lw=0)
             ax.plot(g, med, STYLES[meth], color=COLORS[meth], lw=1.8, label=meth)
         ax.set_xlabel('generation')
-        ax.set_ylabel(f'{p} of the best individual')
+        ax.set_ylabel(f'{sf.tex(model_o, p, units=True)} of the best individual')
         ax.grid(alpha=0.3)
         ax.ticklabel_format(axis='y', useOffset=False)
         ax = axes[1, k]
@@ -428,7 +428,7 @@ def fig_genetic_convergence(data, traces, model, nb, seeds, out):
                             fmt='_', color=COLORS[meth], alpha=0.55, ms=12, capsize=5, lw=3)
         ax.set_xticks(range(len(METHODS)))
         ax.set_xticklabels([m.replace('QGA ', 'QGA\n') for m in METHODS], fontsize=7)
-        ax.set_ylabel(p)
+        ax.set_ylabel(sf.tex(model_o, p, units=True))
         ax.grid(alpha=0.3)
         ax.ticklabel_format(axis='y', useOffset=False)
     axes[0, 0].legend(fontsize=7)
