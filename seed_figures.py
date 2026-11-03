@@ -40,6 +40,7 @@ import csv
 import glob
 import math
 import os
+import re
 import sys
 from collections import defaultdict
 
@@ -111,16 +112,24 @@ def num(row, key):
     return compare_seeds._num(row.get(key)) if row else None
 
 
-def load_campaign(root, seeds=None):
+def load_campaign(root, seeds=None, pattern='seeds_s*', grid='nqpp'):
     """Rows of a multi-seed campaign, indexed for the figures.
 
+    Args:
+        root: folder holding one sub-folder per seed.
+        seeds: set of seed strings to keep (None = all).
+        pattern: glob of the per-seed folders (``genetic_s*`` for the
+            genetic campaign).
+        grid: grid tag of the task folders, ``nqpp`` (samplers) or ``nb``
+            (genetic n_bits).
+
     Returns:
-        ``(data, taskdirs)``. ``data[(model, nqpp)][method][seed] = row``;
-        ``taskdirs[(model, nqpp)][seed]`` is the task folder (for logs, npz).
+        ``(data, taskdirs)``. ``data[(model, grid)][method][seed] = row``;
+        ``taskdirs[(model, grid)][seed]`` is the task folder (for logs, npz).
     """
     data = defaultdict(lambda: defaultdict(dict))
     taskdirs = defaultdict(dict)
-    for folder in sorted(glob.glob(os.path.join(root, 'seeds_s*'))):
+    for folder in sorted(glob.glob(os.path.join(root, pattern))):
         if not os.path.isdir(folder):
             continue
         cells, folder_seeds, _ = compare_seeds.load_rows([folder])
@@ -135,9 +144,9 @@ def load_campaign(root, seeds=None):
             if noise not in ('none', ''):
                 continue
             g = compare_seeds.grid_of(task)
-            if not g.startswith('nqpp'):
+            if not re.fullmatch(grid + r'\d+', g):
                 continue
-            n = int(g[4:])
+            n = int(g[len(grid):])
             data[(model, n)][method][seed] = by_seed[seed]
             taskdirs[(model, n)][seed] = os.path.join(folder, task.split('/')[0])
     return data, taskdirs
