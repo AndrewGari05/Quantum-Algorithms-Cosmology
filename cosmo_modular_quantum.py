@@ -2446,8 +2446,15 @@ def plot_corner_multi(datasets, colors, labels, model, outdir: str, tag: str,
     handles.append(Line2D([0], [0], color='k', ls='--', lw=1.2,
                           label='Fiducial (Planck prior)'))
     handles.extend(ref_handles)
-    fig.legend(handles=handles, loc='upper right', fontsize=9,
-               bbox_to_anchor=(0.99, 0.94))
+    # With two parameters the empty upper-right corner is a single small
+    # panel and a long legend covers the marginals: put it outside, to the
+    # right of the figure. With three or more there is room inside.
+    if d <= 2:
+        fig.legend(handles=handles, loc='upper left', fontsize=9,
+                   bbox_to_anchor=(0.98, 0.94), frameon=False)
+    else:
+        fig.legend(handles=handles, loc='upper right', fontsize=9,
+                   bbox_to_anchor=(0.99, 0.94))
     fig.suptitle(title, fontsize=13, fontweight='bold', y=1.02)
     f = os.path.join(outdir, f'corner_{tag}.png')
     _save_fig(fig, f)

@@ -319,6 +319,41 @@ def seed_caption(seeds):
             'bar = sd across seeds, grey = individual seeds')
 
 
+#: Short model names for figure titles.
+MODEL_SHORT = {'lcdm': r'$\Lambda$CDM', 'wcdm': r'$w$CDM', 'cpl': 'CPL',
+               'pede': 'PEDE', 'gede': 'GEDE'}
+
+
+def short(model_name):
+    """Short model name for titles (e.g. '$\\Lambda$CDM')."""
+    return MODEL_SHORT.get(model_name, model_name)
+
+
+def legend_below(fig, axes, ncol=4, fontsize=8, extra=()):
+    """One legend for a multi-panel figure, below the panels.
+
+    Collects the labelled artists of every axis (each label once) so that no
+    legend sits on top of the data. Returns the height fraction to reserve
+    at the bottom (pass it to ``tight_layout(rect=(0, h, 1, ...))``).
+    """
+    seen, hs, ls = set(), [], []
+    for ax in np.ravel(axes):
+        for h, l in zip(*ax.get_legend_handles_labels()):
+            if l and not l.startswith('_') and l not in seen:
+                seen.add(l)
+                hs.append(h)
+                ls.append(l)
+    for h in extra:
+        hs.append(h)
+        ls.append(h.get_label())
+    if not hs:
+        return 0.0
+    fig.legend(hs, ls, loc='lower center', ncol=min(ncol, len(hs)), fontsize=fontsize,
+               bbox_to_anchor=(0.5, 0.0), frameon=False)
+    rows = int(np.ceil(len(hs) / min(ncol, len(hs))))
+    return min(0.04 + 0.035 * rows * 8 / max(fig.get_size_inches()[1], 1), 0.3)
+
+
 # ── figures ──────────────────────────────────────────────────────────────────
 def fig_trends(data, model_name, n, seeds, outdir):
     """ladder_trends_<model>_nqpp<N>: every scalar along both ladders."""
@@ -362,18 +397,12 @@ def fig_trends(data, model_name, n, seeds, outdir):
         ax.set_xlabel('quantumness %  (per method)')
         ax.set_ylabel(ylab)
         ax.grid(alpha=0.3)
-        ax.legend(fontsize=7)
     for ax in axes[len(panels):]:
         ax.axis('off')
-    note = rhat_note(data, model_name, seeds)
-    fig.suptitle(f'{model.label} — ladder trends over seeds, nqpp = {n}\n'
-                 f'{seed_caption(seeds)}.  QMCMC red (0 % = classical MCMC), '
-                 'QVMC orange (0 % = classical VI, 50 % = quantum sampling, '
-                 '100 % = + quantum training)'
-                 + (f'\n{note}' if note else ''),
-                 fontsize=12, fontweight='bold', y=1.0,
-                 color='firebrick' if note else 'k')
-    fig.tight_layout()
+    bottom = legend_below(fig, axes, ncol=6, fontsize=9)
+    fig.suptitle(f'{short(model_name)} — quantumness ladders, nqpp = {n}',
+                 fontsize=14, fontweight='bold')
+    fig.tight_layout(rect=(0, bottom, 1, 0.97))
     return save(fig, os.path.join(outdir, model_name, f'ladder_trends_{model_name}_nqpp{n}'))
 
 
@@ -461,12 +490,7 @@ def fig_summary(data, model_name, seeds, outdir):
             c.visible_edges = 'closed'
         if i > 0 and int(rows[i - 1][0]) % 2 == 0:
             c.set_facecolor('#f3f3f3')
-    note = rhat_note(data, model_name, seeds)
-    fig.suptitle(f'{model.label} — ladder summary over {len(seeds)} seeds '
-                 f'({seeds[0]}–{seeds[-1]}): mean ± sd across seeds '
-                 '(standard errors in ladder_summary.csv)'
-                 + (f'\n{note}' if note else ''), fontsize=11, fontweight='bold',
-                 color='firebrick' if note else 'k')
+    fig.suptitle(f'{short(model_name)} — ladder summary', fontsize=12, fontweight='bold')
     return save(fig, os.path.join(outdir, model_name, f'ladder_summary_{model_name}'))
 
 
@@ -484,8 +508,7 @@ def fig_sigma_vs_grid(data, seeds, outdir, report):
             vals = [sigma_ratio(data[(model_name, n)], meth, seeds) for n in grids]
             for n, v in zip(grids, vals):
                 report.append(f'  {model_name} nqpp{n} {meth:14s} {fmt(*stats(v)[:3], prec=3)}  n={stats(v)[3]}')
-            lab = (f'{core.MODELS[model_name].label.split("  ")[0]}'
-                   if meth == QVMC_REF else None)
+            lab = short(model_name) if meth == QVMC_REF else None
             series(ax, xs, vals, col, 'o' if meth == QVMC_REF else 'D', lab,
                    ls=ls, mfc=mfc, jitter=0.012)
     ax.axhline(1.0, color='k', lw=0.9, ls='--')
@@ -500,9 +523,8 @@ def fig_sigma_vs_grid(data, seeds, outdir, report):
                  label='Classical VI (control, same grid and budget)')]
     ax.legend(handles=h, fontsize=8, loc='upper left', bbox_to_anchor=(1.01, 1.0))
     ax.grid(alpha=0.3)
-    ax.set_title(r'Width of the $\Omega_m$ posterior'
-                 ' relative to classical MCMC\n'
-                 + seed_caption(seeds), fontsize=10)
+    ax.set_title(r'Width of the $\Omega_m$ posterior relative to MCMC',
+                 fontsize=12, fontweight='bold')
     return save(fig, os.path.join(outdir, 'sigma_vs_grid'))
 
 
@@ -583,10 +605,10 @@ def fig_kl(data, taskdirs, model_name, n, seeds, outdir, report):
         ax.set_xlim(0, x_hi)
     ax.set_xlabel('training iteration')
     ax.set_ylabel(r'KL$(Q_\varphi\,\|\,P_{\rm target})$')
-    ax.set_title(f'{core.MODELS[model_name].label} — QVMC training over seeds, nqpp = {n}\n'
-                 f'median over {len(seeds)} seeds, band = 16–84 percentiles (from the task logs)',
-                 fontsize=10)
-    ax.legend(title='QVMC %', fontsize=7.5)
+    ax.set_title(f'{short(model_name)} — QVMC training, nqpp = {n}',
+                 fontsize=12, fontweight='bold')
+    ax.legend(title='QVMC %', fontsize=8, loc='upper center', bbox_to_anchor=(0.5, -0.13),
+              frameon=False)
     ax.grid(True, alpha=0.3)
     return save(fig, os.path.join(outdir, model_name, f'ladder_kl_qvmc_{model_name}_nqpp{n}'))
 
@@ -646,12 +668,9 @@ def fig_rhat(data, taskdirs, model_name, seeds, outdir, report):
                label=rf'$\hat R-1={core.RHAT_THRESHOLD - 1:g}$')
     ax.set_xlabel('sampling steps')
     ax.set_ylabel(r'$\hat R_{\max}-1$')
-    note = rhat_note(data, model_name, seeds)
-    ax.set_title(f'{core.MODELS[model_name].label} — QMCMC convergence over seeds\n'
-                 f'median over {len(seeds)} seeds, band = 16–84 percentiles '
-                 f'(logs of nqpp{n0}; {"identical on every grid" if same else "GRIDS DIFFER"})',
-                 fontsize=10, color='firebrick' if note else 'k')
-    ax.legend(title='QMCMC %', fontsize=7.5)
+    ax.set_title(f'{short(model_name)} — QMCMC convergence', fontsize=12, fontweight='bold')
+    ax.legend(title='QMCMC %', fontsize=8, loc='upper center', bbox_to_anchor=(0.5, -0.13),
+              frameon=False)
     ax.grid(True, alpha=0.3)
     return save(fig, os.path.join(outdir, model_name, f'ladder_rhat_qmcmc_{model_name}'))
 
@@ -695,7 +714,7 @@ def fig_efficiency(data, seeds, outdir, report):
                               + ('  [R-hat caveat]' if bad else ''))
             if bad:
                 ax.axvspan(k - 0.45, k + 0.45, color='firebrick', alpha=0.07, lw=0)
-    labels = [m.upper() + ('\n(R̂ ≥ 1.01 in\nsome seeds)' if rhat_flags(data, m, seeds) else '')
+    labels = [short(m) + ('\n(not converged\nin some seeds)' if rhat_flags(data, m, seeds) else '')
               for m in mg]
     for ax, ttl, ref in zip(axes, ('ESS(QMCMC) / ESS(MCMC)', 'acceptance(QMCMC) − acceptance(MCMC)'),
                             (1.0, 0.0)):
@@ -705,13 +724,14 @@ def fig_efficiency(data, seeds, outdir, report):
         ax.set_title(ttl, fontsize=10)
         ax.grid(alpha=0.3)
     from matplotlib.lines import Line2D
-    axes[0].legend(handles=[Line2D([0], [0], color=cmq.C_QUANTUM, marker='o', ls='none', label='QMCMC 50%'),
-                            Line2D([0], [0], color=cmq.C_QUANTUM, marker='s', mfc='white', ls='none',
-                                   label='QMCMC 100%')], fontsize=8)
-    fig.suptitle('QMCMC vs classical MCMC, same seed (does not depend on nqpp)\n'
-                 + seed_caption(seeds) + '; shaded = not converged in some seeds',
-                 fontsize=10)
-    fig.tight_layout()
+    fig.legend(handles=[Line2D([0], [0], color=cmq.C_QUANTUM, marker='o', ls='none', label='QMCMC 50%'),
+                        Line2D([0], [0], color=cmq.C_QUANTUM, marker='s', mfc='white', ls='none',
+                               label='QMCMC 100%'),
+                        Line2D([0], [0], color=SEED_GREY, marker='o', ls='none', ms=4,
+                               label='individual seeds')],
+               loc='lower center', ncol=3, fontsize=9, frameon=False)
+    fig.suptitle('QMCMC efficiency relative to classical MCMC', fontsize=12, fontweight='bold')
+    fig.tight_layout(rect=(0, 0.07, 1, 0.95))
     return save(fig, os.path.join(outdir, 'qmcmc_efficiency'))
 
 
@@ -738,18 +758,14 @@ def fig_bias(data, seeds, outdir, report):
         ax.axhline(0, color='k', lw=0.9, ls='--')
         ax.set_xticks(grids)
         ax.set_xlabel('nqpp')
-        note = ' (R̂ caveat)' if rhat_flags(data, model_name, seeds) else ''
-        ax.set_title(core.MODELS[model_name].label.split('  ')[0] + note, fontsize=10,
-                     color='firebrick' if note else 'k')
+        ax.set_title(short(model_name), fontsize=11)
         ax.grid(alpha=0.3)
     axes[0].set_ylabel(r'$(\bar\Omega_m - \bar\Omega_m^{\rm MCMC})\,/\,\sigma_{\rm MCMC}$')
     h, l = axes[0].get_legend_handles_labels()
-    fig.legend(h, l, loc='lower center', ncol=len(rungs), fontsize=8, bbox_to_anchor=(0.5, -0.04))
-    fig.suptitle(r'Shift of the $\Omega_m$ posterior mean'
-                 ' relative to classical MCMC (same seed)\n'
-                 + seed_caption(seeds) + '. QMCMC rungs repeat on every grid (they do not use it).',
-                 fontsize=10)
-    fig.tight_layout(rect=(0, 0.05, 1, 1))
+    fig.legend(h, l, loc='lower center', ncol=len(rungs), fontsize=9, frameon=False)
+    fig.suptitle(r'Shift of the $\Omega_m$ posterior mean relative to MCMC',
+                 fontsize=12, fontweight='bold')
+    fig.tight_layout(rect=(0, 0.08, 1, 0.95))
     return save(fig, os.path.join(outdir, 'om_bias'))
 
 
@@ -782,15 +798,20 @@ def fig_paired_kl(data, seeds, outdir, report):
         ax.set_xticks(grids)
         ax.set_xlim(grids[0] - 0.6, grids[-1] + 0.6)
         ax.set_xlabel('nqpp')
-        ax.set_title(core.MODELS[model_name].label.split('  ')[0], fontsize=10)
+        ax.set_title(short(model_name), fontsize=11)
         ax.grid(alpha=0.3)
     axes[0].set_ylabel(r'final KL$_{\rm QVMC\,100\%}$ − final KL$_{\rm classical\ VI}$')
-    fig.suptitle(f'Paired difference of final KL, {campaign_io.display_method(QVMC_REF)} minus '
-                 'classical VI, same seed and grid\n'
-                 '★ = paired t > 3; each point is a within-cell difference — '
-                 'final KL is not comparable across nqpp (different target grids). '
-                 + seed_caption(seeds), fontsize=9.5)
-    fig.tight_layout()
+    from matplotlib.lines import Line2D
+    fig.legend(handles=[Line2D([0], [0], color='0.3', marker='*', ms=11, ls='none',
+                               label='paired t > 3'),
+                        Line2D([0], [0], color='0.3', marker='o', mfc='white', ls='none',
+                               label='paired t ≤ 3'),
+                        Line2D([0], [0], color=SEED_GREY, marker='o', ms=4, ls='none',
+                               label='individual seeds')],
+               loc='lower center', ncol=3, fontsize=9, frameon=False)
+    fig.suptitle('Final KL of QVMC 100% minus classical VI (paired)',
+                 fontsize=12, fontweight='bold')
+    fig.tight_layout(rect=(0, 0.08, 1, 0.95))
     return save(fig, os.path.join(outdir, 'paired_kl'))
 
 
@@ -831,7 +852,7 @@ def fig_aic_bic(data, seeds, outdir, report):
             ax.bar(x, mm, 0.34, color=col, yerr=sd, capsize=4,
                    label=f'Δ{c}' if k == 0 else None)
             draw_seeds(ax, x, d, width=0.08, zorder=4)
-            ax.annotate(f'{mm:+.3f}\nsd {sd:.1e}', (x, mm), xytext=(0, 3 if mm >= 0 else -4),
+            ax.annotate(f'{mm:+.2f}', (x, mm), xytext=(0, 3 if mm >= 0 else -4),
                         textcoords='offset points', ha='center', fontsize=7,
                         va='bottom' if mm >= 0 else 'top')
             report.append(f'  Δ{c} {m} − {ref}: {fmt(mm, sd, se, prec=4)}  n={nn}'
@@ -840,13 +861,11 @@ def fig_aic_bic(data, seeds, outdir, report):
     lo, hi = ax.get_ylim()
     ax.set_ylim(lo - 0.12 * (hi - lo), hi + 0.1 * (hi - lo))
     ax.set_xticks(range(len(others)))
-    ax.set_xticklabels([core.MODELS[m].label.split('  ')[0] for m in others])
-    ax.set_ylabel(f'Δ relative to {core.MODELS[ref].label}')
+    ax.set_xticklabels([short(m) for m in others])
+    ax.set_ylabel(f'Δ relative to {short(ref)}')
     ax.legend(fontsize=9)
     ax.grid(axis='y', alpha=0.3)
-    ax.set_title('Model selection over seeds (positive = disfavoured vs ΛCDM)\n'
-                 + f'{len(seeds)} seeds ({seeds[0]}–{seeds[-1]}): bar = mean, error bar = sd across '
-                 'seeds (expected 0), grey = individual seeds', fontsize=9.5)
+    ax.set_title(f'Model selection relative to {short(ref)}', fontsize=12, fontweight='bold')
     return save(fig, os.path.join(outdir, 'modelos_aic_bic'))
 
 
@@ -882,9 +901,7 @@ def fig_corners(data, taskdirs, model_name, seeds, outdir, report):
         f = cmq.plot_corner_multi([np.vstack(pools[p]) for p in pcts], cmq._q_colors(pcts),
                                   labels, model, os.path.join(outdir, model_name),
                                   f'ladder_qmcmc_{model_name}',
-                                  title=f'{model.label} — QMCMC ladder, {nseeds} seeds pooled'
-                                        + ('\n' + rhat_note(data, model_name, seeds)
-                                           if rhat_flags(data, model_name, seeds) else ''))
+                                  title=f'{short(model_name)} — QMCMC ladder')
         out.append(f)
         report.append(f'  corner qmcmc {model_name}: {nseeds} seeds pooled (nqpp{n0} chains)')
     # QVMC family per grid (+ classical MCMC as the reference)
@@ -919,8 +936,7 @@ def fig_corners(data, taskdirs, model_name, seeds, outdir, report):
                  [cmq.qvmc_rung_label(dp) + (' (classical VI)' if dp == 0 else '') for dp in disp]
         f = cmq.plot_corner_multi(datasets, colors, labels, model, os.path.join(outdir, model_name),
                                   f'ladder_qvmc_{model_name}_nqpp{n}',
-                                  title=f'{model.label} — QVMC ladder, nqpp = {n}, {nseeds} seeds '
-                                        'pooled (cell-jittered for display)',
+                                  title=f'{short(model_name)} — QVMC ladder, nqpp = {n}',
                                   weights_list=weights)
         out.append(f)
         report.append(f'  corner qvmc {model_name} nqpp{n}: {nseeds} seeds pooled')

@@ -229,23 +229,15 @@ def fig_delta_vs_nbits(data, seeds, out, report):
         ax.set_xticks(grids)
         ax.set_xlabel('n_bits per parameter (genetic grid)')
         ax.grid(alpha=0.3)
-        by_level = defaultdict(list)
-        for q, nb in nonzero:
-            by_level[q].append(nb)
-        txt = ('sd = 0 across seeds\nin every point' if not nonzero else
-               'sd > 0 across seeds only for\n' + '\n'.join(
-                   f'q={q}: nb ' + ','.join(map(str, v)) for q, v in by_level.items()))
-        ax.set_title(core.MODELS[model].label.split('  ')[0] + '\n' + txt, fontsize=8)
+        ax.set_title(sf.short(model), fontsize=11)
         report.append(f'  {model}: non-zero seed sd in '
                       + (', '.join(f'q{q} nb{nb}' for q, nb in nonzero) or 'none'))
     axes[0].set_ylabel(r'$\Delta\chi^2_{\rm grid}$ = QGA − CGA  (same seed)')
     h, l = axes[0].get_legend_handles_labels()
-    fig.legend(h, l, loc='lower center', ncol=4, fontsize=8, bbox_to_anchor=(0.5, -0.05))
-    fig.suptitle('Best grid point found by each QGA rung relative to the classical GA '
-                 '(chi2 before refinement)\n'
-                 + sf.seed_caption(seeds) + '. y axis symmetric-log, linear below 1e-3; '
-                 'positive = QGA worse.', fontsize=10)
-    fig.tight_layout(rect=(0, 0.05, 1, 1))
+    fig.legend(h, l, loc='lower center', ncol=4, fontsize=9, frameon=False)
+    fig.suptitle(r'Best grid point of each QGA rung relative to CGA', fontsize=12,
+                 fontweight='bold')
+    fig.tight_layout(rect=(0, 0.08, 1, 0.95))
     return sf.save(fig, os.path.join(out, 'genetico_chi2grid_contra_nbits'))
 
 
@@ -282,11 +274,11 @@ def fig_convergence(data, traces, model, seeds, out):
     _plain_chi2_axis(axes[0], n_data)
     zeros = [f'nb{nb}' for nb in grids
              if all(zero_sd(chi2_grid(data[(model, nb)], m, seeds)) for m in METHODS)]
-    axes[0].set_title(r'$\chi^2_{\rm grid}$ vs n_bits' + ('\nsd = 0 across seeds for every method at '
-                      + ', '.join(zeros) if zeros else ''), fontsize=9)
+    del zeros
+    axes[0].set_title(r'$\chi^2_{\rm grid}$', fontsize=11)
     for k, p in enumerate(pn):
         axes[1 + k].set_ylabel(f'{sf.tex(core.MODELS[model], p, units=True)} of the best grid point')
-        axes[1 + k].set_title(f'{sf.tex(core.MODELS[model], p)} (best individual, not refined)', fontsize=9)
+        axes[1 + k].set_title(sf.tex(core.MODELS[model], p), fontsize=11)
         lim = axes[1 + k].get_ylim()            # keep the range on the data
         axes[1 + k].axhline(core.MODELS[model].fiducial[k], color='k', ls='--', lw=0.8)
         axes[1 + k].set_ylim(*lim)
@@ -294,10 +286,11 @@ def fig_convergence(data, traces, model, seeds, out):
         ax.set_xticks(grids)
         ax.set_xlabel('n_bits per parameter')
         ax.grid(alpha=0.3)
-    axes[0].legend(fontsize=7)
-    fig.suptitle(f'{core.MODELS[model].label} — genetic estimates vs grid resolution\n'
-                 + sf.seed_caption(seeds) + '. CGA and QGA 0 % coincide (dashed)', fontsize=10)
-    fig.tight_layout()
+    fig.legend(*axes[0].get_legend_handles_labels(), loc='lower center', ncol=5, fontsize=9,
+               frameon=False)
+    fig.suptitle(f'{sf.short(model)} — genetic estimates vs n_bits', fontsize=12,
+                 fontweight='bold')
+    fig.tight_layout(rect=(0, 0.09, 1, 0.94))
     return sf.save(fig, os.path.join(out, model, f'convergence_{model}{SUFFIX}'))
 
 
@@ -315,9 +308,9 @@ def fig_cost(data, model, seeds, out):
     ax.set_xlabel('n_bits per parameter')
     ax.set_ylabel('wall time per method [s]')
     ax.grid(alpha=0.3, which='both')
-    ax.legend(fontsize=8)
-    ax.set_title(f'{core.MODELS[model].label} — cost of the genetic ladder ON THE SIMULATOR '
-                 '(statevector, CPU)\nnot a hardware cost; ' + sf.seed_caption(seeds), fontsize=9)
+    ax.legend(fontsize=8, loc='upper left', bbox_to_anchor=(1.01, 1.0), frameon=False)
+    ax.set_title(f'{sf.short(model)} — simulator cost of the genetic ladder', fontsize=12,
+                 fontweight='bold')
     return sf.save(fig, os.path.join(out, model, f'cost_{model}{SUFFIX}'))
 
 
@@ -372,17 +365,16 @@ def fig_fitness(data, traces, model, nb, seeds, out, report):
         if stuck:
             flat.append(f'{meth}: {stuck}/{len(runs)}')
     ax.axhline(0, color='k', ls='--', lw=1.0,
-               label=f'lowest grid χ² found in this cell = {fl:.4f} (not a proven optimum)')
+               label=f'lowest grid χ² found\n({fl:.4f}, not a proven optimum)')
     ax.set_yscale('symlog', linthresh=1e-3, linscale=0.6)
     ax.set_ylim(0, 4 * top)
     ax.set_xlabel('generation (logged every 10)')
     ax.set_ylabel(r'best $\chi^2_{\rm grid}$ − lowest found')
     ax.grid(alpha=0.3)
-    ax.legend(fontsize=7.5, loc='center right')
+    ax.legend(fontsize=8, loc='upper left', bbox_to_anchor=(1.01, 1.0), frameon=False)
     note = ('best never improves after generation 0 in: ' + '; '.join(flat)) if flat else ''
-    ax.set_title(f'{core.MODELS[model].label} — genetic fitness, n_bits = {nb}\n'
-                 f'median over {len(seeds)} seeds, band = 16–84 percentiles (task logs)'
-                 + (f'\n{note}' if note else ''), fontsize=9)
+    ax.set_title(f'{sf.short(model)} — genetic fitness, n_bits = {nb}', fontsize=12,
+                 fontweight='bold')
     if flat:
         report.append(f'  {model} nb{nb}: {note}')
     return sf.save(fig, os.path.join(out, model, f'fitness_{model}_nb{nb}{SUFFIX}'))
@@ -431,17 +423,17 @@ def fig_genetic_convergence(data, traces, model, nb, seeds, out):
         ax.set_ylabel(sf.tex(model_o, p, units=True))
         ax.grid(alpha=0.3)
         ax.ticklabel_format(axis='y', useOffset=False)
-    axes[0, 0].legend(fontsize=7)
-    axes[1, 0].legend(handles=[
-        Line2D([0], [0], marker='o', color='k', ls='none',
-               label='best grid point at the end: mean ± sd across seeds'),
-        Line2D([0], [0], marker='_', color='k', alpha=0.55, ls='none', ms=12, mew=3,
-               label='final population: weighted mean ± population spread\n'
-                     '(median over seeds; a spread, NOT an uncertainty)')], fontsize=7)
-    fig.suptitle(f'{model_o.label} — genetic convergence, n_bits = {nb}\n'
-                 f'top: median over {len(seeds)} seeds, band 16–84 % (task logs); '
-                 'bottom: final estimates, grey = individual seeds', fontsize=10)
-    fig.tight_layout()
+    extra = [Line2D([0], [0], marker='o', color='k', ls='none',
+                    label='best grid point at the end (mean ± sd across seeds)'),
+             Line2D([0], [0], marker='_', color='k', alpha=0.55, ls='none', ms=12, mew=3,
+                    label='final population: mean ± spread (not an uncertainty)')]
+    fig.legend(*axes[0, 0].get_legend_handles_labels(), loc='lower center', ncol=5,
+               fontsize=9, frameon=False, bbox_to_anchor=(0.5, 0.035))
+    fig.legend(handles=extra, loc='lower center', ncol=2, fontsize=9, frameon=False,
+               bbox_to_anchor=(0.5, 0.0))
+    fig.suptitle(f'{sf.short(model)} — genetic convergence, n_bits = {nb}', fontsize=12,
+                 fontweight='bold')
+    fig.tight_layout(rect=(0, 0.08, 1, 0.95))
     return sf.save(fig, os.path.join(out, model, f'genetic_convergence_{model}_nb{nb}{SUFFIX}'))
 
 
