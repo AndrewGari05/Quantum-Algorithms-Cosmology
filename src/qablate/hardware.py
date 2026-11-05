@@ -301,7 +301,7 @@ class DeviceBackend(Backend):
             pub = (isa, pv_isa) if isa.num_parameters else (isa,)
             if self._local:
                 self._sampler.options.simulator.seed_simulator = sim_seed
-            job = self._sampler.run([pub], shots=shots)
+            job = _submit_with_retry(self._sampler, pub, shots)
             full = job.result()
             wall_s = time.perf_counter() - t0
             job_id = job.job_id()
@@ -338,6 +338,52 @@ class DeviceBackend(Backend):
     def sample(self, circuit, parameter_values, rng, shots: int = 1) -> np.ndarray:
         rows = self._run(circuit, parameter_values, rng, shots, memory=True)
         return np.array([[int(b.replace(" ", ""), 2) for b in r] for r in rows])
+
+
+#: Submission retries for transient IBM errors (see :func:`_submit_with_retry`).
+SUBMIT_ATTEMPTS = 3
+SUBMIT_RETRY_WAIT_S = 15.0
+_TRANSIENT_STATUS = (401, 429, 500, 502, 503, 504)
+
+
+def _transient_submit_error(exc: BaseException) -> bool:
+    """True for an authentication, rate-limit, server or network error at submission.
+
+    ``qiskit-ibm-runtime`` checks the instance usage (``/instances/usage``)
+    before it creates a job, and that request can fail transiently, e.g. with
+    ``401 Error authenticating user`` (code 1219) although the API key is valid.
+    """
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    if type(exc).__name__ in ("IBMNotAuthorizedError", "ConnectionError", "ReadTimeout",
+                              "ConnectTimeout", "ChunkedEncodingError"):
+        return True
+    for obj in (exc, getattr(exc, "__cause__", None), getattr(exc, "__context__", None)):
+        if getattr(obj, "status_code", None) in _TRANSIENT_STATUS:
+            return True
+    text = str(exc)
+    return any(f"{code} " in text and "Error" in text for code in _TRANSIENT_STATUS)
+
+
+def _submit_with_retry(sampler, pub, shots: int, *, attempts: int | None = None,
+                       wait_s: float | None = None, sleep=time.sleep):
+    """``sampler.run([pub], shots=shots)``, retried on transient submission errors.
+
+    Only the submission is retried. The failure happens before IBM creates a
+    job, so a retry can neither submit nor bill a job twice. ``job.result()``
+    is never retried: a job that ran and failed stays a failure.
+    """
+    attempts = SUBMIT_ATTEMPTS if attempts is None else attempts
+    wait_s = SUBMIT_RETRY_WAIT_S if wait_s is None else wait_s
+    for attempt in range(1, attempts + 1):
+        try:
+            return sampler.run([pub], shots=shots)
+        except Exception as exc:  # noqa: BLE001
+            if attempt == attempts or not _transient_submit_error(exc):
+                raise
+            print(f"  [device] submission failed ({type(exc).__name__}: {str(exc)[:120]}); "
+                  f"retry {attempt}/{attempts - 1} in {wait_s:.0f} s", flush=True)
+            sleep(wait_s)
 
 
 #: Conservative billed-time model used when IBM has not finalized a job's usage.

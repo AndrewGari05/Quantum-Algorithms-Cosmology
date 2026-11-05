@@ -214,3 +214,45 @@ def test_a_zero_charge_is_never_final():
 
     q, est = _ibm_times(Zero(), result=None, polls=1, n_executions=0)[2:]
     assert est and q == 2.0
+
+
+class _FlakySampler:
+    """Fails the first ``n`` submissions with ``exc``, then returns a token."""
+
+    def __init__(self, n, exc):
+        self.n, self.exc, self.calls = n, exc, 0
+
+    def run(self, pubs, shots):
+        self.calls += 1
+        if self.calls <= self.n:
+            raise self.exc
+        return ("job", pubs, shots)
+
+
+class IBMNotAuthorizedError(Exception):
+    """Same class name as qiskit_ibm_runtime's, to exercise the name check."""
+
+
+def test_submission_retries_a_transient_auth_error_then_succeeds():
+    from qablate.hardware import _submit_with_retry
+    waits = []
+    s = _FlakySampler(1, IBMNotAuthorizedError("401 Client Error: Unauthorized for url: "
+                                               ".../instances/usage"))
+    job = _submit_with_retry(s, "pub", 64, sleep=waits.append)
+    assert job == ("job", ["pub"], 64) and s.calls == 2 and waits == [15.0]
+
+
+def test_submission_gives_up_after_the_last_attempt():
+    from qablate.hardware import _submit_with_retry
+    s = _FlakySampler(5, ConnectionError("reset"))
+    with pytest.raises(ConnectionError):
+        _submit_with_retry(s, "pub", 1, sleep=lambda _: None)
+    assert s.calls == 3
+
+
+def test_submission_does_not_retry_a_real_error():
+    from qablate.hardware import _submit_with_retry
+    s = _FlakySampler(1, ValueError("bad circuit"))
+    with pytest.raises(ValueError):
+        _submit_with_retry(s, "pub", 1, sleep=lambda _: None)
+    assert s.calls == 1
