@@ -62,6 +62,9 @@ C_CLASSICAL_WINS = '#A8651F'
 C_TIE = '#8A8A94'
 C_REF = '#3A3A44'
 
+#: Resolution of the PNG copies (the PDF is vector).
+FIG_DPI = 200
+
 SAMPLER_PAIRS = [
     ('Classical MCMC', 'QMCMC 100%'),
     ('Classical MCMC', 'QMCMC 50%'),
@@ -84,7 +87,7 @@ def _save_figure(fig, path: str) -> str:
     Returns:
         The path of the PNG (what the rest of the code already expected).
     """
-    fig.savefig(path, dpi=150)
+    fig.savefig(path, dpi=FIG_DPI)
     fig.savefig(os.path.splitext(path)[0] + '.pdf')
     return path
 
@@ -808,7 +811,8 @@ def sigma_vs_grid_table(series, method='QVMC 67%') -> None:
     print("  qubits do not fix it.")
 
 
-def sigma_vs_grid_figure(series, out_dir, method='QVMC 67%') -> str | None:
+def sigma_vs_grid_figure(series, out_dir, method='QVMC 67%', name=None,
+                         note=None) -> str | None:
     """One curve per model: sigma ratio against nqpp.
 
     There are FIVE models and the validated palette has three colours, so
@@ -836,19 +840,21 @@ def sigma_vs_grid_figure(series, out_dir, method='QVMC 67%') -> str | None:
                     color=col, va='center', ha='left')
 
     ax.axhline(1.0, color=C_REF, lw=1.2, ls='--')
-    ax.annotate('agrees with the MCMC', (min(x), 1.0), fontsize=8,
+    ax.annotate('agrees with MCMC', (min(x), 1.0), fontsize=8,
                 color=C_REF, va='bottom', ha='left')
     ax.set_xlabel('nqpp  (qubits per grid parameter)', fontsize=9)
-    ax.set_ylabel(f'sigma({campaign_io.display_method(method)}) / sigma({REFERENCE})', fontsize=9)
-    ax.set_title('The variational under-dispersion is NOT fixed by more '
-                 'qubits', fontsize=10, loc='left')
+    ax.set_ylabel(f'σ({campaign_io.display_method(method)}) / σ({REFERENCE})',
+                  fontsize=9)
     ax.set_xticks(sorted({g for v in series.values() for g, _ in v}))
     ax.set_ylim(top=max(1.06, ax.get_ylim()[1]))
     ax.margins(x=.10)
     ax.grid(alpha=.22, lw=.5)
     ax.tick_params(labelsize=8)
     fig.tight_layout()
-    path = os.path.join(out_dir, 'sigma_vs_grid.png')
+    if note:
+        fig.text(0.995, 0.005, note, ha='right', va='bottom', fontsize=7,
+                 color='0.35', style='italic')
+    path = os.path.join(out_dir, name or 'sigma_vs_grid.png')
     _save_figure(fig, path)
     plt.close(fig)
     return path
