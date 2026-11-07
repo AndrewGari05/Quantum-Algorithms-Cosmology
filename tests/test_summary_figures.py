@@ -56,3 +56,18 @@ def test_main_writes_the_summary_figures(tmp_path):
     rep = (out / 'summary_report.txt').read_text(encoding='utf-8')
     assert 'single-seed sigma lcdm: nqpp6' in rep and 'nqpp7' in rep
     assert 'noise readout' in rep
+
+
+def test_comparison_figure_puts_every_family_on_one_page(tmp_path):
+    from test_seed_figures_genetic import _campaign
+    _with_logs_and_npz(str(tmp_path / 'multi'))
+    _campaign(str(tmp_path / 'gen'))
+    out = tmp_path / 'f'
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert summary_figures.main([str(tmp_path / 'multi'), '--out', str(out),
+                                     '--genetic', str(tmp_path / 'gen')]) == 0
+    for ext in ('.png', '.pdf'):
+        assert (out / ('resumen_comparacion' + ext)).exists()
+    rep = (out / 'summary_report.txt').read_text(encoding='utf-8')
+    assert 'compare shift lcdm  QMCMC 100%' in rep
+    assert 'compare dchi2 lcdm  QGA (q=67%)' in rep

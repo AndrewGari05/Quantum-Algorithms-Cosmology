@@ -22,6 +22,9 @@ Figures (PNG + PDF) written to ``--out``:
 * ``resumen_rhat_qmcmc``        R-hat traces of every model.
 * ``resumen_fitness_genetico``  genetic fitness traces in three representative cells
                                 (needs ``--genetic``).
+* ``resumen_comparacion``       every family against its classical counterpart
+                                (shift, width, Δχ²_grid) and the wall time of
+                                every family (needs ``--genetic``).
 * ``resumen_ruido``             shift caused by each noise level in every noisy cell
                                 of a single-seed campaign (needs ``--single-seed``).
 
@@ -420,6 +423,98 @@ def fig_noise(shifts, out, report):
     return sf.save(fig, os.path.join(out, 'resumen_ruido'))
 
 
+
+# ── F. All methods side by side ───────────────────────────────────────────────
+#: (CSV Method, label, colour, marker, filled). Colour: classical blue, quantum
+#: red (the repo convention); marker: one per family.
+COMPARE_POSTERIOR = [('QMCMC 100%', 'QMCMC 100%', cmq.C_QUANTUM, 'o', True),
+                     ('Classical VI', 'classical VI', cmq.C_CLASSICAL, 'D', False),
+                     (QVMC_FULL, 'QVMC 100% (+ quantum training)', cmq.C_QUANTUM, 'D', True)]
+COMPARE_COST = [('Classical MCMC', 'classical MCMC', cmq.C_CLASSICAL, 'o', False, 'samplers'),
+                ('QMCMC 100%', 'QMCMC 100%', cmq.C_QUANTUM, 'o', True, 'samplers'),
+                ('Classical VI', 'classical VI', cmq.C_CLASSICAL, 'D', False, 'samplers'),
+                (QVMC_FULL, 'QVMC 100% (+ quantum training)', cmq.C_QUANTUM, 'D', True, 'samplers'),
+                ('CGA', 'CGA', cmq.C_CLASSICAL, '^', False, 'genetic'),
+                ('QGA (q=100%)', 'QGA (q=100%)', '#7f0000', 'v', True, 'genetic')]
+COMPARE_DPI = 200
+
+
+def _grouped(ax, k, j, n, vals, color, marker, filled, label=None, span=0.62):
+    """Seed dots and mean ± sd of one method at slot ``j`` of ``n`` around model ``k``."""
+    x = k + (j - (n - 1) / 2) * span / max(n - 1, 1)
+    sf.draw_seeds(ax, x, vals, width=0.02)
+    return sf.mean_bar(ax, x, vals, color, marker=marker, label=label, ms=7,
+                       mfc=color if filled else 'white')
+
+
+def fig_comparison(data, gdata, seeds, out, report):
+    """resumen_comparacion: every family against its classical counterpart, plus cost.
+
+    (a) shift of the Ωm posterior mean and (b) width of the Ωm posterior of the
+    posterior methods relative to classical MCMC (same seed); (c) Δχ²_grid of
+    every QGA rung relative to CGA (same seed); (d) wall time of the classical
+    and fully quantum rung of each family. Each family is read at the largest
+    grid of each model (nqpp for the samplers, n_bits for the genetic ladder).
+    """
+    import seed_figures_genetic as sfg
+    models = [m for m in sf.models_and_grids(data) if m in sf.models_and_grids(gdata)]
+    labels = [sf.short(m) for m in models]
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9.4))
+    (ax, bx), (cx, dx) = axes
+    for k, m in enumerate(models):
+        cell = data[(m, largest(data, m))]
+        for j, (meth, lab, col, mk, fill) in enumerate(COMPARE_POSTERIOR):
+            sh = sf.om_shift(cell, meth, seeds)
+            wr = sf.sigma_ratio(cell, meth, seeds)
+            _grouped(ax, k, j, 3, sh, col, mk, fill, label=lab if k == 0 else None)
+            _grouped(bx, k, j, 3, wr, col, mk, fill)
+            for tag, v in (('shift', sh), ('width', wr)):
+                mm, sd, se, nn = sf.stats(v)
+                report.append(f'  compare {tag:5s} {m:5s} {meth:14s} {sf.fmt(mm, sd, se, prec=3)}')
+        gcell = gdata[(m, largest(gdata, m))]
+        for j, meth in enumerate(sfg.QGA_LEVELS[1:]):
+            d = sfg.delta_vs_cga(gcell, meth, seeds)
+            _grouped(cx, k, j, 3, d, sfg.COLORS[meth], sfg.MARKERS[meth], True,
+                     label=meth if k == 0 else None, span=0.5)
+            mm, sd, se, nn = sf.stats(d)
+            report.append(f'  compare dchi2 {m:5s} {meth:14s} {sf.fmt(mm, sd, se, prec=4)}')
+        for j, (meth, lab, col, mk, fill, fam) in enumerate(COMPARE_COST):
+            c = cell if fam == 'samplers' else gcell
+            t = sf.per_seed(c, meth, lambda r: sf.num(r, 'Time_s'), seeds)
+            _grouped(dx, k, j, len(COMPARE_COST), t, col, mk, fill,
+                     label=lab if k == 0 else None, span=0.72)
+    for a_, ref in ((ax, 0.0), (bx, 1.0), (cx, 0.0)):
+        a_.axhline(ref, color='k', ls='--', lw=0.9)
+    for a_ in axes.ravel():
+        model_axis(a_, models, labels)
+    ax.set_ylabel(r'shift of $\bar\Omega_m$ [$\sigma_{\rm MCMC}$]')
+    ax.set_title('(a) Posterior mean relative to classical MCMC', fontsize=11)
+    bx.set_ylabel(r'$\sigma(\Omega_m)\,/\,\sigma_{\rm MCMC}(\Omega_m)$')
+    bx.set_title('(b) Posterior width relative to classical MCMC', fontsize=11)
+    cx.set_yscale('symlog', linthresh=1e-3, linscale=0.6)
+    cx.set_ylabel(r'$\Delta\chi^2_{\rm grid}$ = QGA − CGA  (same seed)')
+    cx.set_title('(c) Best grid point relative to CGA', fontsize=11)
+    dx.set_yscale('log')
+    dx.set_ylabel('wall time per method [s]')
+    dx.set_title('(d) Simulator cost', fontsize=11)
+    dx.grid(alpha=0.3, which='both')
+    ax.legend(fontsize=8, loc='best', framealpha=0.9)
+    cx.legend(fontsize=8, loc='best', framealpha=0.9)
+    dx.legend(fontsize=8, ncol=2, loc='upper center', bbox_to_anchor=(0.5, -0.1), frameon=False)
+    fig.text(0.5, 0.005, 'Grey dots: individual seeds; markers and bars: mean ± sd across '
+             f'{len(seeds)} seeds; largest grid of each model.', ha='center', fontsize=8,
+             color='0.35')
+    fig.suptitle('Every method against its classical counterpart', fontsize=13,
+                 fontweight='bold')
+    fig.tight_layout(rect=(0, 0.02, 1, 0.96))
+    path = os.path.join(out, 'resumen_comparacion')
+    os.makedirs(out, exist_ok=True)
+    fig.savefig(path + '.png', dpi=COMPARE_DPI, bbox_inches='tight')
+    fig.savefig(path + '.pdf', bbox_inches='tight')
+    plt.close(fig)
+    return path + '.png'
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('root', help='multi-seed samplers campaign (holds seeds_s<NN>/)')
@@ -453,6 +548,7 @@ def main(argv=None):
         gdata, gtask = sf.load_campaign(a.genetic, sf.parse_seeds(a.seeds), pattern='genetic_s*',
                                         grid='nb')
         files.append(fig_fitness(gdata, sfg.load_traces(gtask, seeds), seeds, a.out))
+        files.append(fig_comparison(data, gdata, seeds, a.out, report))
     if single_rows:
         sh = noise_shifts(single_rows)
         if sh:
