@@ -1700,7 +1700,9 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
                                only_grid_methods: bool = False,
                                xlabel: str = 'nqpp',
                                family: Optional[str] = None,
-                               suffix: str = '') -> List[str]:
+                               suffix: str = '',
+                               note: Optional[str] = None,
+                               dpi: int = 200) -> List[str]:
     """Generate convergence_<model>.png and cost_<model>.png for each model with
     >=2 grid values. Returns the paths created. Does not raise if matplotlib is
 
@@ -1718,6 +1720,14 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
             sharing an axis makes them incomparable. Default None.
         suffix: appended to the file name so as not to overwrite the other
             family's figure. Default ''.
+        note: small data-source note written in the bottom-right corner,
+            e.g. 'single-seed campaign (seed 42)'. Default None (no note).
+        dpi: resolution of the PNG copies (the PDF is vector). Default 200.
+
+    Legend entries go through `campaign_io.display_method` and the QVMC
+    normalization rung is not drawn (`campaign_io.is_hidden_method`); the
+    colours and markers are still assigned over every method, so the
+    remaining curves keep the style they always had.
 
     Returns:
         List[str]
@@ -1731,6 +1741,7 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
         print(f"  (no plots: could not import matplotlib/numpy: {e})")
         return []
 
+    import campaign_io
     outdir = outdir or master_dir
     csvs = _find_result_csvs(master_dir)
     if not csvs:
@@ -1800,6 +1811,9 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
                     continue
                 if family and _method_family(method) != family:
                     continue
+                if campaign_io.is_hidden_method(method):
+                    continue
+                shown = campaign_io.display_method(method)
                 g, m, s = series(model, param)[method]
                 col, mk, ls = style[method]
                 finite = m[~np.isnan(m)]
@@ -1814,13 +1828,13 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
                     val = float(np.nanmean(m))
                     ax.plot([grids[0], grids[-1]], [val, val], ls=ls,
                             marker=mk, color=col, lw=1.8, ms=6,
-                            label=f'{method} ({xlabel}-independent)')
+                            label=f'{shown} ({xlabel}-independent)')
                     sval = float(np.nanmean(s)) if (~np.isnan(s)).any() else 0.0
                     if sval > 0:
                         ax.axhspan(val - sval, val + sval, color=col, alpha=0.08)
                 else:
                     ax.plot(g, m, ls=ls, marker=mk, color=col, lw=1.8, ms=6,
-                            label=method)
+                            label=shown)
                     if (~np.isnan(s)).any():
                         ax.fill_between(g, m - s, m + s, color=col, alpha=0.12)
             # reference lines: Planck (CMB) and SH0ES/Riess (local) - the two
@@ -1840,9 +1854,12 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
         fig.suptitle(f'Convergence of the estimates - model {model.upper()}',
                      fontsize=13, fontweight='bold')
         fig.tight_layout(rect=[0, 0, 1, 0.96])
+        if note:
+            fig.text(0.995, -0.01, note, ha='right', va='top', fontsize=8,
+                     color='0.35', style='italic')
         os.makedirs(outdir, exist_ok=True)
         p1 = os.path.join(outdir, f'convergence_{model}{suffix}.png')
-        fig.savefig(p1, dpi=150, bbox_inches='tight')
+        fig.savefig(p1, dpi=dpi, bbox_inches='tight')
         fig.savefig(p1.replace('.png', '.pdf'), bbox_inches='tight')
         plt.close(fig); made.append(p1)
 
@@ -1861,6 +1878,8 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
             # left behind here.
             if family and _method_family(r['method']) != family:
                 continue
+            if campaign_io.is_hidden_method(r['method']):
+                continue
             times[r['method']].append((r['grid'], r['time_s']))
         grids_rss = sorted([(g, v) for (mm, g), v in rss_map.items()
                             if mm == model])
@@ -1871,7 +1890,7 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
                 col, mk, ls = style[method]
                 ax.plot([p[0] for p in pts], [p[1] for p in pts], ls=ls,
                         marker=mk, color=col, lw=1.6, ms=5,
-                        label=f'{method} (s)')
+                        label=f'{campaign_io.display_method(method)} (s)')
             ax.set_xlabel(xlabel); ax.set_ylabel('Time [s]')
             ax.set_xticks(grids); ax.grid(True, alpha=0.3)
             if grids_rss:
@@ -1885,8 +1904,11 @@ def generate_convergence_plots(master_dir: str, outdir: Optional[str] = None,
             fig.suptitle(f'Cost vs resolution - model {model.upper()}',
                          fontsize=12, fontweight='bold')
             fig.tight_layout()
+            if note:
+                fig.text(0.995, -0.01, note, ha='right', va='top',
+                         fontsize=8, color='0.35', style='italic')
             p2 = os.path.join(outdir, f'cost_{model}{suffix}.png')
-            fig.savefig(p2, dpi=150, bbox_inches='tight')
+            fig.savefig(p2, dpi=dpi, bbox_inches='tight')
             # [B-PDF] Also as PDF, like the convergence figure above. It was
             # missing only here, and the paper needs vector graphics.
             fig.savefig(p2.replace('.png', '.pdf'), bbox_inches='tight')
