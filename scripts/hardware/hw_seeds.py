@@ -35,8 +35,16 @@ import numpy as np
 C_CLASSICAL = '#1f77b4'
 C_GENETIC = '#2ca02c'
 QLOCS = ('ideal', 'noisy', 'device')
-LOC_LABEL = {'classical': 'clásico', 'ideal': 'ideal', 'noisy': 'simulador\ncon ruido',
-             'device': 'dispositivo'}
+LOC_LABEL = {'classical': 'classical', 'ideal': 'ideal\nsimulator', 'noisy': 'noisy\ntwin',
+             'device': 'device'}
+FIG_DPI = 200
+
+
+def loc_label(loc, device=None):
+    """Tick label of a location; the device one names the backend, e.g. 'device (ibm_fez)'."""
+    if loc == 'device' and device and device != '?':
+        return f'device\n({device})'
+    return LOC_LABEL[loc]
 
 
 def _warm(i):
@@ -85,10 +93,10 @@ def spread(vals):
 
 def rule_text(n):
     if n >= 3:
-        return f'{n} semillas: barra = media, error = desviación estándar'
+        return f'{n} seeds: bar = mean, error bar = standard deviation'
     if n == 2:
-        return '2 semillas: barra = media, error = rango (mín–máx), no es 1σ'
-    return '1 semilla: sin barra de error'
+        return '2 seeds: bar = mean, error bar = range (min–max), not 1σ'
+    return '1 seed: no error bar'
 
 
 class Figs:
@@ -100,7 +108,7 @@ class Figs:
         os.makedirs(out, exist_ok=True)
 
     def save(self, fig, name):
-        fig.savefig(os.path.join(self.out, name + '.png'), dpi=150, bbox_inches='tight')
+        fig.savefig(os.path.join(self.out, name + '.png'), dpi=FIG_DPI, bbox_inches='tight')
         fig.savefig(os.path.join(self.out, name + '.pdf'), bbox_inches='tight')
         self.plt.close(fig)
         self.made.append(name)
@@ -134,7 +142,7 @@ def main(runs, out):
     n = len(data)
     F = Figs(out)
     plt = F.plt
-    head = f'ΛCDM | CC+BAO+Pantheon | {device} | semillas {", ".join(seeds)}'
+    head = f'ΛCDM | CC+BAO+Pantheon | {device} | seeds {", ".join(seeds)}'
     summary = []
 
     def col(alg, loc, key):
@@ -158,18 +166,18 @@ def main(runs, out):
             record(f'qvmc_width_start_{p}', loc, start)
             record(f'qvmc_width_final_{p}', loc, final)
             _bars(ax, i - 0.18, start, loc_color(loc), 0.34, fill=False,
-                  label='antes de entrenar (solo muestreo)' if i == 0 else None)
+                  label='before training (sampling only)' if i == 0 else None)
             _bars(ax, i + 0.18, final, loc_color(loc), 0.34,
-                  label='después de 60 SPSA' if i == 0 else None)
-        ax.axhline(1.0, color='0.3', ls='--', lw=1.0, label='MCMC de referencia')
-        ax.set_xticks(range(3), [LOC_LABEL[l] for l in QLOCS])
+                  label='after 60 SPSA iterations' if i == 0 else None)
+        ax.axhline(1.0, color='0.3', ls='--', lw=1.0, label='reference MCMC')
+        ax.set_xticks(range(3), [loc_label(l, device) for l in QLOCS])
         ax.set_title(pl, fontsize=13)
         _style(ax)
     axes[0].set_ylabel(r'$\sigma_{\rm QVMC}\,/\,\sigma_{\rm ref}$')
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='lower center', ncol=3, fontsize=10, frameon=False,
                bbox_to_anchor=(0.5, 0.0))           # below the panels: never covers a bar or a seed
-    fig.suptitle(f'QVMC: ancho del posterior por ubicación — {head}\n({rule_text(n)}; puntos = cada semilla)',
+    fig.suptitle(f'QVMC: posterior width by location — {head}\n({rule_text(n)}; dots = individual seeds)',
                  fontsize=12, fontweight='bold')
     fig.tight_layout(rect=[0, 0.07, 1, 0.92])
     F.save(fig, 'seeds_qvmc_width')
@@ -183,12 +191,12 @@ def main(runs, out):
     ks = [x for x in col('vi', 'ideal', 'kl_start_exact') if x is not None]
     if ks:
         ax.axhline(float(np.mean(ks)), color='black', ls='--', lw=1.0,
-                   label=(f'arranque en caliente, media de las semillas (KL = {np.mean(ks):.3f}; '
-                          f'por semilla: {", ".join(f"{k:.3f}" for k in ks)})'))
+                   label=(f'warm start, mean over seeds (KL = {np.mean(ks):.3f}; '
+                          f'per seed: {", ".join(f"{k:.3f}" for k in ks)})'))
         ax.legend(fontsize=9, loc="upper center", bbox_to_anchor=(0.5, -0.16), frameon=False)  # below the axes
-    ax.set_xticks(range(3), [LOC_LABEL[l] for l in QLOCS])
-    ax.set_ylabel(r'KL$(Q_\varphi\,\|\,P)$ final (exacta)')
-    ax.set_title(f'QVMC: KL final — {head}\n({rule_text(n)})', fontsize=11)
+    ax.set_xticks(range(3), [loc_label(l, device) for l in QLOCS])
+    ax.set_ylabel(r'final exact KL$(Q_\varphi\,\|\,P)$')
+    ax.set_title(f'QVMC: final exact KL — {head}\n({rule_text(n)})', fontsize=11)
     _style(ax)
     F.save(fig, 'seeds_qvmc_kl')
 
@@ -213,15 +221,15 @@ def main(runs, out):
                     axes[0].plot(x, s, '.', color='0.25', ms=5)
     if band:
         axes[0].axhspan(-band, band, color='0.85', zorder=0,
-                        label=f'±2×MCSE (≈±{band:.2f}σ): no distinguible de cero')
+                        label=f'±2×MCSE (≈±{band:.2f}σ): not distinguishable from zero')
     axes[0].axhline(0, color='0.3', lw=0.9)
     axes[0].plot([], [], 'o', color='0.4', label=r'$\Omega_m$')
     axes[0].plot([], [], 's', color='0.4', label=r'$H_0$')
     h0, l0 = axes[0].get_legend_handles_labels()
-    axes[0].set_ylabel(r'desplazamiento de la media $/\ \sigma_{\rm ref}$')
-    axes[0].set_title('Sesgo')
+    axes[0].set_ylabel(r'shift of the mean $/\ \sigma_{\rm ref}$')
+    axes[0].set_title('Bias')
     for k, (key, ttl, ref) in enumerate((('rhat_max', r'$\hat R_{\max}$', 1.01),
-                                         ('ess_min', 'ESS mínimo', None)), start=1):
+                                         ('ess_min', 'minimum ESS', None)), start=1):
         for i, loc in enumerate(locs):
             v = col('mcmc', loc, key)
             record(f'qmcmc_{key}', loc, v)
@@ -233,11 +241,11 @@ def main(runs, out):
             h0, l0 = h0 + hk, l0 + lk
         axes[k].set_title(ttl)
     for ax in axes:
-        ax.set_xticks(range(len(locs)), [LOC_LABEL[l] for l in locs], fontsize=9)
+        ax.set_xticks(range(len(locs)), [loc_label(l, device) for l in locs], fontsize=9)
         _style(ax)
     fig.legend(h0, l0, loc='lower center', ncol=len(l0), fontsize=10, frameon=False,
                bbox_to_anchor=(0.5, 0.0))           # below the panels: never covers a marker
-    fig.suptitle(f'QMCMC por ubicación — {head}\n({rule_text(n)}; puntos = cada semilla)',
+    fig.suptitle(f'QMCMC by location — {head}\n({rule_text(n)}; dots = individual seeds)',
                  fontsize=12, fontweight='bold')
     fig.tight_layout(rect=[0, 0.08, 1, 0.90])
     F.save(fig, 'seeds_qmcmc')
@@ -249,10 +257,10 @@ def main(runs, out):
         gap = [b - f if b is not None and f is not None else None for b, f in zip(best, floor)]
         record('qga_chi2_minus_floor', loc, gap)
         _bars(ax, i, gap, loc_color(loc, 'genetic'), 0.55)
-    ax.axhline(0, color='black', ls='--', lw=1.0, label='piso de la malla (óptimo alcanzable)')
-    ax.set_xticks(range(len(locs)), [LOC_LABEL[l] for l in locs])
-    ax.set_ylabel(r'$\chi^2_{\rm mejor} - \chi^2_{\rm piso}$')
-    ax.set_title(f'QGA: distancia al óptimo de la malla — {head}\n({rule_text(n)})', fontsize=11)
+    ax.axhline(0, color='black', ls='--', lw=1.0, label='grid floor (reachable optimum)')
+    ax.set_xticks(range(len(locs)), [loc_label(l, device) for l in locs])
+    ax.set_ylabel(r'$\chi^2_{\rm best} - \chi^2_{\rm floor}$')
+    ax.set_title(f'QGA: distance to the grid optimum — {head}\n({rule_text(n)})', fontsize=11)
     ax.legend(fontsize=9, loc='upper left')
     _style(ax)
     F.save(fig, 'seeds_qga')
@@ -266,14 +274,14 @@ def main(runs, out):
         vals = [_f(d[2].get((a, 'device'), {}).get('quantum_s')) or 0.0 for a in algs]
         xs = np.arange(len(algs)) + (k - (n - 1) / 2) * w
         ax.bar(xs, vals, w, color=plt.cm.Reds(0.45 + 0.4 * k / max(1, n - 1)), edgecolor='black',
-               label=f'semilla {d[0]} (total {sum(vals):.0f} s)')
+               label=f'seed {d[0]} (total {sum(vals):.0f} s)')
         for x, v in zip(xs, vals):
             ax.text(x, v + 2, f'{v:.0f}', ha='center', fontsize=8)
     for a in algs:
         record(f'quantum_s_{a}', 'device', [_f(d[2].get((a, 'device'), {}).get('quantum_s')) for d in data])
     ax.set_xticks(range(len(algs)), [names[a] for a in algs])
-    ax.set_ylabel('QPU facturada [s]')
-    ax.set_title(f'Costo en {device} por semilla — {head}', fontsize=11)
+    ax.set_ylabel('billed QPU time [s]')
+    ax.set_title(f'Cost on {device} per seed — {head}', fontsize=11)
     ax.legend(fontsize=9)
     _style(ax)
     F.save(fig, 'seeds_cost')

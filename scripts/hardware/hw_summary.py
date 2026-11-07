@@ -23,8 +23,9 @@ from matplotlib.patches import Patch
 
 C_CLASSICAL, C_GENETIC = '#1f77b4', '#2ca02c'
 LOCS = ['classical', 'ideal', 'noisy', 'device']
-LABEL = {'classical': 'classical', 'ideal': 'ideal\n(Aer)', 'noisy': 'noisy twin\n(Aer + calib.)',
-         'device': 'ibm_fez'}
+LABEL = {'classical': 'classical', 'ideal': 'ideal\nsimulator', 'noisy': 'noisy\ntwin',
+         'device': 'device\n(ibm_fez)'}
+FIG_DPI = 200
 
 
 def warm(loc):
@@ -147,7 +148,7 @@ def main(argv=None):
     fig.tight_layout(rect=(0, 0.04, 1, 0.96))
     os.makedirs(a.out, exist_ok=True)
     for ext in ('png', 'pdf'):
-        fig.savefig(os.path.join(a.out, f'resumen_hardware.{ext}'), dpi=150, bbox_inches='tight')
+        fig.savefig(os.path.join(a.out, f'resumen_hardware.{ext}'), dpi=FIG_DPI, bbox_inches='tight')
     print('written', os.path.join(a.out, 'resumen_hardware.png'))
 
 
