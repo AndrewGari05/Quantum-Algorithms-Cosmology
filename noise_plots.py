@@ -92,6 +92,33 @@ NOISE_LINESTYLES = {
 # a synthetic rung and have no fixed place on the scale.
 BACKEND_COLORS = ['#2ca02c', '#9467bd', '#8c564b', '#e377c2']
 
+# Legend text of each rung (the CSV/folder values stay as they are).
+NOISE_LABELS = {'fakebrisbane': 'FakeBrisbane'}
+
+#: Resolution of the PNG copies (the PDF is vector).
+FIG_DPI = 200
+
+#: Legend title shared by every noise figure.
+NOISE_LEGEND_TITLE = 'noise level'
+
+
+def noise_label(rung: str) -> str:
+    """Legend text of a noise rung, e.g. 'fakebrisbane' -> 'FakeBrisbane'."""
+    return NOISE_LABELS.get(rung, rung)
+
+
+def _tick_label(method: str) -> str:
+    """Display name of a method on two lines, e.g. 'QVMC 50%\\n(quantum sampling)'."""
+    shown = campaign_io.display_method(method)
+    return shown.replace(' (', '\n(', 1) if len(shown) > 14 else shown
+
+
+def _add_note(fig, note):
+    """Small data-source note in the bottom-right corner of the figure."""
+    if note:
+        fig.text(0.995, 0.005, note, ha='right', va='bottom', fontsize=7,
+                 color='0.35', style='italic')
+
 # Columns that are NOT cosmological parameters even if they end in _mean/_std.
 _NOT_PARAMS = {'Om_mean', 'Om_std'} - {'Om_mean', 'Om_std'}   # (none)
 
@@ -116,7 +143,7 @@ def _save_figure(fig, path: str) -> str:
     Returns:
         The path of the PNG (what the rest of the code already expected).
     """
-    fig.savefig(path, dpi=150)
+    fig.savefig(path, dpi=FIG_DPI)
     fig.savefig(os.path.splitext(path)[0] + '.pdf')
     return path
 
@@ -225,8 +252,7 @@ METRICS = {
     'shift':          ('maximum shift  |Δp| / σ(ideal)', None),
     'acceptance':     ('acceptance fraction', 'acceptance'),
     'final_KL':       ('final KL', 'final_KL'),
-    'chi2_grid':      ('χ² of the best grid point (unrefined)',
-                       'chi2_grid'),
+    'chi2_grid':      ('best grid point χ² (not refined)', 'chi2_grid'),
     'Time_s':         ('wall time (s)', 'Time_s'),
 }
 
@@ -334,7 +360,8 @@ def figure_vs_grid(rows, family, model, metric, ideal_index,
             if p not in NOISE_COLORS:
                 spare += 1
             xs, ys = zip(*pts)
-            ax.plot(xs, ys, marker='o', ms=4, lw=1.6, color=c, ls=ls, label=p)
+            ax.plot(xs, ys, marker='o', ms=4, lw=1.6, color=c, ls=ls,
+                    label=noise_label(p))
         ax.set_title(campaign_io.display_method(met), fontsize=10)
         ax.set_xlabel(x_label, fontsize=8)
         ax.set_ylabel(METRICS[metric][0], fontsize=8)
@@ -354,9 +381,9 @@ def figure_vs_grid(rows, family, model, metric, ideal_index,
     # was read.
     handles, labels = _merged_legend(axes)
     fig.legend(handles, labels, loc='lower center', ncol=len(labels),
-               fontsize=8, frameon=False, title='noise rung',
+               fontsize=8, frameon=False, title=NOISE_LEGEND_TITLE,
                title_fontsize=8)
-    fig.suptitle(f'{model.upper()} — {METRICS[metric][0]} against the '
+    fig.suptitle(f'{model.upper()}: {METRICS[metric][0]} against the '
                  f'register size', fontsize=11)
     fig.tight_layout(rect=(0, .07, 1, .96))
     name = f'noise_vs_grid_{family}_{model}_{metric}.png'
@@ -367,7 +394,8 @@ def figure_vs_grid(rows, family, model, metric, ideal_index,
 
 
 def figure_at_fixed_grid(rows, family, model, grid, metrics,
-                         ideal_index, out_dir) -> str | None:
+                         ideal_index, out_dir, name=None,
+                         note=None) -> str | None:
     """(3): at FIXED nqpp / n_bits, the noise rungs side by side, per ladder rung.
 
     Grouped bars: one group per ladder method, one bar per noise rung, one
@@ -417,12 +445,12 @@ def figure_at_fixed_grid(rows, family, model, grid, metrics,
             # `none-counts` is hatched: it shares the noise level with `none`
             # and what changes is the readout route, not the rung.
             ax.bar(xs, ys, width=bar_width * .92, color=c,
-                   label=p if xs else None,
+                   label=noise_label(p) if xs else None,
                    hatch='//' if p == 'none-counts' else None,
                    edgecolor='white' if p == 'none-counts' else 'none',
                    alpha=.9)
         ax.set_xticks(range(len(methods)))
-        ax.set_xticklabels([campaign_io.display_method(m) for m in methods],
+        ax.set_xticklabels([_tick_label(m) for m in methods],
                            rotation=15, ha='right', fontsize=8)
         ax.set_ylabel(METRICS[metric][0], fontsize=8)
         ax.tick_params(labelsize=8)
@@ -435,12 +463,13 @@ def figure_at_fixed_grid(rows, family, model, grid, metrics,
     label = 'nqpp' if family == 'samplers' else 'n_bits'
     handles, labels = _merged_legend(axes)
     fig.legend(handles, labels, loc='lower center', ncol=len(labels),
-               fontsize=8, frameon=False, title='noise rung',
+               fontsize=8, frameon=False, title=NOISE_LEGEND_TITLE,
                title_fontsize=8)
-    fig.suptitle(f'{model.upper()} — {label}={grid}: effect of noise '
-                 f'rung by rung', fontsize=11)
+    fig.suptitle(f'{model.upper()}, {label} = {grid}: effect of each noise '
+                 f'level', fontsize=11)
     fig.tight_layout(rect=(0, .06, 1, .96))
-    name = f'noise_fixed_{family}_{model}_{label}{grid}.png'
+    _add_note(fig, note)
+    name = name or f'noise_fixed_{family}_{model}_{label}{grid}.png'
     path = os.path.join(out_dir, name)
     _save_figure(fig, path)
     plt.close(fig)
