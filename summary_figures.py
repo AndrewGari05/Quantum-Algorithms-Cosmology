@@ -23,13 +23,19 @@ Figures (PNG + PDF) written to ``--out``:
 * ``resumen_fitness_genetico``  genetic fitness traces in three representative cells
                                 (needs ``--genetic``).
 * ``resumen_comparacion``       every family against its classical counterpart
-                                (shift, width, Δχ²_grid) and the wall time of
-                                every family (needs ``--genetic``).
+                                (shift, width, Δχ²_grid) (needs ``--genetic``).
+* ``resumen_costo``             simulator wall time of the classical and fully quantum
+                                rung of every family, for the appendix (needs ``--genetic``).
 * ``resumen_ruido``             shift caused by each noise level in every noisy cell
                                 of a single-seed campaign (needs ``--single-seed``).
 * ``resumen_semillas``          seed-to-seed spread of every method: mean and width of
                                 the samplers, QVMC width ratio vs nqpp, genetic best
                                 grid point vs n_bits (needs ``--genetic``).
+* ``resumen_quantumness_*``     every ladder metric against the quantum fraction of its
+                                rung, one figure per family (qmcmc, qvmc, qga), one line
+                                per model (needs ``--genetic``).
+* ``resumen_semillas_*``        seed-to-seed spread of each ladder, one figure per family
+                                (qmcmc, qvmc, qga) for its own section (needs ``--genetic``).
 * ``resumen_qvmc_rejilla``      the two panels of ``resumen_qvmc`` for every grid of a
                                 single-seed campaign, up to nqpp 9 (needs ``--single-seed``).
 
@@ -453,19 +459,21 @@ def _grouped(ax, k, j, n, vals, color, marker, filled, label=None, span=0.62):
 
 
 def fig_comparison(data, gdata, seeds, out, report):
-    """resumen_comparacion: every family against its classical counterpart, plus cost.
+    """resumen_comparacion (every family against its classical counterpart) and resumen_costo.
 
-    (a) shift of the Ωm posterior mean and (b) width of the Ωm posterior of the
-    posterior methods relative to classical MCMC (same seed); (c) Δχ²_grid of
-    every QGA rung relative to CGA (same seed); (d) wall time of the classical
-    and fully quantum rung of each family. Each family is read at the largest
-    grid of each model (nqpp for the samplers, n_bits for the genetic ladder).
+    resumen_comparacion: (a) shift of the Ωm posterior mean and (b) width of the
+    Ωm posterior of the posterior methods relative to classical MCMC (same
+    seed); (c) Δχ²_grid of every QGA rung relative to CGA (same seed).
+    resumen_costo (appendix): wall time of the classical and fully quantum rung
+    of each family. Each family is read at the largest grid of each model (nqpp
+    for the samplers, n_bits for the genetic ladder).
     """
     import seed_figures_genetic as sfg
     models = [m for m in sf.models_and_grids(data) if m in sf.models_and_grids(gdata)]
     labels = [sf.short(m) for m in models]
-    fig, axes = plt.subplots(2, 2, figsize=(14, 9.4))
-    (ax, bx), (cx, dx) = axes
+    fig, axes = plt.subplots(1, 3, figsize=(19, 5.6))
+    ax, bx, cx = axes
+    fig2, dx = plt.subplots(figsize=(9, 5.4))
     for k, m in enumerate(models):
         cell = data[(m, largest(data, m))]
         for j, (meth, lab, col, mk, fill) in enumerate(COMPARE_POSTERIOR):
@@ -490,7 +498,7 @@ def fig_comparison(data, gdata, seeds, out, report):
                      label=lab if k == 0 else None, span=0.72)
     for a_, ref in ((ax, 0.0), (bx, 1.0), (cx, 0.0)):
         a_.axhline(ref, color='k', ls='--', lw=0.9)
-    for a_ in axes.ravel():
+    for a_ in list(axes) + [dx]:
         model_axis(a_, models, labels)
     ax.set_ylabel(r'shift of $\bar\Omega_m$ [$\sigma_{\rm MCMC}$]')
     ax.set_title('(a) Posterior mean relative to classical MCMC', fontsize=11)
@@ -501,17 +509,23 @@ def fig_comparison(data, gdata, seeds, out, report):
     cx.set_title('(c) Best grid point relative to CGA', fontsize=11)
     dx.set_yscale('log')
     dx.set_ylabel('wall time per method [s]')
-    dx.set_title('(d) Simulator cost', fontsize=11)
+    dx.set_title('Simulator wall time of the classical and fully quantum rungs', fontsize=11)
     dx.grid(alpha=0.3, which='both')
     ax.legend(fontsize=8, loc='best', framealpha=0.9)
     cx.legend(fontsize=8, loc='best', framealpha=0.9)
-    dx.legend(fontsize=8, ncol=2, loc='upper center', bbox_to_anchor=(0.5, -0.1), frameon=False)
-    fig.text(0.5, 0.005, 'Grey dots: individual seeds; markers and bars: mean ± sd across '
+    dx.legend(fontsize=8, ncol=3, loc='upper center', bbox_to_anchor=(0.5, -0.1), frameon=False)
+    fig2.tight_layout()
+    p2 = os.path.join(out, 'resumen_costo')
+    os.makedirs(out, exist_ok=True)
+    fig2.savefig(p2 + '.png', dpi=COMPARE_DPI, bbox_inches='tight')
+    fig2.savefig(p2 + '.pdf', bbox_inches='tight')
+    plt.close(fig2)
+    fig.text(0.5, -0.03, 'Grey dots: individual seeds; markers and bars: mean ± sd across '
              f'{len(seeds)} seeds; largest grid of each model.', ha='center', fontsize=8,
              color='0.35')
     fig.suptitle('Every method against its classical counterpart', fontsize=13,
                  fontweight='bold')
-    fig.tight_layout(rect=(0, 0.02, 1, 0.96))
+    fig.tight_layout(rect=(0, 0.0, 1, 0.94))
     path = os.path.join(out, 'resumen_comparacion')
     os.makedirs(out, exist_ok=True)
     fig.savefig(path + '.png', dpi=COMPARE_DPI, bbox_inches='tight')
@@ -720,6 +734,242 @@ def fig_seeds(data, gdata, seeds, out, report):
     return path + '.png'
 
 
+
+# ── I. Effect of the quantum fraction, one figure per ladder ─────────────────
+def _fraction_panel(ax, cells, ladder, get, seeds, ticklabels, ref, ylabel, title, log=False):
+    """One line per model: metric against the quantum fraction of the ladder rung."""
+    models = list(cells)
+    off = {m: (i - (len(models) - 1) / 2) * 1.6 for i, m in enumerate(models)}
+    rows = []
+    for m in models:
+        xs = [q + off[m] for q, _ in ladder]
+        vals = [get(cells[m], mt) for _, mt in ladder]
+        sf.series(ax, xs, vals, sf.MODEL_COLORS.get(m, 'k'), 'o', sf.short(m), jitter=0.4)
+        rows.append((m, vals))
+    ax.axhline(ref, color='k', ls='--', lw=0.9)
+    ax.set_xticks([q for q, _ in ladder])
+    ax.set_xticklabels(ticklabels, fontsize=9)
+    ax.set_xlim(-10, 110)
+    if log:
+        ax.set_yscale('symlog', linthresh=1e-3, linscale=0.6)
+        ax.set_ylim(top=max(5.0, ax.get_ylim()[1]))
+    ax.set_ylabel(ylabel)
+    ax.set_title(title, fontsize=11)
+    ax.grid(alpha=0.3)
+    return rows
+
+
+def _fraction_figure(name, title, panels, seeds, out, report, footnote):
+    fig, axes = plt.subplots(1, len(panels), figsize=(6.6 * len(panels), 5.2), squeeze=False)
+    for ax, (cells, ladder, get, ticks, ref, ylabel, ttl, log, xlabel) in zip(axes[0], panels):
+        for m, vals in _fraction_panel(ax, cells, ladder, get, seeds, ticks, ref, ylabel, ttl, log):
+            report.append(f'  {name} {ttl[:3]} {m:5s} ' + ', '.join(
+                f'{q}%: {sf.fmt(*sf.stats(v)[:3], prec=4)}' for (q, _), v in zip(ladder, vals)))
+        ax.set_xlabel(xlabel)
+    h, l = axes[0][0].get_legend_handles_labels()
+    fig.legend(h, l, loc='lower center', ncol=len(l), fontsize=9, frameon=False)
+    fig.text(0.5, 0.075, footnote, ha='center', fontsize=8, color='0.35')
+    fig.suptitle(title, fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=(0, 0.11, 1, 0.94))
+    path = os.path.join(out, name)
+    os.makedirs(out, exist_ok=True)
+    fig.savefig(path + '.png', dpi=COMPARE_DPI, bbox_inches='tight')
+    fig.savefig(path + '.pdf', bbox_inches='tight')
+    plt.close(fig)
+    return path + '.png'
+
+
+def fig_quantumness(data, gdata, seeds, out, report):
+    """resumen_quantumness_{qmcmc,qvmc,qga}: each ladder metric against the quantum fraction.
+
+    One figure per family, for its own section of the thesis; one line per
+    model, mean ± sd over seeds, the classical rung at 0 %. Samplers at the
+    largest grid of each model; QGA at the smallest and at the largest n_bits.
+    """
+    import seed_figures_genetic as sfg
+    models = list(sf.models_and_grids(data))
+    top = {m: data[(m, largest(data, m))] for m in models}
+    foot = (f'Lines: mean ± sd over {len(seeds)} seeds ({seeds[0]}–{seeds[-1]}); grey dots: '
+            'individual seeds; {where}.')
+    mc = [(0, 'Classical MCMC'), (50, 'QMCMC 50%'), (100, 'QMCMC 100%')]
+    mc_t = ['classical MCMC\n0%', 'QMCMC 50%', 'QMCMC 100%']
+    vi = [(0, 'Classical VI'), (50, 'QVMC 33%'), (100, QVMC_FULL)]
+    vi_t = ['classical VI\n0%', '50%\n(quantum sampling)', '100%\n(+ quantum training)']
+
+    def shift(c, mt):
+        return [0.0] * len(seeds) if mt == 'Classical MCMC' else sf.om_shift(c, mt, seeds)
+
+    def width(c, mt):
+        return sf.sigma_ratio(c, mt, seeds)
+
+    def kl_diff(c, mt):
+        a = sf.per_seed(c, mt, lambda r: sf.num(r, 'final_KL'), seeds)
+        b = sf.per_seed(c, 'Classical VI', lambda r: sf.num(r, 'final_KL'), seeds)
+        return [x - y if None not in (x, y) else None for x, y in zip(a, b)]
+
+    made = [
+        _fraction_figure('resumen_quantumness_qmcmc', 'QMCMC: effect of the quantum fraction', [
+            (top, mc, shift, mc_t, 0.0, r'shift of $\bar\Omega_m$ [$\sigma_{\rm MCMC}$]',
+             '(a) Posterior mean', False, 'quantum fraction of the QMCMC rung'),
+            (top, mc, width, mc_t, 1.0, r'$\sigma(\Omega_m)\,/\,\sigma_{\rm MCMC}(\Omega_m)$',
+             '(b) Posterior width', False, 'quantum fraction of the QMCMC rung')],
+            seeds, out, report, foot.format(where='largest grid of each model')),
+        _fraction_figure('resumen_quantumness_qvmc', 'QVMC: effect of the quantum fraction', [
+            (top, vi, width, vi_t, 1.0, r'$\sigma(\Omega_m)\,/\,\sigma_{\rm MCMC}(\Omega_m)$',
+             '(a) Posterior width', False, 'quantum fraction of the QVMC rung'),
+            (top, vi, kl_diff, vi_t, 0.0, 'final KL − final KL of classical VI',
+             '(b) Training quality', False, 'quantum fraction of the QVMC rung')],
+            seeds, out, report, foot.format(where='largest grid of each model'))]
+    if gdata:
+        gmg = sf.models_and_grids(gdata)
+        gm = [m for m in models if m in gmg]
+        ga = [(0, 'CGA'), (33, 'QGA (q=33%)'), (67, 'QGA (q=67%)'), (100, 'QGA (q=100%)')]
+        ga_t = ['CGA\n0%', '33%', '67%', '100%']
+
+        def dchi(c, mt):
+            return [0.0] * len(seeds) if mt == 'CGA' else sfg.delta_vs_cga(c, mt, seeds)
+        lo = {m: gdata[(m, gmg[m][0])] for m in gm}
+        hi = {m: gdata[(m, gmg[m][-1])] for m in gm}
+        yl = r'$\Delta\chi^2_{\rm grid}$ = QGA − CGA  (same seed)'
+        made.append(_fraction_figure('resumen_quantumness_qga', 'QGA: effect of the quantum fraction', [
+            (lo, ga, dchi, ga_t, 0.0, yl, '(a) Smallest grid (n_bits = 4)', True, 'quantum fraction q'),
+            (hi, ga, dchi, ga_t, 0.0, yl, '(b) Largest grid (n_bits = 8; CPL 7)', True,
+             'quantum fraction q')],
+            seeds, out, report, foot.format(where='QGA q = 0% is identical to CGA')))
+    return made[-1]
+
+
+
+# ── J. Seed-to-seed spread, one figure per family ────────────────────────────
+def _seed_markers(ax, bx, data, models, methods, seeds, report, tag):
+    """(a) sd over seeds of the Ωm mean / <σ_MCMC>, (b) CV of the Ωm width, per method."""
+    n = len(methods)
+    for k, m in enumerate(models):
+        cell = data[(m, largest(data, m))]
+        ref = sf.stats(sf.per_seed(cell, 'Classical MCMC', lambda r: sf.num(r, 'Om_std'), seeds))[0]
+        for j, (meth, lab, col, mk, fill) in enumerate(methods):
+            a = _spread(sf.per_seed(cell, meth, lambda r: sf.num(r, 'Om_mean'), seeds))
+            a = a / ref if a is not None and ref else None
+            sm = sf.stats(sf.per_seed(cell, meth, lambda r: sf.num(r, 'Om_std'), seeds))
+            b = sm[1] / sm[0] if sm[3] >= 2 and sm[0] else None
+            x = k + (j - (n - 1) / 2) * 0.62 / max(n - 1, 1)
+            for axx, v in ((ax, a), (bx, b)):
+                if v is not None:
+                    axx.plot([x], [v], mk, color=col, mfc=col if fill else 'white', ms=8,
+                             label=lab if k == 0 and axx is ax else None)
+            report.append(f'  {tag} {m:5s} {meth:14s} sd(mean)/sigma_MCMC '
+                          f'{"—" if a is None else f"{a:.3f}"}  CV(width) {"—" if b is None else f"{b:.3f}"}')
+    for axx in (ax, bx):
+        model_axis(axx, models)
+        axx.set_ylim(0, axx.get_ylim()[1] * 1.3)
+    ax.set_ylabel(r'sd over seeds of $\bar\Omega_m$  /  $\langle\sigma_{\rm MCMC}(\Omega_m)\rangle$')
+    ax.set_title('(a) Spread of the posterior mean', fontsize=11)
+    bx.set_ylabel(r'sd / mean over seeds of $\sigma(\Omega_m)$')
+    bx.set_title('(b) Spread of the posterior width', fontsize=11)
+    ax.legend(fontsize=8, loc='upper left', ncol=len(methods), framealpha=0.9)
+
+
+def _save_summary(fig, out, name):
+    path = os.path.join(out, name)
+    os.makedirs(out, exist_ok=True)
+    fig.savefig(path + '.png', dpi=COMPARE_DPI, bbox_inches='tight')
+    fig.savefig(path + '.pdf', bbox_inches='tight')
+    plt.close(fig)
+    return path + '.png'
+
+
+def _seed_note(fig, seeds, extra, y=-0.02):
+    fig.text(0.5, y, f'{len(seeds)} seeds ({seeds[0]}–{seeds[-1]}); every value is a sample sd over '
+             f'runs that differ only in the seed. {extra}', ha='center', fontsize=8, color='0.35')
+
+
+def fig_seeds_by_family(data, gdata, seeds, out, report):
+    """resumen_semillas_{qmcmc,qvmc,qga}: the seed-to-seed spread of each ladder, for its section."""
+    models = list(sf.models_and_grids(data))
+    made = []
+    # QMCMC
+    fig, (ax, bx) = plt.subplots(1, 2, figsize=(13, 5.0))
+    _seed_markers(ax, bx, data, models,
+                  [('Classical MCMC', 'classical MCMC', cmq.C_CLASSICAL, 'o', False),
+                   ('QMCMC 50%', 'QMCMC 50%', '#ff7f0e', 's', True),
+                   ('QMCMC 100%', 'QMCMC 100%', cmq.C_QUANTUM, 'o', True)], seeds, report, 'seeds-qmcmc')
+    _seed_note(fig, seeds, 'Largest grid of each model.')
+    fig.suptitle('QMCMC: seed-to-seed spread', fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=(0, 0.0, 1, 0.94))
+    made.append(_save_summary(fig, out, 'resumen_semillas_qmcmc'))
+    # QVMC
+    mg = sf.models_and_grids(data)
+    fig, (ax, bx, cx) = plt.subplots(1, 3, figsize=(19, 5.4))
+    _seed_markers(ax, bx, data, models,
+                  [('Classical VI', 'classical VI', cmq.C_CLASSICAL, 'D', False),
+                   ('QVMC 33%', 'QVMC 50% (quantum sampling)', '#ff7f0e', 's', True),
+                   (QVMC_FULL, 'QVMC 100% (+ quantum training)', cmq.C_QUANTUM, 'D', True)],
+                  seeds, report, 'seeds-qvmc')
+    off = {m: (i - (len(mg) - 1) / 2) * 0.06 for i, m in enumerate(mg)}
+    for m, grids in mg.items():
+        col = sf.MODEL_COLORS.get(m, 'k')
+        for meth, ls, mk, mfc in ((QVMC_FULL, '-', 'o', col), ('Classical VI', ':', 'D', 'white')):
+            pts = [(n + off[m], _spread(sf.sigma_ratio(data[(m, n)], meth, seeds))) for n in grids]
+            pts = [(x, y) for x, y in pts if y is not None]
+            if pts:
+                cx.plot(*zip(*pts), ls=ls, marker=mk, color=col, mfc=mfc, lw=1.6, ms=6)
+    cx.set_xticks(sorted({n for g in mg.values() for n in g}))
+    cx.set_xlabel('nqpp (qubits per parameter)')
+    cx.set_ylabel(r'sd over seeds of $\sigma(\Omega_m)/\sigma_{\rm MCMC}(\Omega_m)$')
+    cx.set_title('(c) Spread of the width ratio against the grid', fontsize=11)
+    cx.set_ylim(bottom=0)
+    cx.grid(alpha=0.3)
+    h = [Line2D([0], [0], color=sf.MODEL_COLORS[m], lw=2, label=sf.short(m)) for m in mg]
+    h += [Line2D([0], [0], color='k', marker='o', label='QVMC 100%'),
+          Line2D([0], [0], color='k', ls=':', marker='D', mfc='white', label='classical VI')]
+    cx.legend(handles=h, fontsize=8, ncol=4, loc='upper center', bbox_to_anchor=(0.5, -0.14),
+              frameon=False)
+    _seed_note(fig, seeds, '(a), (b): largest grid of each model.', y=-0.08)
+    fig.suptitle('QVMC: seed-to-seed spread', fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=(0, 0.0, 1, 0.94))
+    made.append(_save_summary(fig, out, 'resumen_semillas_qvmc'))
+    # QGA
+    if gdata:
+        import seed_figures_genetic as sfg
+        gmg = sf.models_and_grids(gdata)
+        gm = [m for m in sf.MODEL_ORDER if m in gmg]
+        fig, axes = plt.subplots(2, len(gm), figsize=(3.6 * len(gm), 7.4), sharey='row', squeeze=False)
+        for k, m in enumerate(gm):
+            for j, meth in enumerate(sfg.METHODS):
+                xs, sd_v, n_v = [], [], []
+                for nb in gmg[m]:
+                    v = [x for x in sfg.chi2_grid(gdata[(m, nb)], meth, seeds) if x is not None]
+                    if len(v) < 2:
+                        continue
+                    xs.append(nb + (j - 2) * 0.08)
+                    sd_v.append(_spread(v))
+                    n_v.append(len({round(x, 6) for x in v}))
+                    report.append(f'  seeds-qga {m:5s} nb{nb} {meth:13s} sd {sd_v[-1]:.4f} '
+                                  f'distinct best points {n_v[-1]}/{len(v)}')
+                kw = dict(color=sfg.COLORS[meth], marker=sfg.MARKERS[meth], ls=sfg.STYLES[meth],
+                          lw=1.4, ms=5, label=meth if k == 0 else None)
+                axes[0][k].plot(xs, sd_v, **kw)
+                axes[1][k].plot(xs, n_v, **kw)
+            axes[0][k].set_title(sf.short(m), fontsize=11)
+            for r in (0, 1):
+                axes[r][k].set_xticks(gmg[m])
+                axes[r][k].grid(alpha=0.3)
+            axes[1][k].set_xlabel('n_bits per parameter')
+        axes[0][0].set_yscale('symlog', linthresh=1e-3, linscale=0.6)
+        axes[0][0].set_ylabel(r'sd over seeds of $\chi^2_{\rm grid}$')
+        axes[1][0].set_ylabel(f'distinct best grid points\n(out of {len(seeds)} seeds)')
+        axes[1][0].set_ylim(0.5, len(seeds) + 0.5)
+        h, l = axes[0][0].get_legend_handles_labels()
+        fig.legend(h, l, loc='lower center', ncol=len(l), fontsize=9, frameon=False,
+                   bbox_to_anchor=(0.5, 0.025))
+        _seed_note(fig, seeds, '1 distinct point = every seed ends on the same grid point. '
+                   'CGA and QGA q = 0% coincide.', y=-0.005)
+        fig.suptitle('QGA: seed-to-seed spread of the best grid point', fontsize=13, fontweight='bold')
+        fig.tight_layout(rect=(0, 0.07, 1, 0.95))
+        made.append(_save_summary(fig, out, 'resumen_semillas_qga'))
+    return made[-1]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('root', help='multi-seed samplers campaign (holds seeds_s<NN>/)')
@@ -755,6 +1005,8 @@ def main(argv=None):
         files.append(fig_fitness(gdata, sfg.load_traces(gtask, seeds), seeds, a.out))
         files.append(fig_comparison(data, gdata, seeds, a.out, report))
         files.append(fig_seeds(data, gdata, seeds, a.out, report))
+        files.append(fig_quantumness(data, gdata, seeds, a.out, report))
+        files.append(fig_seeds_by_family(data, gdata, seeds, a.out, report))
     if single_rows:
         files.append(fig_qvmc_single(single_rows, a.out, report))
         sh = noise_shifts(single_rows)

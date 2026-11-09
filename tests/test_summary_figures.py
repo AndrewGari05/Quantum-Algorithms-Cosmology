@@ -71,7 +71,12 @@ def test_comparison_figure_puts_every_family_on_one_page(tmp_path):
     for ext in ('.png', '.pdf'):
         assert (out / ('resumen_comparacion' + ext)).exists()
         assert (out / ('resumen_semillas' + ext)).exists()
+        assert (out / ('resumen_costo' + ext)).exists()
+        for fam in ('qmcmc', 'qvmc', 'qga'):
+            assert (out / (f'resumen_quantumness_{fam}' + ext)).exists()
+            assert (out / (f'resumen_semillas_{fam}' + ext)).exists()
     rep = (out / 'summary_report.txt').read_text(encoding='utf-8')
     assert 'compare shift lcdm  QMCMC 100%' in rep
     assert 'compare dchi2 lcdm  QGA (q=67%)' in rep
     assert 'seeds lcdm  Classical MCMC sd(mean)/sigma_MCMC' in rep
+    assert 'resumen_quantumness_qvmc (a) lcdm' in rep
