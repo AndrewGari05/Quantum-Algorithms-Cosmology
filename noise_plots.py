@@ -114,9 +114,9 @@ def _tick_label(method: str) -> str:
 
 
 def _add_note(fig, note):
-    """Small data-source note in the bottom-right corner of the figure."""
+    """Small data-source note in the top-right corner, clear of the legend."""
     if note:
-        fig.text(0.995, 0.005, note, ha='right', va='bottom', fontsize=7,
+        fig.text(0.995, 0.995, note, ha='right', va='top', fontsize=7,
                  color='0.35', style='italic')
 
 # Columns that are NOT cosmological parameters even if they end in _mean/_std.
@@ -395,7 +395,7 @@ def figure_vs_grid(rows, family, model, metric, ideal_index,
 
 def figure_at_fixed_grid(rows, family, model, grid, metrics,
                          ideal_index, out_dir, name=None,
-                         note=None) -> str | None:
+                         note=None, only=None, title=None) -> str | None:
     """(3): at FIXED nqpp / n_bits, the noise rungs side by side, per ladder rung.
 
     Grouped bars: one group per ladder method, one bar per noise rung, one
@@ -421,8 +421,10 @@ def figure_at_fixed_grid(rows, family, model, grid, metrics,
         if table:
             methods = [m for m in sorted({r['Method'] for r in sub})
                        if any((m, p) in table for p in rungs)
-                       and not campaign_io.is_hidden_method(m)]
-            panels.append((metric, table, methods))
+                       and not campaign_io.is_hidden_method(m)
+                       and (only is None or m in only)]
+            if methods:
+                panels.append((metric, table, methods))
     if not panels:
         return None
 
@@ -465,7 +467,7 @@ def figure_at_fixed_grid(rows, family, model, grid, metrics,
     fig.legend(handles, labels, loc='lower center', ncol=len(labels),
                fontsize=8, frameon=False, title=NOISE_LEGEND_TITLE,
                title_fontsize=8)
-    fig.suptitle(f'{model.upper()}, {label} = {grid}: effect of each noise '
+    fig.suptitle(title or f'{model.upper()}, {label} = {grid}: effect of each noise '
                  f'level', fontsize=11)
     fig.tight_layout(rect=(0, .06, 1, .96))
     _add_note(fig, note)
