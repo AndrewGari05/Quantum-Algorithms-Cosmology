@@ -27,6 +27,8 @@ Figures (PNG + PDF) written to ``--out``:
                                 every family (needs ``--genetic``).
 * ``resumen_ruido``             shift caused by each noise level in every noisy cell
                                 of a single-seed campaign (needs ``--single-seed``).
+* ``resumen_qvmc_rejilla``      the two panels of ``resumen_qvmc`` for every grid of a
+                                single-seed campaign, up to nqpp 9 (needs ``--single-seed``).
 
 Usage:
     python summary_figures.py SEEDS_RESULTS --out FIGS [--seeds 43-50]
@@ -515,6 +517,95 @@ def fig_comparison(data, gdata, seeds, out, report):
     return path + '.png'
 
 
+
+# ── G. QVMC on the larger grids of the single-seed campaign ──────────────────
+def _single_seed_cells(rows):
+    """``{(model, nqpp): {method: row}}`` of the ideal sampler rows."""
+    cells = defaultdict(dict)
+    for r in rows:
+        if r.get('_fam') == 'samplers' and r.get('_noi') == 'none' and r.get('_g') is not None:
+            cells[(r['_mod'], r['_g'])][r['Method']] = r
+    return cells
+
+
+def fig_qvmc_single(rows, out, report, note='single-seed campaign (seed 42)'):
+    """resumen_qvmc_rejilla: the two panels of resumen_qvmc for a single-seed campaign.
+
+    (a) sigma(Om) of QVMC 100% (+ quantum training) and of classical VI relative to
+    classical MCMC against nqpp, every grid of the campaign; (b) final-KL
+    difference QVMC 100% − classical VI per cell. One seed: no error bars and no
+    paired statistic, only the values.
+    """
+    cells = _single_seed_cells(rows)
+    if not cells:
+        return None
+    num = noise_plots._num
+    models = [m for m in sf.MODEL_ORDER if any(k[0] == m for k in cells)]
+    fig, (ax, bx) = plt.subplots(1, 2, figsize=(15, 5.6), gridspec_kw=dict(width_ratios=[1.15, 1]))
+    off = {m: (i - (len(models) - 1) / 2) * 0.06 for i, m in enumerate(models)}
+    grids_all = sorted({g for _, g in cells})
+    x, ticks, labels, sep = 0, [], [], []
+    for m in models:
+        col = sf.MODEL_COLORS.get(m, 'k')
+        grids = sorted(g for mm, g in cells if mm == m)
+        for meth, ls, mk, mfc in ((QVMC_FULL, '-', 'o', col), ('Classical VI', ':', 'D', 'white')):
+            pts = []
+            for g in grids:
+                c = cells[(m, g)]
+                a, ref = num(c.get(meth, {}).get('Om_std')), num(c.get('Classical MCMC', {}).get('Om_std'))
+                if a is not None and ref:
+                    pts.append((g + off[m], a / ref))
+            if pts:
+                ax.plot(*zip(*pts), ls=ls, marker=mk, color=col, mfc=mfc, lw=1.7, ms=6)
+                report.append(f'  single-seed width {m:5s} {meth:14s} ' +
+                              ', '.join(f'nqpp{round(xx - off[m])} {y:.3f}' for xx, y in pts))
+        for g in grids:
+            c = cells[(m, g)]
+            a, b = num(c.get(QVMC_FULL, {}).get('final_KL')), num(c.get('Classical VI', {}).get('final_KL'))
+            if a is not None and b is not None:
+                bx.plot([x], [a - b], 'o', color=col, ms=7)
+                report.append(f'  single-seed dKL   {m:5s} nqpp{g} {a - b:+.4f}')
+            ticks.append(x)
+            labels.append(str(g))
+            x += 1
+        sep.append((x - len(grids), x - 1))
+        x += 0.6
+    ax.axhline(1, color='k', ls='--', lw=0.9)
+    ax.set_xticks(grids_all)
+    ax.set_xlabel('nqpp (qubits per parameter)')
+    ax.set_ylabel(r'$\sigma(\Omega_m)\,/\,\sigma_{\rm MCMC}(\Omega_m)$')
+    ax.set_title(r'(a) Width of the $\Omega_m$ posterior', fontsize=11)
+    ax.grid(alpha=0.3)
+    h = [Line2D([0], [0], color=sf.MODEL_COLORS[m], lw=2, label=sf.short(m)) for m in models]
+    h += [Line2D([0], [0], color='k', marker='o', label='QVMC 100% (+ quantum training)'),
+          Line2D([0], [0], color='k', ls=':', marker='D', mfc='white', label='classical VI')]
+    ax.legend(handles=h, fontsize=8, ncol=2, loc='upper right', framealpha=0.9)
+    for (lo, hi), m in zip(sep, models):
+        bx.text((lo + hi) / 2, 1.02, sf.short(m), transform=bx.get_xaxis_transform(),
+                ha='center', fontsize=10)
+        if hi != ticks[-1]:
+            bx.axvline(hi + 0.8, color='0.8', lw=0.8)
+    bx.axhline(0, color='k', ls='--', lw=0.9)
+    bx.set_xticks(ticks)
+    bx.set_xticklabels(labels)
+    bx.set_xlabel('nqpp (within each model)')
+    bx.set_ylabel('final KL: QVMC 100% − classical VI')
+    bx.grid(alpha=0.3, axis='y')
+    bx.set_title('(b) Final-KL difference', fontsize=11, pad=22)
+    fig.suptitle('QVMC on larger grids: posterior width and training quality', fontsize=13,
+                 fontweight='bold')
+    fig.tight_layout(rect=(0, 0.03, 1, 0.94))
+    if note:
+        fig.text(0.995, 0.005, note, ha='right', va='bottom', fontsize=8, color='0.35',
+                 style='italic')
+    path = os.path.join(out, 'resumen_qvmc_rejilla')
+    os.makedirs(out, exist_ok=True)
+    fig.savefig(path + '.png', dpi=COMPARE_DPI, bbox_inches='tight')
+    fig.savefig(path + '.pdf', bbox_inches='tight')
+    plt.close(fig)
+    return path + '.png'
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('root', help='multi-seed samplers campaign (holds seeds_s<NN>/)')
@@ -550,6 +641,7 @@ def main(argv=None):
         files.append(fig_fitness(gdata, sfg.load_traces(gtask, seeds), seeds, a.out))
         files.append(fig_comparison(data, gdata, seeds, a.out, report))
     if single_rows:
+        files.append(fig_qvmc_single(single_rows, a.out, report))
         sh = noise_shifts(single_rows)
         if sh:
             files.append(fig_noise(sh, a.out, report))

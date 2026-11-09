@@ -50,12 +50,14 @@ def test_main_writes_the_summary_figures(tmp_path):
         assert summary_figures.main([str(tmp_path / 'multi'), '--out', str(out),
                                      '--single-seed', one]) == 0
     for name in ('resumen_qmcmc', 'resumen_qvmc', 'resumen_posteriores_qvmc',
-                 'resumen_kl_qvmc', 'resumen_rhat_qmcmc', 'resumen_ruido'):
+                 'resumen_kl_qvmc', 'resumen_rhat_qmcmc', 'resumen_ruido',
+                 'resumen_qvmc_rejilla'):
         for ext in ('.png', '.pdf'):
             assert (out / (name + ext)).exists(), name + ext
     rep = (out / 'summary_report.txt').read_text(encoding='utf-8')
     assert 'single-seed sigma lcdm: nqpp6' in rep and 'nqpp7' in rep
     assert 'noise readout' in rep
+    assert 'single-seed width lcdm  QVMC 67%' in rep and 'nqpp7' in rep
 
 
 def test_comparison_figure_puts_every_family_on_one_page(tmp_path):
