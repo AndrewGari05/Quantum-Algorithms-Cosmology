@@ -27,6 +27,9 @@ Figures (PNG + PDF) written to ``--out``:
                                 every family (needs ``--genetic``).
 * ``resumen_ruido``             shift caused by each noise level in every noisy cell
                                 of a single-seed campaign (needs ``--single-seed``).
+* ``resumen_semillas``          seed-to-seed spread of every method: mean and width of
+                                the samplers, QVMC width ratio vs nqpp, genetic best
+                                grid point vs n_bits (needs ``--genetic``).
 * ``resumen_qvmc_rejilla``      the two panels of ``resumen_qvmc`` for every grid of a
                                 single-seed campaign, up to nqpp 9 (needs ``--single-seed``).
 
@@ -606,6 +609,117 @@ def fig_qvmc_single(rows, out, report, note='single-seed campaign (seed 42)'):
     return path + '.png'
 
 
+
+# ── H. Seed-to-seed spread ────────────────────────────────────────────────────
+SEED_METHODS = [('Classical MCMC', 'classical MCMC', cmq.C_CLASSICAL, 'o', False),
+                ('QMCMC 100%', 'QMCMC 100%', cmq.C_QUANTUM, 'o', True),
+                ('Classical VI', 'classical VI', cmq.C_CLASSICAL, 'D', False),
+                (QVMC_FULL, 'QVMC 100% (+ quantum training)', cmq.C_QUANTUM, 'D', True)]
+
+
+def _spread(vals):
+    """Sample sd across seeds of the usable values (None with fewer than two)."""
+    _m, sd, _se, n = sf.stats(vals)
+    return sd if n >= 2 else None
+
+
+def fig_seeds(data, gdata, seeds, out, report):
+    """resumen_semillas: how much each method changes when only the seed changes.
+
+    (a) sd across seeds of the Ωm posterior mean, in units of the mean MCMC
+    posterior width, and (b) coefficient of variation of the Ωm posterior width,
+    for every sampler at the largest grid of each model; (c) sd across seeds of
+    the QVMC and classical-VI width ratio against nqpp; (d) sd across seeds of
+    the best grid χ² of every genetic rung against n_bits. Only the seed changes
+    between the runs that enter one value.
+    """
+    mg = sf.models_and_grids(data)
+    models = list(mg)
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9.4))
+    (ax, bx), (cx, dx) = axes
+    for k, m in enumerate(models):
+        cell = data[(m, largest(data, m))]
+        ref = sf.stats(sf.per_seed(cell, 'Classical MCMC', lambda r: sf.num(r, 'Om_std'), seeds))[0]
+        for j, (meth, lab, col, mk, fill) in enumerate(SEED_METHODS):
+            mu = sf.per_seed(cell, meth, lambda r: sf.num(r, 'Om_mean'), seeds)
+            sg = sf.per_seed(cell, meth, lambda r: sf.num(r, 'Om_std'), seeds)
+            a = _spread(mu)
+            a = a / ref if a is not None and ref else None
+            sm = sf.stats(sg)
+            b = sm[1] / sm[0] if sm[3] >= 2 and sm[0] else None
+            for axx, v in ((ax, a), (bx, b)):
+                if v is not None:
+                    x = k + (j - 1.5) * 0.17
+                    axx.plot([x], [v], mk, color=col, mfc=col if fill else 'white', ms=8,
+                             label=lab if k == 0 and axx is ax else None)
+            report.append(f'  seeds {m:5s} {meth:14s} sd(mean)/sigma_MCMC '
+                          f'{"—" if a is None else f"{a:.3f}"}  CV(width) '
+                          f'{"—" if b is None else f"{b:.3f}"}')
+    for axx in (ax, bx):
+        model_axis(axx, models)
+        axx.set_ylim(bottom=0)
+    ax.set_ylabel(r'sd over seeds of $\bar\Omega_m$  /  $\langle\sigma_{\rm MCMC}(\Omega_m)\rangle$')
+    ax.set_title('(a) Spread of the posterior mean', fontsize=11)
+    bx.set_ylabel(r'sd / mean over seeds of $\sigma(\Omega_m)$')
+    bx.set_title('(b) Spread of the posterior width', fontsize=11)
+    ax.legend(fontsize=8, loc='upper left', framealpha=0.9)
+    off = {m: (i - (len(mg) - 1) / 2) * 0.06 for i, m in enumerate(mg)}
+    for m, grids in mg.items():
+        col = sf.MODEL_COLORS.get(m, 'k')
+        for meth, ls, mk, mfc in ((QVMC_FULL, '-', 'o', col), ('Classical VI', ':', 'D', 'white')):
+            pts = [(n + off[m], _spread(sf.sigma_ratio(data[(m, n)], meth, seeds))) for n in grids]
+            pts = [(x, y) for x, y in pts if y is not None]
+            if pts:
+                cx.plot(*zip(*pts), ls=ls, marker=mk, color=col, mfc=mfc, lw=1.6, ms=6)
+    cx.set_xticks(sorted({n for g in mg.values() for n in g}))
+    cx.set_xlabel('nqpp (qubits per parameter)')
+    cx.set_ylabel(r'sd over seeds of $\sigma(\Omega_m)/\sigma_{\rm MCMC}(\Omega_m)$')
+    cx.set_title('(c) QVMC and classical VI: spread of the width ratio', fontsize=11)
+    cx.set_ylim(bottom=0)
+    cx.grid(alpha=0.3)
+    h = [Line2D([0], [0], color=sf.MODEL_COLORS[m], lw=2, label=sf.short(m)) for m in mg]
+    h += [Line2D([0], [0], color='k', marker='o', label='QVMC 100% (+ quantum training)'),
+          Line2D([0], [0], color='k', ls=':', marker='D', mfc='white', label='classical VI')]
+    cx.legend(handles=h, fontsize=8, ncol=4, loc='upper center', bbox_to_anchor=(0.5, -0.14),
+              frameon=False)
+    if gdata:
+        import seed_figures_genetic as sfg
+        gmg = sf.models_and_grids(gdata)
+        goff = {mt: (j - 2) * 0.09 for j, mt in enumerate(sfg.METHODS)}
+        for meth in sfg.METHODS:
+            xs, ys = [], []
+            for m, grids in gmg.items():
+                for nb in grids:
+                    v = _spread(sfg.chi2_grid(gdata[(m, nb)], meth, seeds))
+                    if v is not None:
+                        xs.append(nb + goff[meth])
+                        ys.append(v)
+            dx.scatter(xs, ys, marker=sfg.MARKERS[meth], color=sfg.COLORS[meth], s=30,
+                       label=meth, zorder=3, alpha=0.85)
+            nz = sum(1 for y in ys if y > sfg.TOL)
+            report.append(f'  seeds genetic {meth:13s} cells with non-zero sd: {nz}/{len(ys)}')
+        dx.set_yscale('symlog', linthresh=1e-3, linscale=0.6)
+        dx.set_xticks(sorted({n for g in gmg.values() for n in g}))
+        dx.set_xlabel('n_bits per parameter (all models)')
+        dx.set_ylabel(r'sd over seeds of $\chi^2_{\rm grid}$')
+        dx.set_title('(d) Genetic ladder: spread of the best grid point', fontsize=11)
+        dx.grid(alpha=0.3)
+        dx.legend(fontsize=8, loc='upper right', framealpha=0.9)
+    else:
+        dx.axis('off')
+    fig.text(0.5, -0.02, f'{len(seeds)} seeds ({seeds[0]}–{seeds[-1]}); each value is a sample sd '
+             'across seeds of runs that differ only in the seed. (a), (b): largest grid of each model.',
+             ha='center', fontsize=8, color='0.35')
+    fig.suptitle('Seed-to-seed spread of every method', fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=(0, 0.02, 1, 0.96))
+    path = os.path.join(out, 'resumen_semillas')
+    os.makedirs(out, exist_ok=True)
+    fig.savefig(path + '.png', dpi=COMPARE_DPI, bbox_inches='tight')
+    fig.savefig(path + '.pdf', bbox_inches='tight')
+    plt.close(fig)
+    return path + '.png'
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('root', help='multi-seed samplers campaign (holds seeds_s<NN>/)')
@@ -640,6 +754,7 @@ def main(argv=None):
                                         grid='nb')
         files.append(fig_fitness(gdata, sfg.load_traces(gtask, seeds), seeds, a.out))
         files.append(fig_comparison(data, gdata, seeds, a.out, report))
+        files.append(fig_seeds(data, gdata, seeds, a.out, report))
     if single_rows:
         files.append(fig_qvmc_single(single_rows, a.out, report))
         sh = noise_shifts(single_rows)
